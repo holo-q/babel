@@ -1,0 +1,37 @@
+[package]
+name = "claude-babel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "babel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Daemon dependencies
+tokio = { version = "1", features = ["full", "signal", "sync"] }
+notify = "6"
+notify-debouncer-mini = "0.4"
+users = "0.11"
+
+# Terminal output
+console = "0.15"          # Colors, styling, terminal utils (indicatif's sibling)
+unicode-width = "0.2"     # Proper alignment with unicode chars
+
+# LLM summarization
+reqwest = { version = "0.12", features = ["json"] }
+
+# Logging - tracing ecosystem for structured, async-safe logging
+# Sink: journald (view with: journalctl -t babel)
+# Level: RUST_LOG env var (default: info), e.g. RUST_LOG=claude_babel=debug
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-journald = "0.3"

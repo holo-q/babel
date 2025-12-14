@@ -1,0 +1,217 @@
+//! IPC Protocol - Unix socket communication between CLI and daemon
+//!
+//! Protocol: newline-delimited JSON over unix socket
+//! Socket location: $XDG_RUNTIME_DIR/babel.sock (or /tmp/babel.sock fallback)
+//!
+//! Request/Response pattern - client sends Request, daemon sends Response.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+
+use crate::claude_storage::SessionInfo;
+use crate::discovery::ClaudeWindow;
+use crate::events::EventMessage;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Protocol Messages
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Request from CLI to daemon
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum Request {
+    /// List all Claude windows (fast - from cache)
+    List,
+
+    /// List all Claude windows with fingerprint data (slow - extracts scrollback)
+    ListWithFingerprints,
+
+    /// Get status of specific window (or focused if None)
+    Status { window_id: Option<u64> },
+
+    /// Get full session info for a window (triggers enrichment if needed)
+    Enrich { window_id: u64 },
+
+    /// Focus a window
+    Focus { window_id: u64 },
+
+    /// Get scrollback from window
+    Scroll { window_id: u64 },
+
+    /// Send text to window
+    Send { window_id: u64, text: String },
+
+    /// Tag window with icon
+    Tag { window_id: u64, icon: String },
+
+    /// Mark window as read
+    MarkRead { window_id: u64 },
+
+    /// Get recent history from ~/.claude
+    History { limit: usize },
+
+    /// Ping - check if daemon is alive
+    Ping,
+
+    /// Shutdown daemon
+    Shutdown,
+
+    /// Force refresh - re-scan kitty windows
+    Refresh,
+
+    /// Subscribe to events (connection stays open for streaming)
+    Subscribe {
+        /// Event types to receive (empty = all events)
+        events: Vec<String>,
+    },
+
+    /// Get current workspace titles (from authoritative cache)
+    Titles,
+
+    /// Force refresh titles for workspace(s)
+    /// If workspace is None, refreshes all workspaces with Claude windows
+    TitleRefresh { workspace: Option<i32> },
+}
+
+/// Response from daemon to CLI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Response {
+    /// Success with window list
+    Windows { windows: Vec<ClaudeWindow> },
+
+    /// Success with single window
+    Window { window: Option<ClaudeWindow> },
+
+    /// Success with session history
+    History { sessions: Vec<SessionInfo> },
+
+    /// Success with scrollback text
+    Scrollback { text: String },
+
+    /// Simple success acknowledgment
+    Ok { message: String },
+
+    /// Error response
+    Error { message: String },
+
+    /// Pong response to ping
+    Pong { uptime_secs: u64 },
+
+    /// Subscription acknowledged
+    Subscribed { subscriber_id: u64 },
+
+    /// Event notification (sent to subscribers)
+    Event { event: EventMessage },
+
+    /// Workspace titles response
+    /// Keys are workspace numbers as strings (JSON doesn't support integer map keys)
+    Titles { titles: std::collections::HashMap<String, String> },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Socket Path
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Get the daemon socket path
+pub fn socket_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime_dir).join("babel.sock")
+    } else {
+        PathBuf::from("/tmp").join(format!("babel-{}.sock", users::get_current_uid()))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Client
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Send a request to the daemon and get a response
+pub async fn send_request(request: &Request) -> Result<Response> {
+    let sock_path = socket_path();
+
+    let mut stream = UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("Failed to connect to daemon at {}", sock_path.display()))?;
+
+    // Send request as JSON line
+    let mut request_json = serde_json::to_string(request)?;
+    request_json.push('\n');
+    stream.write_all(request_json.as_bytes()).await?;
+
+    // Read response
+    let mut reader = BufReader::new(stream);
+    let mut response_line = String::new();
+    reader.read_line(&mut response_line).await?;
+
+    let response: Response = serde_json::from_str(&response_line)
+        .context("Failed to parse daemon response")?;
+
+    Ok(response)
+}
+
+/// Check if daemon is running
+pub async fn is_daemon_running() -> bool {
+    send_request(&Request::Ping).await.is_ok()
+}
+
+/// Synchronous wrapper for send_request (for non-async CLI)
+pub fn send_request_sync(request: &Request) -> Result<Response> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(send_request(request))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Server
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Create and bind the daemon socket
+pub async fn create_listener() -> Result<UnixListener> {
+    let sock_path = socket_path();
+
+    // Remove existing socket if present
+    if sock_path.exists() {
+        std::fs::remove_file(&sock_path)
+            .with_context(|| format!("Failed to remove old socket at {}", sock_path.display()))?;
+    }
+
+    let listener = UnixListener::bind(&sock_path)
+        .with_context(|| format!("Failed to bind socket at {}", sock_path.display()))?;
+
+    // Make socket accessible
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(listener)
+}
+
+/// Read a request from a client connection
+pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
+    let mut line = String::new();
+    let bytes_read = stream.read_line(&mut line).await?;
+
+    if bytes_read == 0 {
+        return Ok(None); // Connection closed
+    }
+
+    let request: Request = serde_json::from_str(&line)
+        .context("Failed to parse client request")?;
+
+    Ok(Some(request))
+}
+
+/// Send a response to a client
+pub async fn send_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
+    let mut response_json = serde_json::to_string(response)?;
+    response_json.push('\n');
+    stream.write_all(response_json.as_bytes()).await?;
+    Ok(())
+}
