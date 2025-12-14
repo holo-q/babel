@@ -26,6 +26,9 @@ users = "0.11"
 console = "0.15"          # Colors, styling, terminal utils (indicatif's sibling)
 unicode-width = "0.2"     # Proper alignment with unicode chars
 
+# UI
+rofi = "0.4"              # Spawn rofi menus and parse selections
+
 # LLM summarization
 reqwest = { version = "0.12", features = ["json"] }
 

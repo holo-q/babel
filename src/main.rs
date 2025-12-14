@@ -65,10 +65,10 @@ enum Commands {
         window_id: Option<u64>,
     },
 
-    /// Focus a specific Claude window
+    /// Focus a Claude window (rofi picker if no ID given)
     Focus {
-        /// Kitty window ID to focus
-        window_id: u64,
+        /// Kitty window ID to focus (omit for interactive rofi picker)
+        window_id: Option<u64>,
     },
 
     /// Get scrollback from a window
@@ -548,7 +548,74 @@ async fn cmd_history(limit: usize, json: bool) -> Result<()> {
 // Action Commands - Daemon or Direct
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn cmd_focus(window_id: u64) -> Result<()> {
+async fn cmd_focus(window_id: Option<u64>) -> Result<()> {
+    // Direct focus if ID provided
+    if let Some(id) = window_id {
+        return focus_by_id(id).await;
+    }
+
+    // Interactive picker via rofi
+    let windows = get_windows().await?;
+    if windows.is_empty() {
+        println!("No Claude sessions found");
+        return Ok(());
+    }
+
+    // Sort by workspace for consistent ordering
+    let mut windows = windows;
+    windows.sort_by(|a, b| {
+        let ws_a = a.workspace.unwrap_or(999);
+        let ws_b = b.workspace.unwrap_or(999);
+        ws_a.cmp(&ws_b)
+            .then(a.os_window_id.cmp(&b.os_window_id))
+            .then(a.kitty_id.cmp(&b.kitty_id))
+    });
+
+    // Format entries for rofi: "[ws] title │ ~/path"
+    let entries: Vec<(u64, String)> = windows.iter().map(|win| {
+        let ws = match win.workspace {
+            Some(-1) => "S".to_string(),  // Sticky
+            Some(n) => format!("{}", n + 1),
+            None => "?".to_string(),
+        };
+
+        // Strip ✳ prefix from active sessions
+        let title = win.title.strip_prefix("✳ ").unwrap_or(&win.title);
+        let title_short: String = title.chars().take(40).collect();
+        let title_display = if title.len() > 40 {
+            format!("{}…", title_short)
+        } else {
+            title_short
+        };
+
+        // Compact cwd
+        let cwd = win.cwd
+            .strip_prefix(dirs::home_dir().unwrap_or_default())
+            .map(|p| format!("~/{}", p.display()))
+            .unwrap_or_else(|_| win.cwd.display().to_string());
+
+        let label = format!("[{}] {} │ {}", ws, title_display, cwd);
+        (win.kitty_id, label)
+    }).collect();
+
+    // Launch rofi
+    let labels: Vec<&str> = entries.iter().map(|(_, l)| l.as_str()).collect();
+
+    match rofi::Rofi::new(&labels).prompt("Claude").run() {
+        Ok(choice) => {
+            if let Some((id, _)) = entries.iter().find(|(_, l)| l == &choice) {
+                focus_by_id(*id).await?;
+            }
+        }
+        Err(rofi::Error::Interrupted) => {} // User cancelled (Esc)
+        Err(e) => anyhow::bail!("Rofi error: {}", e),
+    }
+
+    Ok(())
+}
+
+/// Focus a window by its kitty ID (via daemon or direct)
+async fn focus_by_id(window_id: u64) -> Result<()> {
     // Try daemon first
     if let Ok(Response::Ok { message }) = send_request(&Request::Focus { window_id }).await {
         println!("{}", message);
