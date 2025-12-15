@@ -27,15 +27,18 @@
 //! The daemon is literally just "BabelState + event loop + IPC server."
 //! Local mode initializes the same state, uses it, and exits.
 
-use anyhow::{Result, bail};
-use tracing::{debug, warn};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail, Context};
+use tracing::{debug, warn, info};
 
 use crate::daemon::DaemonState;
 use crate::discovery::ClaudeWindow;
-use crate::claude_storage::SessionInfo;
+use crate::claude_storage::{SessionInfo, MigrateResult};
 use crate::ipc::{send_request, is_daemon_running, Request, Response};
 use crate::kitty;
 use crate::overlay;
+use crate::state::{detect_state, SessionState};
 
 /// Core API for Claude session management
 ///
@@ -348,6 +351,300 @@ impl BabelCore {
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State Detection
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Get the current state of a Claude session (idle, thinking, tool use, etc.)
+    ///
+    /// Analyzes the window's scrollback to determine what Claude is currently doing.
+    pub async fn get_window_state(&self, window_id: u64) -> Result<SessionState> {
+        let scrollback = self.scrollback(window_id, Some(50)).await?;
+        Ok(detect_state(&scrollback))
+    }
+
+    /// Find all windows whose cwd is inside the given path
+    ///
+    /// Returns windows along with their current state and relative path from source.
+    /// Used by migration to detect affected terminals.
+    pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingWindow>> {
+        // Canonicalize source path for accurate comparison
+        let source = source.canonicalize()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().join(source));
+
+        let windows = self.windows().await?;
+        let mut conflicts = Vec::new();
+
+        for win in windows {
+            if win.cwd.starts_with(&source) {
+                let state = self.get_window_state(win.kitty_id).await
+                    .unwrap_or(SessionState::Unknown);
+
+                let relative_path = win.cwd
+                    .strip_prefix(&source)
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+
+                conflicts.push(ConflictingWindow {
+                    window: win,
+                    state,
+                    relative_path,
+                });
+            }
+        }
+
+        Ok(conflicts)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Terminal Migration
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Migrate an idle terminal to a new working directory
+    ///
+    /// Sends: Ctrl-C (ensure clean prompt) → cd <new_path> → claude -r <session_id>
+    /// This allows the terminal to continue working after a directory move.
+    pub async fn migrate_terminal(&self, window_id: u64, new_cwd: &Path, session_id: Option<&str>) -> Result<()> {
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        // Ctrl-C to ensure clean prompt
+        self.send(window_id, "\x03").await?;
+        sleep(Duration::from_millis(100)).await;
+
+        // cd to new directory
+        let cd_cmd = format!("cd {}\n", shell_escape(new_cwd));
+        self.send(window_id, &cd_cmd).await?;
+        sleep(Duration::from_millis(50)).await;
+
+        // Resume session if we have the ID
+        if let Some(sid) = session_id {
+            let resume_cmd = format!("claude -r {}\n", sid);
+            self.send(window_id, &resume_cmd).await?;
+        }
+
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Project Migration
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Migrate a project directory, updating Claude's storage and active terminals
+    ///
+    /// This is the unified migration operation that:
+    /// 1. Migrates idle terminals to the new path (if migrate_terminals is true)
+    /// 2. Renames the project folder in ~/.claude/projects/
+    /// 3. Updates path references in ~/.claude/history.jsonl
+    /// 4. Refreshes internal state to reflect changes
+    ///
+    /// Returns the migration result and list of windows that were migrated.
+    pub async fn migrate_project(
+        &mut self,
+        old_path: &Path,
+        new_path: &Path,
+        options: MigrateOptions,
+    ) -> Result<MigrateOutcome> {
+        info!(?old_path, ?new_path, dry_run = options.dry_run, "starting project migration");
+
+        // Canonicalize paths
+        let old_canonical = old_path.canonicalize()
+            .unwrap_or_else(|_| old_path.to_path_buf());
+        let new_canonical = new_path.canonicalize().unwrap_or_else(|_| {
+            if new_path.is_absolute() {
+                new_path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(new_path))
+                    .unwrap_or_else(|_| new_path.to_path_buf())
+            }
+        });
+
+        // Find conflicting windows
+        let conflicts = self.find_windows_in_path(&old_canonical).await?;
+
+        // Partition by migratable state
+        let (migratable, active): (Vec<_>, Vec<_>) = conflicts.iter().partition(|c| {
+            matches!(c.state, SessionState::Idle | SessionState::AwaitingInput)
+        });
+
+        // Check for blocking active windows
+        if !active.is_empty() && !options.force {
+            bail!(
+                "{} active Claude session(s) in source path would break. \
+                Use force=true to proceed anyway.",
+                active.len()
+            );
+        }
+
+        let mut migrated_terminals = Vec::new();
+
+        // Migrate idle terminals (before moving the directory)
+        if options.migrate_terminals && !options.dry_run {
+            for conflict in &migratable {
+                let new_cwd = new_canonical.join(&conflict.relative_path);
+                let session_id = conflict.window.session_id.as_deref();
+
+                if let Err(e) = self.migrate_terminal(
+                    conflict.window.kitty_id,
+                    &new_cwd,
+                    session_id,
+                ).await {
+                    warn!(
+                        window_id = conflict.window.kitty_id,
+                        error = %e,
+                        "failed to migrate terminal"
+                    );
+                } else {
+                    migrated_terminals.push(conflict.window.kitty_id);
+                }
+            }
+        }
+
+        // Move the physical directory (if requested and source exists)
+        let mut directory_moved = false;
+        if options.move_directory && old_canonical.exists() && !options.dry_run {
+            // Try rename first (same filesystem)
+            if std::fs::rename(&old_canonical, &new_canonical).is_err() {
+                debug!("rename failed, falling back to copy+delete");
+                copy_dir_recursive(&old_canonical, &new_canonical)
+                    .with_context(|| format!(
+                        "Failed to copy {} → {}",
+                        old_canonical.display(), new_canonical.display()
+                    ))?;
+                std::fs::remove_dir_all(&old_canonical)
+                    .with_context(|| format!("Failed to remove source: {}", old_canonical.display()))?;
+            }
+            directory_moved = true;
+        }
+
+        // Update Claude storage (project folder + history.jsonl)
+        let storage_result = crate::claude_storage::migrate_project(
+            &old_canonical,
+            &new_canonical,
+            options.dry_run,
+        )?;
+
+        // Refresh state to reflect the changes
+        if !options.dry_run {
+            self.refresh().await?;
+        }
+
+        Ok(MigrateOutcome {
+            storage: storage_result,
+            directory_moved,
+            terminals_migrated: migrated_terminals,
+            active_terminals: active.iter().map(|c| c.window.kitty_id).collect(),
+            dry_run: options.dry_run,
+        })
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State Management
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Force refresh of internal state
+    ///
+    /// In connected mode, tells daemon to refresh. In local mode, re-initializes state.
+    pub async fn refresh(&mut self) -> Result<()> {
+        match &mut self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::Refresh).await {
+                    Ok(Response::Ok { .. }) => Ok(()),
+                    Ok(Response::Error { message }) => bail!("{}", message),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => bail!("daemon connection failed: {}", e),
+                }
+            }
+            CoreMode::Local(state) => {
+                // Re-initialize state same as connect()
+                if let Err(e) = state.refresh_windows() {
+                    warn!("failed to refresh windows: {}", e);
+                }
+                if let Err(e) = state.rebuild_summary_index() {
+                    warn!("failed to rebuild summary index: {}", e);
+                }
+                if let Err(e) = state.rebuild_fingerprint_index() {
+                    warn!("failed to rebuild fingerprint index: {}", e);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Migration Types
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A window whose cwd conflicts with a migration source path
+pub struct ConflictingWindow {
+    pub window: ClaudeWindow,
+    pub state: SessionState,
+    /// Path relative to source directory
+    pub relative_path: PathBuf,
+}
+
+/// Options for project migration
+#[derive(Debug, Clone, Default)]
+pub struct MigrateOptions {
+    /// If true, only report what would happen without making changes
+    pub dry_run: bool,
+    /// If true, move the physical directory (not just update storage)
+    pub move_directory: bool,
+    /// If true, migrate idle terminals to the new path
+    pub migrate_terminals: bool,
+    /// If true, proceed even if active terminals would break
+    pub force: bool,
+}
+
+/// Outcome of a project migration
+#[derive(Debug)]
+pub struct MigrateOutcome {
+    /// Storage migration result (project folder + history.jsonl)
+    pub storage: MigrateResult,
+    /// Whether the physical directory was moved
+    pub directory_moved: bool,
+    /// Window IDs of terminals that were migrated
+    pub terminals_migrated: Vec<u64>,
+    /// Window IDs of active terminals (not migrated)
+    pub active_terminals: Vec<u64>,
+    /// Whether this was a dry run
+    pub dry_run: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helper Functions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Escape a path for safe shell usage
+fn shell_escape(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if s.contains(' ') || s.contains('\'') || s.contains('"') || s.contains('$') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Recursively copy a directory (for cross-filesystem moves)
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     }
 
     // Connect to daemon or use ephemeral mode
-    let core = BabelCore::connect().await;
+    let mut core = BabelCore::connect().await;
 
     // Route to appropriate handler based on subcommand
     match cli.command {
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
 
         // ─── Migration & Diagnostics ─────────────────────────────────────────────
         Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
-            cli::mv::cmd_mv(&core, source, dest, dry_run, history_only, anxious, force, cli.json).await
+            cli::mv::cmd_mv(&mut core, source, dest, dry_run, history_only, anxious, force, cli.json).await
         }
 
         Commands::Fingerprint { input, window, dir, session } => {
