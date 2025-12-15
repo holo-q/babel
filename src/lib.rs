@@ -6,16 +6,58 @@
 //!
 //! ## Architecture
 //!
-//! The system has two modes:
-//! - **Direct mode**: CLI directly queries kitty and ~/.claude (slower but no daemon)
-//! - **Daemon mode**: CLI queries babeld over unix socket (instant, pre-cached)
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  CLI Layer (thin puppets)                                   │
+//! │  babel ls, babel focus, babel send, etc.                    │
+//! └─────────────────────────────────────────────────────────────┘
+//!                             │
+//!                             ▼
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  BabelCore (the brain)                                      │
+//! │  - Unified API: windows(), focus(), history(), etc.         │
+//! │  - Transparently handles daemon OR ephemeral mode           │
+//! └─────────────────────────────────────────────────────────────┘
+//!                             │
+//!               ┌─────────────┴─────────────┐
+//!               ▼                           ▼
+//! ┌─────────────────────────┐   ┌─────────────────────────┐
+//! │  Daemon Mode            │   │  Ephemeral Mode         │
+//! │  - IPC to babeld        │   │  - Direct kitty/file    │
+//! │  - Cached, instant      │   │  - On-demand loading    │
+//! └─────────────────────────┘   └─────────────────────────┘
+//! ```
 //!
-//! The daemon (`babeld`) maintains:
+//! ## Usage
+//!
+//! CLI commands should use `BabelCore` as their single entry point:
+//!
+//! ```rust,ignore
+//! use claude_babel::core::BabelCore;
+//!
+//! let core = BabelCore::connect().await;
+//!
+//! // These work identically whether daemon is running or not
+//! let windows = core.windows().await?;
+//! core.focus(42).await?;
+//! let history = core.history(10).await?;
+//! ```
+//!
+//! ## Daemon Mode
+//!
+//! When `babeld` is running, BabelCore connects via unix socket for instant responses.
+//! The daemon maintains:
 //! - Live window → session mappings
 //! - Summary index for fast title matching
 //! - Fingerprint index for reliable session matching (scrollback → JSONL)
 //! - Event pub/sub for GUI frontends (no polling required)
-//! - Watches for kitty and file changes
+//! - File and kitty change watching
+//!
+//! ## Ephemeral Mode
+//!
+//! When daemon is unavailable, BabelCore populates state on-demand. Each operation
+//! queries kitty and ~/.claude directly. Results are cached for the lifetime of the
+//! BabelCore instance to avoid redundant queries within a single command execution
 
 pub mod claude_storage;
 pub mod kitty;
@@ -29,3 +71,4 @@ pub mod events;
 pub mod fingerprint;
 pub mod summarizer;
 pub mod wset;
+pub mod core;

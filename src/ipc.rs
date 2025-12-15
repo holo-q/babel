@@ -141,7 +141,10 @@ pub enum Response {
 
     // ─── WSet Responses ─────────────────────────────────────────────────────────
 
-    /// WSet saved successfully
+    /// WSet saved successfully (full data)
+    WSet { wset: crate::wset::WSet },
+
+    /// WSet saved summary (legacy)
     WSetSaved {
         name: String,
         wspaces: usize,
