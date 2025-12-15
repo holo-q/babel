@@ -172,8 +172,15 @@ enum Commands {
     },
 
     /// List all kitty terminals (not just Claude)
+    ///
+    /// By default, shows terminals from the current kitty socket.
+    /// Use --all to scan ALL kitty sockets on the system (finds orphaned terminals).
     #[command()]
-    LsTerminals,
+    LsTerminals {
+        /// Scan all kitty sockets (finds orphaned terminals on other instances)
+        #[arg(short, long)]
+        all: bool,
+    },
 
     /// List all kitty panes with their IDs
     ///
@@ -509,7 +516,7 @@ async fn main() -> Result<()> {
 
         // Data commands - use daemon if available
         Commands::Ls { details } => cmd_list(cli.json, details).await,
-        Commands::LsTerminals => cmd_ls_terminals(cli.json).await,
+        Commands::LsTerminals { all } => cmd_ls_terminals(cli.json, all).await,
         Commands::LsPanes => cmd_ls_panes(cli.json).await,
         Commands::GetWindow { window_id } => cmd_check_window(window_id, cli.json).await,
         Commands::GetPane { pane_name } => cmd_check_pane(pane_name, cli.json).await,
@@ -662,9 +669,76 @@ async fn cmd_list(json: bool, details: bool) -> Result<()> {
 }
 
 /// List all kitty terminals (not just Claude sessions)
-async fn cmd_ls_terminals(json: bool) -> Result<()> {
-    use claude_babel::kitty::{list_windows, detect_claude_signals};
+async fn cmd_ls_terminals(json: bool, scan_all_sockets: bool) -> Result<()> {
+    use claude_babel::kitty::{list_windows, detect_claude_signals, discover_all_instances};
 
+    if scan_all_sockets {
+        // Scan ALL kitty sockets on the system
+        let instances = discover_all_instances();
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&instances)?);
+            return Ok(());
+        }
+
+        if instances.is_empty() {
+            println!("No kitty sockets found");
+            return Ok(());
+        }
+
+        let total_windows: usize = instances.iter().map(|i| i.windows.len()).sum();
+        let responsive: usize = instances.iter().filter(|i| i.is_responsive).count();
+
+        println!("Kitty instances ({} sockets, {} responsive, {} total windows):",
+            instances.len(), responsive, total_windows);
+        println!();
+
+        for instance in &instances {
+            let status = if instance.is_current {
+                "● current"
+            } else if instance.is_responsive {
+                "○ other"
+            } else {
+                "✗ dead"
+            };
+
+            let pid_str = instance.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+
+            println!("  {} [PID {}] {} windows",
+                status, pid_str, instance.windows.len());
+
+            if let Some(ref err) = instance.error {
+                println!("    Error: {}", err);
+                continue;
+            }
+
+            // Show windows for this instance
+            for win in &instance.windows {
+                let signals = detect_claude_signals(win);
+                let cmdline = win.foreground_processes
+                    .first()
+                    .and_then(|p| p.cmdline.first())
+                    .map(|s| s.rsplit('/').next().unwrap_or(s))
+                    .unwrap_or("?");
+
+                let title: String = win.title.chars().take(40).collect();
+                let title = if win.title.len() > 40 { format!("{}…", title) } else { title };
+
+                println!("    {:>5} {} {:8}  {}",
+                    win.id, signals.indicator(), cmdline, title);
+            }
+            println!();
+        }
+
+        if instances.len() > 1 {
+            println!("⚠ Multiple kitty instances detected - terminals may be unreachable!");
+            println!("  Consider: pkill kitty && kitty (to consolidate)");
+        }
+
+        return Ok(());
+    }
+
+    // Default: just show current socket
     let windows = list_windows().context("Failed to list kitty windows")?;
 
     if json {
@@ -734,6 +808,7 @@ async fn cmd_ls_terminals(json: bool) -> Result<()> {
 
     println!();
     println!("Legend: ● = claude running, ◐ = has ✳ title, ○ = babel-tagged");
+    println!("Tip: Use --all to scan all kitty sockets (finds orphaned terminals)");
 
     Ok(())
 }

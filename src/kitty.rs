@@ -83,6 +83,153 @@ pub fn kitty_socket_path() -> String {
     format!("unix:{}", canonical)
 }
 
+/// Information about a kitty socket and its windows
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KittyInstance {
+    /// Socket path (e.g., "unix:/run/user/1000/kitty.sock-12345")
+    pub socket: String,
+    /// PID extracted from socket name (if available)
+    pub pid: Option<u32>,
+    /// Whether this is the "current" socket (from KITTY_LISTEN_ON or first found)
+    pub is_current: bool,
+    /// Whether we can successfully communicate with this socket
+    pub is_responsive: bool,
+    /// Windows accessible through this socket
+    pub windows: Vec<KittyWindow>,
+    /// Error message if not responsive
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Find all kitty sockets on the system
+///
+/// Returns paths to all `kitty.sock-*` files in XDG_RUNTIME_DIR.
+/// Does NOT verify if they're responsive - use `discover_all_instances()` for that.
+pub fn find_all_sockets() -> Vec<String> {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+
+    let mut sockets = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if name_str.starts_with("kitty.sock-") {
+                if entry.file_type().map(|ft| ft.is_socket()).unwrap_or(false) {
+                    sockets.push(format!("unix:{}", entry.path().display()));
+                }
+            }
+        }
+    }
+
+    sockets
+}
+
+/// List windows from a specific socket
+///
+/// Like `list_windows()` but targets a specific socket instead of the default.
+pub fn list_windows_from_socket(socket: &str) -> Result<Vec<KittyWindow>> {
+    let output = Command::new("kitten")
+        .args(["@", "--to", socket, "ls"])
+        .output()
+        .context("Failed to execute 'kitten @ ls'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ ls failed: {}", stderr);
+    }
+
+    let raw_os_windows: Vec<RawOsWindow> = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse 'kitten @ ls' output")?;
+
+    // Flatten: OS Windows -> Tabs -> Windows
+    let mut windows = Vec::new();
+    for os_win in raw_os_windows {
+        let os_window_id = os_win.id;
+        let platform_window_id = os_win.platform_window_id;
+
+        for tab in os_win.tabs {
+            for raw in tab.windows {
+                windows.push(KittyWindow {
+                    id: raw.id,
+                    title: raw.title,
+                    cwd: raw.cwd,
+                    is_focused: raw.is_focused,
+                    is_active: raw.is_active,
+                    foreground_processes: raw.foreground_processes
+                        .into_iter()
+                        .map(|proc| ForegroundProcess {
+                            pid: proc.pid,
+                            cmdline: proc.cmdline,
+                            cwd: proc.cwd,
+                        })
+                        .collect(),
+                    user_vars: raw.user_vars,
+                    os_window_id,
+                    platform_window_id,
+                });
+            }
+        }
+    }
+
+    Ok(windows)
+}
+
+/// Discover all kitty instances on the system
+///
+/// Finds all kitty sockets, queries each one, and returns information about
+/// which are responsive and what windows they contain. This helps identify
+/// "orphaned" terminals on different sockets.
+pub fn discover_all_instances() -> Vec<KittyInstance> {
+    let current_socket = kitty_socket_path();
+    let all_sockets = find_all_sockets();
+
+    let mut instances = Vec::new();
+
+    for socket in all_sockets {
+        // Extract PID from socket name (kitty.sock-12345 -> 12345)
+        let pid = socket
+            .rsplit("kitty.sock-")
+            .next()
+            .and_then(|s| s.parse::<u32>().ok());
+
+        let is_current = socket == current_socket;
+
+        // Try to query windows from this socket
+        match list_windows_from_socket(&socket) {
+            Ok(windows) => {
+                instances.push(KittyInstance {
+                    socket,
+                    pid,
+                    is_current,
+                    is_responsive: true,
+                    windows,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                instances.push(KittyInstance {
+                    socket,
+                    pid,
+                    is_current,
+                    is_responsive: false,
+                    windows: Vec::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    // Sort: current first, then by PID
+    instances.sort_by(|a, b| {
+        b.is_current.cmp(&a.is_current)
+            .then(a.pid.cmp(&b.pid))
+    });
+
+    instances
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data Structures - Mirror kitty's JSON output
 // ═══════════════════════════════════════════════════════════════════════════════
