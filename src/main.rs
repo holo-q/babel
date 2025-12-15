@@ -90,13 +90,13 @@ const RESET: &str = "\x1b[0m";
 
 /// Query commands (read-only, safe) - rendered italic in help
 const QUERY_COMMANDS: &[&str] = &[
-    "ls", "ls-terminals", "ls-panes", "check-window", "check-pane",
-    "get-scrollback", "history", "fingerprint", "focus"
+    "ls", "ls-terminals", "ls-panes", "get-window", "get-pane",
+    "get-scrollback", "history"
 ];
 
 /// Mutation commands (state-changing) - rendered underlined in help
 const MUTATION_COMMANDS: &[&str] = &[
-    "send", "set-icon", "set-read", "set-title", "mv"
+    "focus", "send", "set-icon", "set-read", "set-title", "mv"
 ];
 
 /// Style command names in help output based on their semantic category
@@ -182,22 +182,22 @@ enum Commands {
     #[command( alias = "lsp")]
     LsPanes,
 
-    /// Check status of a kitty window
+    /// Get status of a kitty window
     ///
     /// Shows detailed information about a Claude window including session info,
     /// fingerprint data, and activity state. If no window ID is provided, shows
     /// the currently focused Claude window.
-    #[command( alias = "cw")]
-    CheckWindow {
+    #[command(alias = "gw")]
+    GetWindow {
         /// Kitty window ID to query (omit for focused window)
         window_id: Option<u64>,
     },
 
-    /// Check status of a panel pane
+    /// Get status of a panel pane
     ///
     /// Shows information about a richspace-babel panel pane.
-    #[command( alias = "cp")]
-    CheckPane {
+    #[command(alias = "gp")]
+    GetPane {
         /// Pane name to query
         pane_name: Option<String>,
     },
@@ -511,8 +511,8 @@ async fn main() -> Result<()> {
         Commands::Ls { details } => cmd_list(cli.json, details).await,
         Commands::LsTerminals => cmd_ls_terminals(cli.json).await,
         Commands::LsPanes => cmd_ls_panes(cli.json).await,
-        Commands::CheckWindow { window_id } => cmd_check_window(window_id, cli.json).await,
-        Commands::CheckPane { pane_name } => cmd_check_pane(pane_name, cli.json).await,
+        Commands::GetWindow { window_id } => cmd_check_window(window_id, cli.json).await,
+        Commands::GetPane { pane_name } => cmd_check_pane(pane_name, cli.json).await,
         Commands::History { sessions, limit, all } => cmd_history(sessions, limit, all, cli.json).await,
 
         // Action commands - use daemon if available (all support Target)
