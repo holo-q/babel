@@ -59,7 +59,6 @@ macro_rules! trace {
 struct SummaryEntry {
     summary: String,
     session_id: String,
-    session_path: PathBuf,
 }
 
 /// Daemon state - shared across tasks
@@ -97,6 +96,12 @@ pub struct DaemonState {
     /// Current workspace titles (workspace → title)
     /// Authoritative source - frontends query this via IPC
     pub workspace_titles: HashMap<i32, String>,
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DaemonState {
@@ -351,7 +356,6 @@ impl DaemonState {
                         index.push(SummaryEntry {
                             summary: summary.summary,
                             session_id: session_id.clone(),
-                            session_path: session_path.clone(),
                         });
                     }
                 }
@@ -891,7 +895,7 @@ async fn process_request(
             } else {
                 s.windows.values().find(|w| w.is_focused).cloned()
             };
-            Response::Window { window }
+            Response::Window { window: Box::new(window) }
         }
 
         Request::Enrich { window_id } => {
@@ -903,7 +907,7 @@ async fn process_request(
                     };
                 }
                 Response::Window {
-                    window: Some(window.clone()),
+                    window: Box::new(Some(window.clone())),
                 }
             } else {
                 Response::Error {

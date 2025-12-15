@@ -121,7 +121,7 @@ pub fn list_running_tasks() -> Result<Vec<FiredTask>> {
             .context("Failed to read info file")?;
         let lines: Vec<&str> = info_content.lines().collect();
 
-        let prompt_preview = lines.get(0).unwrap_or(&"").to_string();
+        let prompt_preview = lines.first().unwrap_or(&"").to_string();
         let ambient_sound = lines.get(1).and_then(|s| {
             if s.is_empty() { None } else { Some(s.to_string()) }
         });

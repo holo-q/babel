@@ -111,7 +111,8 @@ pub enum Response {
     Windows { windows: Vec<ClaudeWindow> },
 
     /// Success with single window
-    Window { window: Option<ClaudeWindow> },
+    /// Boxed to reduce enum size (ClaudeWindow is 432 bytes)
+    Window { window: Box<Option<ClaudeWindow>> },
 
     /// Success with session history
     History { sessions: Vec<SessionInfo> },

@@ -94,7 +94,7 @@ pub fn claude_base() -> PathBuf {
 
 /// Convert absolute path to Claude's project directory naming scheme
 /// /home/user/project → -home-user-project
-fn path_to_project_dir(path: &Path) -> String {
+pub fn path_to_encoded(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "-")
 }
@@ -103,7 +103,7 @@ fn path_to_project_dir(path: &Path) -> String {
 pub fn get_project_dir(project_path: &Path) -> PathBuf {
     claude_base()
         .join("projects")
-        .join(path_to_project_dir(project_path))
+        .join(path_to_encoded(project_path))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -430,9 +430,9 @@ mod tests {
     }
 
     #[test]
-    fn test_path_to_project_dir() {
+    fn test_path_to_encoded() {
         assert_eq!(
-            path_to_project_dir(Path::new("/home/nuck/Workspace")),
+            path_to_encoded(Path::new("/home/nuck/Workspace")),
             "-home-nuck-Workspace"
         );
     }

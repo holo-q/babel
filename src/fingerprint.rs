@@ -20,6 +20,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context, bail};
+use crate::claude_storage::{claude_base, path_to_encoded};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -648,20 +649,6 @@ pub struct MigrateResult {
     pub new_folder: String,
 }
 
-/// Get Claude Code storage base path (~/.claude)
-fn claude_base() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".claude")
-}
-
-/// Convert absolute path to Claude's project directory naming scheme
-///
-/// Example: /home/user/project → -home-user-project
-pub fn path_to_encoded(path: &Path) -> String {
-    path.to_string_lossy().replace('/', "-")
-}
-
 /// Convert encoded project name back to absolute path
 ///
 /// Example: -home-user-project → /home/user/project
@@ -867,7 +854,7 @@ fn update_history_paths(
                         || project_str.starts_with(&format!("{}/", old_path_str))
                     {
                         // Replace old_path prefix with new_path
-                        let new_project = project_str.replacen(&*old_path_str, &*new_path_str, 1);
+                        let new_project = project_str.replacen(&*old_path_str, &new_path_str, 1);
                         tracing::debug!(
                             line_num,
                             old_project = %project_str,

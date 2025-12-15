@@ -47,7 +47,10 @@ pub fn kitty_socket_path() -> String {
         }
     }
 
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+        let uid = users::get_current_uid();
+        format!("/run/user/{}", uid)
+    });
 
     // Priority 2: Find kitty.sock-* sockets (the ACTUAL socket kitty creates)
     // Despite listen_on config saying "kitty.sock", kitty creates "kitty.sock-$PID"
@@ -106,7 +109,10 @@ pub struct KittyInstance {
 /// Returns paths to all `kitty.sock-*` files in XDG_RUNTIME_DIR.
 /// Does NOT verify if they're responsive - use `discover_all_instances()` for that.
 pub fn find_all_sockets() -> Vec<String> {
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+        let uid = users::get_current_uid();
+        format!("/run/user/{}", uid)
+    });
 
     let mut sockets = Vec::new();
 
@@ -115,10 +121,8 @@ pub fn find_all_sockets() -> Vec<String> {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if name_str.starts_with("kitty.sock-") {
-                if entry.file_type().map(|ft| ft.is_socket()).unwrap_or(false) {
-                    sockets.push(format!("unix:{}", entry.path().display()));
-                }
+            if name_str.starts_with("kitty.sock-") && entry.file_type().map(|ft| ft.is_socket()).unwrap_or(false) {
+                sockets.push(format!("unix:{}", entry.path().display()));
             }
         }
     }
