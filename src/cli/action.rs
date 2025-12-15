@@ -1,16 +1,14 @@
 //! Action commands - state-changing operations (focus, send, set-*, etc.)
 //!
 //! These commands modify window state, send input, or update metadata.
-//! All commands support both daemon-first (fast) and direct fallback modes.
+//! All operations go through BabelCore which handles daemon/ephemeral modes transparently.
 
 use anyhow::{Context, Result};
 
-use claude_babel::discovery::{discover_claude_windows, enrich_window};
-use claude_babel::ipc::{send_request, Request, Response};
-use claude_babel::kitty::{focus_window, get_scrollback, send_text, set_window_title};
-use claude_babel::overlay::{init_db, mark_read, set_icon};
+use claude_babel::core::BabelCore;
+use claude_babel::discovery::enrich_window;
 
-use super::{resolve_target, Target};
+use super::{Target, resolve_target};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Title Management
@@ -21,15 +19,15 @@ use super::{resolve_target, Target};
 /// With a title argument, sets that exact title on the target window(s).
 /// Without a title argument, auto-determines the title from the session summary
 /// (the "✳ Summary" format that Claude Code uses).
-pub async fn cmd_set_title(target: &Target, title: Option<&str>) -> Result<()> {
-    let window_ids = resolve_target(target).await?;
+pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str>) -> Result<()> {
+    let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
         println!("No Claude windows found");
         return Ok(());
     }
 
-    let mut windows = discover_claude_windows()?;
+    let mut windows = core.windows().await?;
 
     for window_id in window_ids {
         let window = windows.iter_mut().find(|w| w.kitty_id == window_id);
@@ -58,8 +56,8 @@ pub async fn cmd_set_title(target: &Target, title: Option<&str>) -> Result<()> {
             }
         };
 
-        // Set the title via kitty remote control
-        set_window_title(window_id, &new_title)
+        // Set the title via BabelCore
+        core.set_title(window_id, &new_title).await
             .with_context(|| format!("Failed to set title for window {}", window_id))?;
 
         println!("Set title for window {}: {}", window_id, new_title);
@@ -73,14 +71,14 @@ pub async fn cmd_set_title(target: &Target, title: Option<&str>) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Focus a Claude window - by ID or interactive rofi picker
-pub async fn cmd_focus(window_id: Option<u64>) -> Result<()> {
+pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>) -> Result<()> {
     // Direct focus if ID provided
     if let Some(id) = window_id {
-        return focus_by_id(id).await;
+        return focus_by_id(core, id).await;
     }
 
     // Interactive picker via rofi
-    let windows = super::query::get_windows().await?;
+    let windows = core.windows().await?;
     if windows.is_empty() {
         println!("No Claude sessions found");
         return Ok(());
@@ -129,7 +127,7 @@ pub async fn cmd_focus(window_id: Option<u64>) -> Result<()> {
     match rofi::Rofi::new(&labels).prompt("Claude").run() {
         Ok(choice) => {
             if let Some((id, _)) = entries.iter().find(|(_, l)| l == &choice) {
-                focus_by_id(*id).await?;
+                focus_by_id(core, *id).await?;
             }
         }
         Err(rofi::Error::Interrupted) => {} // User cancelled (Esc)
@@ -139,16 +137,10 @@ pub async fn cmd_focus(window_id: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// Focus a window by its kitty ID (via daemon or direct)
-async fn focus_by_id(window_id: u64) -> Result<()> {
-    // Try daemon first
-    if let Ok(Response::Ok { message }) = send_request(&Request::Focus { window_id }).await {
-        println!("{}", message);
-        return Ok(());
-    }
-
-    // Direct fallback
-    focus_window(window_id).context("Failed to focus window")?;
+/// Focus a window by its kitty ID (via BabelCore)
+async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
+    core.focus(window_id).await
+        .context("Failed to focus window")?;
     println!("Focused window {}", window_id);
     Ok(())
 }
@@ -157,27 +149,11 @@ async fn focus_by_id(window_id: u64) -> Result<()> {
 // Scrollback Retrieval
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Get scrollback from a window (via daemon or direct)
-pub async fn cmd_get_scrollback(window_id: u64, lines: Option<usize>) -> Result<()> {
-    // Try daemon first
-    if let Ok(Response::Scrollback { text }) = send_request(&Request::Scroll { window_id }).await {
-        let output = if let Some(n) = lines {
-            text.lines().take(n).collect::<Vec<_>>().join("\n")
-        } else {
-            text
-        };
-        print!("{}", output);
-        return Ok(());
-    }
-
-    // Direct fallback
-    let scrollback = get_scrollback(window_id).context("Failed to get scrollback")?;
-    let output = if let Some(n) = lines {
-        scrollback.lines().take(n).collect::<Vec<_>>().join("\n")
-    } else {
-        scrollback
-    };
-    print!("{}", output);
+/// Get scrollback from a window (via BabelCore)
+pub async fn cmd_get_scrollback(core: &BabelCore, window_id: u64, lines: Option<usize>) -> Result<()> {
+    let scrollback = core.scrollback(window_id, lines).await
+        .context("Failed to get scrollback")?;
+    print!("{}", scrollback);
     Ok(())
 }
 
@@ -185,9 +161,9 @@ pub async fn cmd_get_scrollback(window_id: u64, lines: Option<usize>) -> Result<
 // Send Text
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Send text to window(s) (via daemon or direct)
-pub async fn cmd_send(target: &Target, text: &str) -> Result<()> {
-    let window_ids = resolve_target(target).await?;
+/// Send text to window(s) (via BabelCore)
+pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str) -> Result<()> {
+    let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
         println!("No Claude windows found");
@@ -195,17 +171,8 @@ pub async fn cmd_send(target: &Target, text: &str) -> Result<()> {
     }
 
     for window_id in window_ids {
-        // Try daemon first
-        if let Ok(Response::Ok { message }) = send_request(&Request::Send {
-            window_id,
-            text: text.to_string(),
-        }).await {
-            println!("{}", message);
-            continue;
-        }
-
-        // Direct fallback
-        send_text(window_id, text).context("Failed to send text")?;
+        core.send(window_id, text).await
+            .with_context(|| format!("Failed to send text to window {}", window_id))?;
         println!("Sent text to window {}", window_id);
     }
     Ok(())
@@ -215,68 +182,35 @@ pub async fn cmd_send(target: &Target, text: &str) -> Result<()> {
 // Metadata Management
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Set icon (emoji tag) for window(s) (via daemon or direct)
-pub async fn cmd_set_icon(target: &Target, icon: &str) -> Result<()> {
-    let window_ids = resolve_target(target).await?;
+/// Set icon (emoji tag) for window(s) (via BabelCore)
+pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Result<()> {
+    let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
         println!("No Claude windows found");
         return Ok(());
     }
 
-    let windows = discover_claude_windows()?;
-    let conn = init_db()?;
-
     for window_id in window_ids {
-        // Try daemon first
-        if let Ok(Response::Ok { message }) = send_request(&Request::Tag {
-            window_id,
-            icon: icon.to_string(),
-        }).await {
-            println!("{}", message);
-            continue;
-        }
-
-        // Direct fallback - need to find session first
-        let window = windows
-            .iter()
-            .find(|w| w.kitty_id == window_id)
-            .context("Window not found")?;
-
-        let session_id = window.session_id.as_ref().context("Window has no session")?;
-        set_icon(&conn, session_id, icon)?;
+        core.set_icon(window_id, icon).await
+            .with_context(|| format!("Failed to set icon for window {}", window_id))?;
         println!("Set icon for window {}: {}", window_id, icon);
     }
     Ok(())
 }
 
-/// Mark window(s) as read (via daemon or direct)
-pub async fn cmd_set_read(target: &Target) -> Result<()> {
-    let window_ids = resolve_target(target).await?;
+/// Mark window(s) as read (via BabelCore)
+pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
+    let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
         println!("No Claude windows found");
         return Ok(());
     }
 
-    let windows = discover_claude_windows()?;
-    let conn = init_db()?;
-
     for window_id in window_ids {
-        // Try daemon first
-        if let Ok(Response::Ok { message }) = send_request(&Request::MarkRead { window_id }).await {
-            println!("{}", message);
-            continue;
-        }
-
-        // Direct fallback
-        let window = windows
-            .iter()
-            .find(|w| w.kitty_id == window_id)
-            .context("Window not found")?;
-
-        let session_id = window.session_id.as_ref().context("Window has no session")?;
-        mark_read(&conn, session_id)?;
+        core.mark_read(window_id).await
+            .with_context(|| format!("Failed to mark window {} as read", window_id))?;
         println!("Marked window {} as read", window_id);
     }
     Ok(())

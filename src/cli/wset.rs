@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use anyhow::Result;
+use claude_babel::core::BabelCore;
 use claude_babel::ipc::{send_request, Request, Response};
 
 // Re-export WSetCommands from main for now (will be moved to cli module later)
@@ -17,43 +18,29 @@ use super::WSetCommands;
 /// Save current workspace layout to a WSet file
 ///
 /// Captures all Claude windows across all workspaces with their positions.
-pub async fn cmd_wset_save(name: Option<String>, _force: bool, json: bool) -> Result<()> {
-    let request = Request::WSetSave { name };
+pub async fn cmd_wset_save(core: &BabelCore, name: Option<String>, _force: bool, json: bool) -> Result<()> {
+    let wset = core.wset_save(name).await?;
 
-    match send_request(&request).await {
-        Ok(Response::WSetSaved { name, wspaces, windows }) => {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "saved",
-                    "name": name,
-                    "wspaces": wspaces,
-                    "windows": windows,
-                }))?);
-            } else {
-                println!("Saved WSet '{}': {} wspaces, {} windows", name, wspaces, windows);
-            }
-            Ok(())
-        }
-        Ok(Response::Error { message }) => {
-            eprintln!("error: {}", message);
-            std::process::exit(1);
-        }
-        Ok(other) => {
-            eprintln!("error: unexpected response from daemon: {:?}", other);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("error: daemon not running or connection failed: {}", e);
-            std::process::exit(1);
-        }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "status": "saved",
+            "name": wset.meta.name,
+            "wspaces": wset.wspaces.len(),
+            "windows": wset.wspaces.iter().map(|ws| ws.windows.len()).sum::<usize>(),
+        }))?);
+    } else {
+        let wspaces = wset.wspaces.len();
+        let windows = wset.wspaces.iter().map(|ws| ws.windows.len()).sum::<usize>();
+        println!("Saved WSet '{}': {} wspaces, {} windows", wset.meta.name, wspaces, windows);
     }
+    Ok(())
 }
 
 /// Load a workspace layout from a WSet file
 ///
 /// Restores Claude windows to their saved positions. Shows interactive confirmation
 /// unless dry_run is enabled. Sessions that no longer exist are skipped.
-pub async fn cmd_wset_load(name: Option<String>, dry_run: bool, _anxious: bool, json: bool) -> Result<()> {
+pub async fn cmd_wset_load(core: &BabelCore, name: Option<String>, dry_run: bool, _anxious: bool, json: bool) -> Result<()> {
     // First, get a dry-run preview
     let preview_request = Request::WSetLoad { name: name.clone(), dry_run: true };
 
@@ -74,37 +61,8 @@ pub async fn cmd_wset_load(name: Option<String>, dry_run: bool, _anxious: bool, 
     };
 
     // Get current state for comparison
-    let current_windows = match send_request(&Request::List).await {
-        Ok(Response::Windows { windows }) => windows.len(),
-        Ok(Response::Error { message }) => {
-            eprintln!("error: failed to get window list: {}", message);
-            std::process::exit(1);
-        }
-        Ok(other) => {
-            eprintln!("error: unexpected response when getting window list: {:?}", other);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("error: daemon not running or connection failed: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let current_name = match send_request(&Request::WSetCurrent).await {
-        Ok(Response::WSetCurrent { name }) => name.unwrap_or_else(|| "(none)".to_string()),
-        Ok(Response::Error { message }) => {
-            eprintln!("error: failed to get current wset: {}", message);
-            std::process::exit(1);
-        }
-        Ok(other) => {
-            eprintln!("error: unexpected response when getting current wset: {:?}", other);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("error: daemon not running or connection failed: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let current_windows = core.windows().await?.len();
+    let current_name = core.wset_current().await?.unwrap_or_else(|| "(none)".to_string());
 
     if dry_run {
         // Just show preview
@@ -221,58 +179,45 @@ pub async fn cmd_wset_load(name: Option<String>, dry_run: bool, _anxious: bool, 
 /// Main WSet command dispatcher
 ///
 /// Routes wset subcommands (save, load, list, rename, delete, describe) to their handlers.
-pub async fn cmd_wset(command: WSetCommands, json: bool) -> Result<()> {
+pub async fn cmd_wset(core: &BabelCore, command: WSetCommands, json: bool) -> Result<()> {
     match command {
         WSetCommands::Save { name, force } => {
-            cmd_wset_save(name, force, json).await
+            cmd_wset_save(core, name, force, json).await
         }
 
         WSetCommands::Load { name, dry_run, anxious } => {
-            cmd_wset_load(name, dry_run, anxious, json).await
+            cmd_wset_load(core, name, dry_run, anxious, json).await
         }
 
         WSetCommands::List => {
-            match send_request(&Request::WSetList).await {
-                Ok(Response::WSetList { wsets, current }) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                            "wsets": wsets,
-                            "current": current,
-                        }))?);
-                    } else if wsets.is_empty() {
-                        println!("No saved WSet files found");
-                        println!("Run 'babel save [name]' to create one");
-                    } else {
-                        println!("Saved WSet files:");
-                        println!();
-                        for wset in &wsets {
-                            let marker = if current.as_ref() == Some(&wset.name) { "* " } else { "  " };
-                            let desc = wset.description.as_ref()
-                                .map(|d| format!(" - {}", d))
-                                .unwrap_or_default();
-                            println!("{}{:<16} {} wspaces, {} windows{}",
-                                marker, wset.name, wset.wspaces, wset.windows, desc);
-                        }
-                        if current.is_some() {
-                            println!();
-                            println!("  * = current");
-                        }
-                    }
-                    Ok(())
+            let wsets = core.wset_list().await?;
+            let current = core.wset_current().await?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "wsets": wsets,
+                    "current": current,
+                }))?);
+            } else if wsets.is_empty() {
+                println!("No saved WSet files found");
+                println!("Run 'babel save [name]' to create one");
+            } else {
+                println!("Saved WSet files:");
+                println!();
+                for wset in &wsets {
+                    let marker = if current.as_ref() == Some(&wset.name) { "* " } else { "  " };
+                    let desc = wset.description.as_ref()
+                        .map(|d| format!(" - {}", d))
+                        .unwrap_or_default();
+                    println!("{}{:<16} {} wspaces, {} windows{}",
+                        marker, wset.name, wset.wspaces, wset.windows, desc);
                 }
-                Ok(Response::Error { message }) => {
-                    eprintln!("error: {}", message);
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("error: daemon not running: {}", e);
-                    std::process::exit(1);
-                }
-                Ok(other) => {
-                    eprintln!("error: unexpected response from daemon: {:?}", other);
-                    std::process::exit(1);
+                if current.is_some() {
+                    println!();
+                    println!("  * = current");
                 }
             }
+            Ok(())
         }
 
         WSetCommands::Rename { old, new } => {

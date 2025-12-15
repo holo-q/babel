@@ -6,11 +6,9 @@
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
-use claude_babel::discovery::discover_claude_windows;
+use claude_babel::core::BabelCore;
 use claude_babel::kitty::get_scrollback;
 use claude_babel::discovery::ClaudeWindow;
-use claude_babel::ipc::{Request, Response};
-use claude_babel::ipc::send_request;
 
 use claude_babel::fingerprint::{extract_from_scrollback, extract_from_jsonl, match_fingerprints, MatchConfidence};
 use claude_babel::claude_storage::{list_sessions, path_to_encoded};
@@ -20,6 +18,7 @@ use claude_babel::claude_storage::{list_sessions, path_to_encoded};
 /// Input is auto-detected or forced via flags. Shows the full trace of fingerprint data
 /// and cross-matching between terminals and session files.
 pub async fn cmd_fingerprint(
+    core: &BabelCore,
     input: Option<String>,
     force_window: bool,
     force_dir: bool,
@@ -100,7 +99,7 @@ pub async fn cmd_fingerprint(
     println!();
 
     // ─── Terminals ─────────────────────────────────────────────────────────────
-    let terminals = discover_claude_windows()?;
+    let terminals = core.windows().await?;
     let filtered_terminals: Vec<_> = terminals.iter().filter(|w| {
         // Filter by window ID if specified
         if let Some(wid) = window {
@@ -362,20 +361,3 @@ pub fn format_confidence(conf: MatchConfidence) -> &'static str {
     }
 }
 
-/// Get windows with fingerprints, trying daemon first then falling back to direct extraction
-pub async fn get_windows_with_fingerprints() -> Result<Vec<ClaudeWindow>> {
-    // Try daemon first
-    if let Ok(Response::Windows { windows }) = send_request(&Request::ListWithFingerprints).await {
-        return Ok(windows);
-    }
-
-    // Direct fallback - extract fingerprints manually
-    let mut windows = discover_claude_windows()?;
-    for win in &mut windows {
-        if let Ok(scrollback) = get_scrollback(win.kitty_id) {
-            let fp = extract_from_scrollback(&scrollback);
-            win.fingerprint = Some(fp);
-        }
-    }
-    Ok(windows)
-}

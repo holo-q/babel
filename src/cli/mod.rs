@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use claude_babel::core::BabelCore;
 
 // Re-export submodules
 pub mod query;
@@ -48,14 +49,12 @@ impl std::str::FromStr for Target {
 /// Resolve a target to a list of window IDs
 ///
 /// This is a helper that converts Target enum to concrete window IDs.
-/// For Target::All, it discovers all Claude windows and returns their IDs.
-pub async fn resolve_target(target: &Target) -> anyhow::Result<Vec<u64>> {
+/// For Target::All, uses BabelCore to discover all Claude windows and returns their IDs.
+pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result<Vec<u64>> {
     match target {
         Target::Window(id) => Ok(vec![*id]),
         Target::All => {
-            // Import here to avoid circular deps
-            use claude_babel::discovery::discover_claude_windows;
-            let windows = discover_claude_windows()?;
+            let windows = core.windows().await?;
             Ok(windows.iter().map(|w| w.kitty_id).collect())
         }
     }

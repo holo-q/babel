@@ -12,6 +12,7 @@ mod cli;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
+use claude_babel::core::BabelCore;
 use cli::{Cli, Commands};
 
 /// Main entry point - thin dispatcher to CLI handlers
@@ -62,6 +63,9 @@ async fn main() -> Result<()> {
         tracing::debug!("debug logging enabled via --debug flag");
     }
 
+    // Connect to daemon or use ephemeral mode
+    let core = BabelCore::connect().await;
+
     // Route to appropriate handler based on subcommand
     match cli.command {
         // ─── Daemon Management ───────────────────────────────────────────────────
@@ -75,66 +79,66 @@ async fn main() -> Result<()> {
 
         // ─── Query Commands (read-only, safe) ────────────────────────────────────
         Commands::Ls { details } => {
-            cli::query::cmd_list(cli.json, details).await
+            cli::query::cmd_list(&core, cli.json, details).await
         }
 
         Commands::LsTerminals { all } => {
-            cli::query::cmd_ls_terminals(cli.json, all).await
+            cli::query::cmd_ls_terminals(&core, cli.json, all).await
         }
 
         Commands::LsPanes => {
-            cli::query::cmd_ls_panes(cli.json).await
+            cli::query::cmd_ls_panes(&core, cli.json).await
         }
 
         Commands::GetWindow { window_id } => {
-            cli::query::cmd_check_window(window_id, cli.json).await
+            cli::query::cmd_check_window(&core, window_id, cli.json).await
         }
 
         Commands::GetPane { pane_name } => {
-            cli::query::cmd_check_pane(pane_name, cli.json).await
+            cli::query::cmd_check_pane(&core, pane_name, cli.json).await
         }
 
         Commands::History { sessions, limit, all } => {
-            cli::query::cmd_history(sessions, limit, all, cli.json).await
+            cli::query::cmd_history(&core, sessions, limit, all, cli.json).await
         }
 
         // ─── Action Commands (state-changing) ────────────────────────────────────
         Commands::Focus { window_id } => {
-            cli::action::cmd_focus(window_id).await
+            cli::action::cmd_focus(&core, window_id).await
         }
 
         Commands::GetScrollback { window_id, lines } => {
-            cli::action::cmd_get_scrollback(window_id, lines).await
+            cli::action::cmd_get_scrollback(&core, window_id, lines).await
         }
 
         Commands::Send { target, text } => {
-            cli::action::cmd_send(&target, &text).await
+            cli::action::cmd_send(&core, &target, &text).await
         }
 
         Commands::SetIcon { target, icon } => {
-            cli::action::cmd_set_icon(&target, &icon).await
+            cli::action::cmd_set_icon(&core, &target, &icon).await
         }
 
         Commands::SetRead { target } => {
-            cli::action::cmd_set_read(&target).await
+            cli::action::cmd_set_read(&core, &target).await
         }
 
         Commands::SetTitle { target, title } => {
-            cli::action::cmd_set_title(&target, title.as_deref()).await
+            cli::action::cmd_set_title(&core, &target, title.as_deref()).await
         }
 
         // ─── Migration & Diagnostics ─────────────────────────────────────────────
         Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
-            cli::mv::cmd_mv(source, dest, dry_run, history_only, anxious, force, cli.json).await
+            cli::mv::cmd_mv(&core, source, dest, dry_run, history_only, anxious, force, cli.json).await
         }
 
         Commands::Fingerprint { input, window, dir, session } => {
-            cli::fingerprint::cmd_fingerprint(input, window, dir, session, cli.json).await
+            cli::fingerprint::cmd_fingerprint(&core, input, window, dir, session, cli.json).await
         }
 
         // ─── Workspace Sets ──────────────────────────────────────────────────────
         Commands::Wset { command } => {
-            cli::wset::cmd_wset(command, cli.json).await
+            cli::wset::cmd_wset(&core, command, cli.json).await
         }
     }
 }

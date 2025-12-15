@@ -29,7 +29,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use claude_babel::claude_storage::path_to_encoded;
-use claude_babel::discovery::{discover_claude_windows, ClaudeWindow};
+use claude_babel::core::BabelCore;
+use claude_babel::discovery::ClaudeWindow;
 use claude_babel::fingerprint::migrate_project;
 use claude_babel::kitty::{get_scrollback, send_text};
 use claude_babel::state::{detect_state, SessionState};
@@ -62,6 +63,7 @@ pub struct ConflictingWindow {
 /// With --anxious, each step requires explicit y/n confirmation before proceeding.
 /// With --force, move proceeds even if active Claude terminals would break.
 pub async fn cmd_mv(
+    core: &BabelCore,
     source: PathBuf,
     dest: PathBuf,
     dry_run: bool,
@@ -85,7 +87,7 @@ pub async fn cmd_mv(
     // ─────────────────────────────────────────────────────────────────────────────
     // Step 0: Check for conflicting terminals
     // ─────────────────────────────────────────────────────────────────────────────
-    let conflicts = find_conflicting_windows(&source)?;
+    let conflicts = find_conflicting_windows(core, &source).await?;
 
     if !conflicts.is_empty() {
         // Partition by state: idle/awaiting can be migrated, thinking/tool_use are active
@@ -309,13 +311,13 @@ pub async fn cmd_mv(
 ///
 /// These windows will break after the move unless migrated. Returns windows
 /// partitioned by state - idle ones can be migrated, active ones block the move.
-pub fn find_conflicting_windows(source: &Path) -> Result<Vec<ConflictingWindow>> {
+pub async fn find_conflicting_windows(core: &BabelCore, source: &Path) -> Result<Vec<ConflictingWindow>> {
     // Canonicalize to absolute path - kitty's cwd is always absolute, but user may
     // pass relative path like "." or "foo". Without this, starts_with() always fails.
     let source = source.canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap().join(source));
 
-    let windows = discover_claude_windows()?;
+    let windows = core.windows().await?;
     let mut conflicts = Vec::new();
 
     for win in windows {

@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use console::{style, Style};
 
-use claude_babel::claude_storage::{get_recent_sessions, SessionInfo};
-use claude_babel::discovery::{discover_claude_windows, ClaudeWindow};
+use claude_babel::claude_storage::SessionInfo;
+use claude_babel::core::BabelCore;
+use claude_babel::discovery::ClaudeWindow;
 use claude_babel::fingerprint::extract_from_scrollback;
-use claude_babel::ipc::{send_request, Request, Response};
 use claude_babel::kitty::{detect_claude_signals, discover_all_instances, get_scrollback, list_windows};
 use claude_babel::overlay::{get_metadata, init_db};
 
@@ -20,11 +20,11 @@ use claude_babel::overlay::{get_metadata, init_db};
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// List all Claude sessions (windows with claude running)
-pub async fn cmd_list(json: bool, details: bool) -> Result<()> {
+pub async fn cmd_list(core: &BabelCore, json: bool, details: bool) -> Result<()> {
     let mut windows = if details {
-        get_windows_with_fingerprints().await?
+        get_windows_with_fingerprints(core).await?
     } else {
-        get_windows().await?
+        core.windows().await?
     };
 
     if json {
@@ -78,7 +78,7 @@ pub async fn cmd_list(json: bool, details: bool) -> Result<()> {
 }
 
 /// List all kitty terminals (not just Claude sessions)
-pub async fn cmd_ls_terminals(json: bool, scan_all_sockets: bool) -> Result<()> {
+pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: bool) -> Result<()> {
     if scan_all_sockets {
         // Scan ALL kitty sockets on the system
         let instances = discover_all_instances();
@@ -221,7 +221,7 @@ pub async fn cmd_ls_terminals(json: bool, scan_all_sockets: bool) -> Result<()> 
 }
 
 /// List all kitty panes grouped by OS window
-pub async fn cmd_ls_panes(json: bool) -> Result<()> {
+pub async fn cmd_ls_panes(_core: &BabelCore, json: bool) -> Result<()> {
     let windows = list_windows().context("Failed to list kitty windows")?;
 
     if json {
@@ -262,8 +262,8 @@ pub async fn cmd_ls_panes(json: bool) -> Result<()> {
 }
 
 /// Check status of a specific window or the focused window
-pub async fn cmd_check_window(window_id: Option<u64>, json: bool) -> Result<()> {
-    let window = get_window(window_id).await?;
+pub async fn cmd_check_window(core: &BabelCore, window_id: Option<u64>, json: bool) -> Result<()> {
+    let window = core.window(window_id).await?;
 
     match window {
         Some(win) => {
@@ -277,7 +277,7 @@ pub async fn cmd_check_window(window_id: Option<u64>, json: bool) -> Result<()> 
             if window_id.is_some() {
                 println!("Window not found or not a Claude session");
                 println!();
-                show_available_windows().await?;
+                show_available_windows(core).await?;
             } else {
                 println!("No focused Claude window found");
             }
@@ -288,7 +288,7 @@ pub async fn cmd_check_window(window_id: Option<u64>, json: bool) -> Result<()> 
 }
 
 /// Check status of a specific richspace pane
-pub async fn cmd_check_pane(pane_name: Option<String>, _json: bool) -> Result<()> {
+pub async fn cmd_check_pane(_core: &BabelCore, pane_name: Option<String>, _json: bool) -> Result<()> {
     // TODO: Implement once richspace-babel pane querying is available
     match pane_name {
         Some(name) => {
@@ -304,7 +304,7 @@ pub async fn cmd_check_pane(pane_name: Option<String>, _json: bool) -> Result<()
 }
 
 /// Show conversation history
-pub async fn cmd_history(sessions: Vec<String>, limit: usize, all: bool, json: bool) -> Result<()> {
+pub async fn cmd_history(core: &BabelCore, sessions: Vec<String>, limit: usize, all: bool, json: bool) -> Result<()> {
     // Determine effective limit
     let effective_limit = if all { usize::MAX } else { limit };
 
@@ -312,13 +312,13 @@ pub async fn cmd_history(sessions: Vec<String>, limit: usize, all: bool, json: b
     let results = if !sessions.is_empty() {
         // TODO: Implement session ID filtering via daemon or direct lookup
         // For now, filter from full history
-        let all_sessions = get_history(usize::MAX).await?;
+        let all_sessions = core.history(usize::MAX).await?;
         all_sessions
             .into_iter()
             .filter(|s| sessions.iter().any(|id| s.session_id.contains(id)))
             .collect()
     } else {
-        get_history(effective_limit).await?
+        core.history(effective_limit).await?
     };
 
     if json {
@@ -350,68 +350,30 @@ pub async fn cmd_history(sessions: Vec<String>, limit: usize, all: bool, json: b
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions - Data Fetching (Daemon or Direct)
+// Helper Functions - Data Fetching
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Get all Claude windows, preferring daemon but falling back to direct discovery
-pub async fn get_windows() -> Result<Vec<ClaudeWindow>> {
-    // Try daemon first
-    if let Ok(Response::Windows { windows }) = send_request(&Request::List).await {
-        return Ok(windows);
-    }
-
-    // Direct fallback
-    discover_claude_windows()
-}
-
 /// Get all Claude windows with fingerprints extracted from scrollback
-pub async fn get_windows_with_fingerprints() -> Result<Vec<ClaudeWindow>> {
-    // Try daemon first
-    if let Ok(Response::Windows { windows }) = send_request(&Request::ListWithFingerprints).await {
-        return Ok(windows);
-    }
+/// This is used by cmd_list when --details is requested
+async fn get_windows_with_fingerprints(core: &BabelCore) -> Result<Vec<ClaudeWindow>> {
+    // Get windows via core (handles daemon/direct fallback)
+    let mut windows = core.windows().await?;
 
-    // Direct fallback - extract fingerprints manually
-    let mut windows = discover_claude_windows()?;
+    // Extract fingerprints for windows that don't have them
     for win in &mut windows {
-        if let Ok(scrollback) = get_scrollback(win.kitty_id) {
-            let fp = extract_from_scrollback(&scrollback);
-            win.fingerprint = Some(fp);
+        if win.fingerprint.is_none() {
+            if let Ok(scrollback) = get_scrollback(win.kitty_id) {
+                let fp = extract_from_scrollback(&scrollback);
+                win.fingerprint = Some(fp);
+            }
         }
     }
     Ok(windows)
 }
 
-/// Get a specific window by ID, or the focused window if None
-pub async fn get_window(window_id: Option<u64>) -> Result<Option<ClaudeWindow>> {
-    // Try daemon first
-    if let Ok(Response::Window { window }) = send_request(&Request::Status { window_id }).await {
-        return Ok(*window);
-    }
-
-    // Direct fallback
-    let windows = discover_claude_windows()?;
-    Ok(if let Some(id) = window_id {
-        windows.into_iter().find(|w| w.kitty_id == id)
-    } else {
-        windows.into_iter().find(|w| w.is_focused)
-    })
-}
-
-/// Get conversation history, preferring daemon but falling back to direct file access
-pub async fn get_history(limit: usize) -> Result<Vec<SessionInfo>> {
-    // Try daemon first
-    if let Ok(Response::History { sessions }) = send_request(&Request::History { limit }).await {
-        return Ok(sessions);
-    }
-
-    // Direct fallback
-    get_recent_sessions(limit)
-}
-
 /// Show available Claude windows for user selection
-pub async fn show_available_windows() -> Result<()> {
-    let windows = get_windows().await?;
+async fn show_available_windows(core: &BabelCore) -> Result<()> {
+    let windows = core.windows().await?;
 
     if windows.is_empty() {
         println!("No Claude windows found");
