@@ -97,20 +97,20 @@ pub fn extract_from_scrollback(scrollback: &str) -> SessionFingerprint {
         if let Some(prompt) = extract_user_prompt(trimmed) {
             let normalized = normalize_prompt(&prompt);
             if !normalized.is_empty() {
-                tracing::debug!(line_num, prompt = %normalized, "extracted user prompt");
+                tracing::trace!(line_num, prompt = %normalized, "extracted user prompt");
                 user_prompts.push(normalized);
             }
         }
 
         // Tool calls - pattern: ● ToolName(args)
         if let Some(tool) = extract_tool_call(trimmed) {
-            tracing::debug!(line_num, tool = %tool, "extracted tool call");
+            tracing::trace!(line_num, tool = %tool, "extracted tool call");
             tools.push(tool);
         }
 
         // CWD - pattern: cwd: /path or similar
         if let Some(cwd) = extract_cwd(trimmed) {
-            tracing::debug!(line_num, ?cwd, "extracted cwd");
+            tracing::trace!(line_num, ?cwd, "extracted cwd");
             fingerprint.cwd = Some(cwd);
         }
     }
@@ -365,14 +365,14 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
         let entry: MessageEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!(line_num, error = %e, "skipping malformed JSONL line");
+                tracing::trace!(line_num, error = %e, "skipping malformed JSONL line");
                 lines_skipped += 1;
                 continue;
             }
         };
         lines_parsed += 1;
 
-        tracing::debug!(line_num, entry_type = %entry.entry_type, "parsed JSONL entry");
+        tracing::trace!(line_num, entry_type = %entry.entry_type, "parsed JSONL entry");
 
         // Update metadata
         if fingerprint.cwd.is_none() && entry.cwd.is_some() {
@@ -395,7 +395,7 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
                         if let Some(content) = user_msg.content {
                             let normalized = normalize_prompt(&content);
                             if !normalized.is_empty() {
-                                tracing::debug!(line_num, prompt = %normalized, "extracted user prompt from JSONL");
+                                tracing::trace!(line_num, prompt = %normalized, "extracted user prompt from JSONL");
                                 user_prompts.push(normalized);
                             }
                         }
@@ -409,7 +409,7 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
                             for item in content_items {
                                 if item.content_type == "tool_use" {
                                     if let Ok(tool_use) = serde_json::from_value::<ToolUse>(item.data) {
-                                        tracing::debug!(line_num, tool = %tool_use.name, "extracted tool from JSONL");
+                                        tracing::trace!(line_num, tool = %tool_use.name, "extracted tool from JSONL");
                                         tools.push(tool_use.name);
                                     }
                                 }
@@ -419,7 +419,7 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
                 }
             }
             _ => {
-                tracing::debug!(line_num, entry_type = %entry.entry_type, "ignoring non-message entry");
+                tracing::trace!(line_num, entry_type = %entry.entry_type, "ignoring non-message entry");
             }
         }
     }
@@ -877,9 +877,8 @@ fn update_history_paths(
                         *project = serde_json::Value::String(new_project);
                         modified = true;
                         update_count += 1;
-                    } else {
-                        tracing::debug!(line_num, project = %project_str, "project path does not match");
                     }
+                    // Note: We intentionally don't log non-matches to avoid thousands of log lines
                 }
             }
 
@@ -891,7 +890,7 @@ fn update_history_paths(
         } else {
             // Keep malformed lines as-is
             malformed_lines += 1;
-            tracing::debug!(line_num, "malformed JSON line, keeping as-is");
+            tracing::trace!(line_num, "malformed JSON line, keeping as-is");
             updated_lines.push(line);
         }
     }
