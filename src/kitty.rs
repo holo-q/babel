@@ -1,10 +1,18 @@
 //! Kitty Remote Control Wrapper
 //!
 //! This module provides a Rust interface to kitty's remote control protocol via `kitten @` commands.
-//! It communicates with kitty through the socket at $XDG_RUNTIME_DIR/kitty.sock.
 //!
-//! The data model follows kitty's JSON output structure:
-//!   OS Window -> Tabs -> Windows (panes)
+//! ## Socket Standard
+//!
+//! Kitty creates sockets at `$XDG_RUNTIME_DIR/kitty.sock-$PID` (NOT `kitty.sock` despite config).
+//! See `Docs/15-kitty-single-instance-protocol.md` for details.
+//!
+//! **CRITICAL**: There must be exactly ONE kitty process. Multiple processes break kitty-attach.
+//! If multiple sockets are found, this module logs a warning.
+//!
+//! ## Data Model
+//!
+//! Follows kitty's JSON output structure: OS Window -> Tabs -> Windows (panes)
 //!
 //! Each window can have:
 //!   - foreground_processes: Running commands (we use this to find claude sessions)
@@ -21,18 +29,18 @@ use anyhow::{Result, Context, bail};
 
 /// Get the kitty socket path for remote control.
 ///
-/// Kitty can create sockets in multiple locations:
-/// 1. `$XDG_RUNTIME_DIR/kitty.sock` - single-instance canonical path
-/// 2. `$XDG_RUNTIME_DIR/kitty.sock-$PID` - per-process sockets
+/// Socket detection priority:
+/// 1. `KITTY_LISTEN_ON` env var (when running inside kitty)
+/// 2. Find `$XDG_RUNTIME_DIR/kitty.sock-*` (the actual socket kitty creates)
+/// 3. Fallback to `kitty.sock` (usually doesn't exist)
 ///
-/// This function tries the canonical path first, then falls back to finding
-/// any available PID-suffixed socket.
+/// **WARNING**: If multiple `kitty.sock-*` files exist, single-instance is violated.
+/// This breaks kitty-attach. The function logs a warning and picks the first socket.
 ///
 /// Note: kitten auto-detects from TTY, but systemd services have no TTY,
 /// so we must explicitly pass `--to unix:$socket_path`.
 pub fn kitty_socket_path() -> String {
     // Priority 1: Use KITTY_LISTEN_ON if set (current terminal's kitty instance)
-    // This is the most reliable way to get the right socket
     if let Ok(listen_on) = env::var("KITTY_LISTEN_ON") {
         if !listen_on.is_empty() {
             return listen_on;
@@ -41,10 +49,10 @@ pub fn kitty_socket_path() -> String {
 
     let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
 
-    // Priority 2: Find PID-suffixed sockets (more reliable than symlink)
-    // List entries matching kitty.sock-* that are actual sockets
+    // Priority 2: Find kitty.sock-* sockets (the ACTUAL socket kitty creates)
+    // Despite listen_on config saying "kitty.sock", kitty creates "kitty.sock-$PID"
     if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
-        let mut sockets: Vec<_> = entries
+        let sockets: Vec<_> = entries
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name();
@@ -57,25 +65,21 @@ pub fn kitty_socket_path() -> String {
             })
             .collect();
 
-        // Sort by name (which includes PID, so higher PIDs = more recent)
-        sockets.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        // Warn if multiple sockets exist (single-instance violated)
+        if sockets.len() > 1 {
+            tracing::warn!(
+                count = sockets.len(),
+                "Multiple kitty sockets found - single instance violated! kitty-attach will break."
+            );
+        }
 
         if let Some(entry) = sockets.first() {
             return format!("unix:{}", entry.path().display());
         }
     }
 
-    // Priority 3: Try canonical symlink path (often stale, but worth trying)
+    // Fallback: try kitty.sock (usually doesn't exist, but worth trying)
     let canonical = format!("{}/kitty.sock", runtime_dir);
-    if std::path::Path::new(&canonical).exists() {
-        if let Ok(meta) = std::fs::metadata(&canonical) {
-            if meta.file_type().is_socket() {
-                return format!("unix:{}", canonical);
-            }
-        }
-    }
-
-    // Ultimate fallback - return canonical even if broken
     format!("unix:{}", canonical)
 }
 
@@ -306,6 +310,29 @@ pub fn send_text(id: u64, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set the title of a kitty window
+///
+/// Updates the window title displayed in kitty. The title persists until
+/// changed by the shell or application running in the window.
+pub fn set_window_title(id: u64, title: &str) -> Result<()> {
+    let socket = kitty_socket_path();
+    let output = Command::new("kitten")
+        .args([
+            "@", "--to", &socket, "set-window-title",
+            "--match", &format!("id:{}", id),
+            title,
+        ])
+        .output()
+        .context("Failed to execute 'kitten @ set-window-title'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ set-window-title failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
 /// Get the current working directory of the focused window
 ///
 /// Used by claude-fire to determine the context for new prompts.
@@ -373,6 +400,197 @@ pub fn get_all_workspaces() -> HashMap<u64, i32> {
     }
 
     result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WSet Loading - Spawn/Close/Move Windows
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::wset::WSet;
+
+/// Close a kitty window by ID
+///
+/// Uses `kitten @ close-window` to terminate the window.
+pub fn close_window(id: u64) -> Result<()> {
+    let socket = kitty_socket_path();
+    let output = Command::new("kitten")
+        .args(["@", "--to", &socket, "close-window", "--match", &format!("id:{}", id)])
+        .output()
+        .context("Failed to execute 'kitten @ close-window'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't fail if window already closed
+        if !stderr.contains("No matching") {
+            bail!("kitten @ close-window failed: {}", stderr);
+        }
+    }
+
+    Ok(())
+}
+
+/// Close all claude windows
+///
+/// Used before loading a WSet to clear the slate.
+pub fn close_all_claude_windows() -> Result<()> {
+    let claude_windows = find_claude_windows()?;
+
+    for win in claude_windows {
+        if let Err(e) = close_window(win.id) {
+            tracing::warn!(kitty_id = win.id, error = %e, "Failed to close window");
+        }
+    }
+
+    Ok(())
+}
+
+/// Move a window to a specific workspace using wmctrl
+///
+/// Uses `wmctrl -i -r <hex_id> -t <workspace>` to move the window.
+pub fn move_window_to_workspace(platform_window_id: u64, workspace: i32) -> Result<()> {
+    let hex_id = format!("0x{:08x}", platform_window_id);
+
+    let output = Command::new("wmctrl")
+        .args(["-i", "-r", &hex_id, "-t", &workspace.to_string()])
+        .output()
+        .context("Failed to execute 'wmctrl'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("wmctrl move failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Spawn a claude session in a new kitty window
+///
+/// Uses `kitty-claude` script for consistent window setup with random backgrounds.
+/// Returns the new kitty window ID after a brief delay for the window to appear.
+pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Result<Option<u64>> {
+    use std::process::Stdio;
+    use tokio::time::{sleep, Duration};
+
+    // Verify the session exists in ~/.claude before spawning
+    let claude_base = crate::claude_storage::claude_base();
+    let projects_dir = claude_base.join("projects");
+
+    // Search for the session file in any project directory
+    let mut session_exists = false;
+    if projects_dir.exists() {
+        for entry in std::fs::read_dir(&projects_dir)? {
+            let entry = entry?;
+            let session_path = entry.path().join(format!("{}.jsonl", session_id));
+            if session_path.exists() {
+                session_exists = true;
+                break;
+            }
+        }
+    }
+
+    if !session_exists {
+        tracing::warn!(session_id, "Session file not found, skipping spawn");
+        return Ok(None);
+    }
+
+    // Spawn kitty-claude with the session
+    // kitty-claude handles random background selection and consistent styling
+    let _child = Command::new("kitty-claude")
+        .args(["-d", &cwd.to_string_lossy()])
+        .args(["-e", "claude", "-r", session_id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to spawn kitty-claude")?;
+
+    // Wait for window to appear
+    // This is a bit racy but necessary since kitty spawns async
+    sleep(Duration::from_millis(500)).await;
+
+    // Find the new window by looking for one with this session in scrollback
+    // or title, or by user_var if we tagged it
+    let windows = find_claude_windows()?;
+
+    // Try to find by title containing session_id or by matching cwd
+    // This is imperfect but usually works
+    for win in &windows {
+        // Check if this is a newly spawned window at the right cwd
+        if win.cwd == cwd {
+            // Tag it for future fast lookups
+            let _ = set_user_var(win.id, "babel_session_id", session_id);
+            return Ok(Some(win.id));
+        }
+    }
+
+    // If we can't find it, return None but don't fail
+    // The daemon will pick it up on next refresh
+    tracing::info!(session_id, "Spawned session but couldn't find window immediately");
+    Ok(None)
+}
+
+/// Load a WSet by closing all existing claude windows and spawning new ones
+///
+/// Returns a list of session IDs that couldn't be restored (file missing, etc.)
+pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
+    use tokio::time::{sleep, Duration};
+
+    let mut skipped: Vec<String> = Vec::new();
+
+    // Step 1: Close all existing claude windows
+    tracing::info!(wset = %wset.meta.name, "Closing existing claude windows");
+    close_all_claude_windows()?;
+
+    // Brief pause to let windows close
+    sleep(Duration::from_millis(300)).await;
+
+    // Step 2: Spawn windows for each wspace
+    for wspace in &wset.wspaces {
+        tracing::info!(workspace = wspace.index, windows = wspace.windows.len(), "Spawning wspace");
+
+        for window_config in &wspace.windows {
+            match spawn_claude_session(&window_config.session_id, &window_config.cwd).await {
+                Ok(Some(kitty_id)) => {
+                    // Move to correct workspace
+                    // Need to get platform_window_id first
+                    if let Ok(Some(win)) = get_window(kitty_id) {
+                        if let Err(e) = move_window_to_workspace(win.platform_window_id, wspace.index) {
+                            tracing::warn!(
+                                kitty_id,
+                                workspace = wspace.index,
+                                error = %e,
+                                "Failed to move window to workspace"
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Session file doesn't exist or window not found
+                    skipped.push(window_config.session_id.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %window_config.session_id,
+                        error = %e,
+                        "Failed to spawn session"
+                    );
+                    skipped.push(window_config.session_id.clone());
+                }
+            }
+
+            // Small delay between spawns to avoid overwhelming the system
+            sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    tracing::info!(
+        wset = %wset.meta.name,
+        spawned = wset.window_count() - skipped.len(),
+        skipped = skipped.len(),
+        "WSet load complete"
+    );
+
+    Ok(skipped)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -21,6 +21,48 @@ use claude_babel::ipc::{send_request, Request, Response};
 use claude_babel::kitty::{focus_window, get_scrollback, send_text};
 use claude_babel::overlay::{get_metadata, init_db, mark_read, set_icon};
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Target System - Unified window targeting for all action commands
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Target specification for window commands
+///
+/// Supports:
+/// - Specific window ID: "42"
+/// - All windows: "*"
+#[derive(Debug, Clone)]
+enum Target {
+    /// Target a specific window by ID
+    Window(u64),
+    /// Target all Claude windows
+    All,
+}
+
+impl std::str::FromStr for Target {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s == "*" {
+            Ok(Target::All)
+        } else {
+            s.parse::<u64>()
+                .map(Target::Window)
+                .map_err(|_| format!("Invalid target '{}': expected window ID or '*'", s))
+        }
+    }
+}
+
+/// Resolve a target to a list of window IDs
+async fn resolve_target(target: &Target) -> Result<Vec<u64>> {
+    match target {
+        Target::Window(id) => Ok(vec![*id]),
+        Target::All => {
+            let windows = get_windows().await?;
+            Ok(windows.iter().map(|w| w.kitty_id).collect())
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "babel")]
 #[command(about = "Manage Claude Code sessions across kitty windows", long_about = None)]
@@ -153,51 +195,63 @@ enum Commands {
         window_id: Option<u64>,
     },
 
-    /// Send text to a Claude window
+    /// Send text to Claude window(s)
+    ///
+    /// Target can be a window ID or "*" for all windows.
     Send {
-        /// Kitty window ID
-        window_id: u64,
+        /// Target: window ID or "*" for all
+        target: Target,
 
         /// Text to send
         text: String,
     },
 
-    /// Set a custom icon for a window
+    /// Set a custom icon for window(s)
     ///
     /// Associates a custom emoji or icon with a Claude session. The icon
     /// appears in `babel ls` output and can be used to visually mark
     /// important sessions.
+    ///
+    /// Target can be a window ID or "*" for all windows.
     #[command(alias = "si")]
     SetIcon {
-        /// Kitty window ID
-        window_id: u64,
+        /// Target: window ID or "*" for all
+        target: Target,
 
         /// Icon/emoji to display (e.g., "🔥", "⭐", "🚧")
         icon: String,
     },
 
-    /// Mark a window's conversation as read
+    /// Mark window(s) as read
+    ///
+    /// Target can be a window ID or "*" for all windows.
     #[command(alias = "sr")]
     SetRead {
-        /// Kitty window ID
-        window_id: u64,
+        /// Target: window ID or "*" for all
+        target: Target,
     },
 
     // ─── Management ─────────────────────────────────────────────────────────────
 
-    /// Update or display workspace titles
+    /// Set window title(s) or refresh auto-titles
     ///
-    /// Workspace titles are derived from the Claude sessions visible on each
-    /// workspace. Use --refresh to force an update from the current window state.
-    #[command(alias = "ut")]
-    UpdateTitles {
-        /// Force refresh titles (otherwise returns cached)
-        #[arg(short, long)]
-        refresh: bool,
+    /// With a title argument, sets a custom title for the target window(s).
+    /// Without a title argument, auto-determines the title from the session
+    /// (equivalent to the old update-titles behavior).
+    ///
+    /// Target can be a window ID or "*" for all windows.
+    ///
+    /// Examples:
+    ///   babel set-title 42 "My Custom Title"   # Set specific title
+    ///   babel set-title 42                     # Auto-title from session
+    ///   babel set-title *                      # Auto-title all windows
+    #[command(alias = "st")]
+    SetTitle {
+        /// Target: window ID or "*" for all
+        target: Target,
 
-        /// Refresh only this workspace
-        #[arg(short, long)]
-        workspace: Option<i32>,
+        /// Custom title (omit to auto-determine from session)
+        title: Option<String>,
     },
 
     /// Move a directory while preserving Claude conversation history
@@ -349,7 +403,6 @@ async fn main() -> Result<()> {
                 run_daemon().await
             }
         }
-        Commands::UpdateTitles { refresh, workspace } => cmd_update_titles(cli.json, refresh, workspace).await,
 
         // Data commands - use daemon if available
         Commands::Ls { details } => cmd_list(cli.json, details).await,
@@ -359,12 +412,13 @@ async fn main() -> Result<()> {
         Commands::CheckPane { pane_name } => cmd_check_pane(pane_name, cli.json).await,
         Commands::History { sessions, limit, all } => cmd_history(sessions, limit, all, cli.json).await,
 
-        // Action commands - use daemon if available
+        // Action commands - use daemon if available (all support Target)
         Commands::Focus { window_id } => cmd_focus(window_id).await,
         Commands::GetScrollback { window_id, lines } => cmd_get_scrollback(window_id, lines).await,
-        Commands::Send { window_id, text } => cmd_send(window_id, &text).await,
-        Commands::SetIcon { window_id, icon } => cmd_set_icon(window_id, &icon).await,
-        Commands::SetRead { window_id } => cmd_mark_read(window_id).await,
+        Commands::Send { target, text } => cmd_send(&target, &text).await,
+        Commands::SetIcon { target, icon } => cmd_set_icon(&target, &icon).await,
+        Commands::SetRead { target } => cmd_set_read(&target).await,
+        Commands::SetTitle { target, title } => cmd_set_title(&target, title.as_deref()).await,
 
         // Migration commands - direct only (no daemon needed)
         Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
@@ -382,63 +436,62 @@ async fn main() -> Result<()> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Daemon Commands
+// Title Management
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn cmd_update_titles(json: bool, refresh: bool, workspace: Option<i32>) -> Result<()> {
-    // If refresh requested, trigger it and show results
-    if refresh {
-        match send_request(&Request::TitleRefresh { workspace }).await {
-            Ok(Response::Ok { message }) => {
-                if json {
-                    // For JSON output, fetch the actual titles structure
-                    if let Ok(Response::Titles { titles }) = send_request(&Request::Titles).await {
-                        println!("{}", serde_json::to_string_pretty(&titles)?);
-                    }
-                } else {
-                    println!("{}", message);
-                }
-                return Ok(());
-            }
-            Ok(Response::Error { message }) => {
-                tracing::error!("Title refresh failed: {}", message);
-                return Ok(());
-            }
-            Err(_) => {
-                tracing::error!("Daemon not running");
-                return Ok(());
-            }
-            _ => return Ok(()),
-        }
+/// Set window title(s) - custom or auto-determined from session
+///
+/// With a title argument, sets that exact title on the target window(s).
+/// Without a title argument, auto-determines the title from the session summary
+/// (the "✳ Summary" format that Claude Code uses).
+async fn cmd_set_title(target: &Target, title: Option<&str>) -> Result<()> {
+    use claude_babel::kitty::set_window_title;
+    use claude_babel::discovery::enrich_window;
+
+    let window_ids = resolve_target(target).await?;
+
+    if window_ids.is_empty() {
+        println!("No Claude windows found");
+        return Ok(());
     }
 
-    // Just fetch current titles (no refresh)
-    match send_request(&Request::Titles).await {
-        Ok(Response::Titles { titles }) => {
-            if json {
-                println!("{}", serde_json::to_string_pretty(&titles)?);
-            } else if titles.is_empty() {
-                println!("No workspace titles cached");
-            } else {
-                // Sort by workspace number (parse string keys to int for proper ordering)
-                let mut entries: Vec<_> = titles.into_iter().collect();
-                entries.sort_by_key(|(ws, _)| ws.parse::<i32>().unwrap_or(0));
-                for (ws, title) in entries {
-                    println!("  Workspace {}: {}", ws, title);
+    let mut windows = discover_claude_windows()?;
+
+    for window_id in window_ids {
+        let window = windows.iter_mut().find(|w| w.kitty_id == window_id);
+
+        let new_title = if let Some(custom) = title {
+            // Use custom title as-is
+            custom.to_string()
+        } else {
+            // Auto-determine from session
+            if let Some(win) = window {
+                // Enrich to get session info if not already loaded
+                let _ = enrich_window(win);
+
+                if let Some(ref info) = win.session_info {
+                    // Use first summary from session
+                    info.summaries.first()
+                        .map(|s| format!("✳ {}", s.summary))
+                        .unwrap_or_else(|| win.title.clone())
+                } else {
+                    // No session info - keep existing title
+                    continue;
                 }
+            } else {
+                println!("Window {} not found", window_id);
+                continue;
             }
-            Ok(())
-        }
-        Ok(Response::Error { message }) => {
-            tracing::error!("Failed to get titles: {}", message);
-            Ok(())
-        }
-        Err(_) => {
-            tracing::error!("Daemon not running");
-            Ok(())
-        }
-        _ => Ok(()),
+        };
+
+        // Set the title via kitty remote control
+        set_window_title(window_id, &new_title)
+            .with_context(|| format!("Failed to set title for window {}", window_id))?;
+
+        println!("Set title for window {}: {}", window_id, new_title);
     }
+
+    Ok(())
 }
 
 
@@ -781,68 +834,93 @@ async fn cmd_get_scrollback(window_id: u64, lines: Option<usize>) -> Result<()> 
     Ok(())
 }
 
-async fn cmd_send(window_id: u64, text: &str) -> Result<()> {
-    // Try daemon first
-    if let Ok(Response::Ok { message }) = send_request(&Request::Send {
-        window_id,
-        text: text.to_string(),
-    }).await {
-        println!("{}", message);
+async fn cmd_send(target: &Target, text: &str) -> Result<()> {
+    let window_ids = resolve_target(target).await?;
+
+    if window_ids.is_empty() {
+        println!("No Claude windows found");
         return Ok(());
     }
 
-    // Direct fallback
-    send_text(window_id, text).context("Failed to send text")?;
-    println!("Sent text to window {}", window_id);
+    for window_id in window_ids {
+        // Try daemon first
+        if let Ok(Response::Ok { message }) = send_request(&Request::Send {
+            window_id,
+            text: text.to_string(),
+        }).await {
+            println!("{}", message);
+            continue;
+        }
+
+        // Direct fallback
+        send_text(window_id, text).context("Failed to send text")?;
+        println!("Sent text to window {}", window_id);
+    }
     Ok(())
 }
 
-async fn cmd_set_icon(window_id: u64, icon: &str) -> Result<()> {
-    // Try daemon first
-    if let Ok(Response::Ok { message }) = send_request(&Request::Tag {
-        window_id,
-        icon: icon.to_string(),
-    }).await {
-        println!("{}", message);
+async fn cmd_set_icon(target: &Target, icon: &str) -> Result<()> {
+    let window_ids = resolve_target(target).await?;
+
+    if window_ids.is_empty() {
+        println!("No Claude windows found");
         return Ok(());
     }
 
-    // Direct fallback - need to find session first
     let windows = discover_claude_windows()?;
-    let window = windows
-        .into_iter()
-        .find(|w| w.kitty_id == window_id)
-        .context("Window not found")?;
-
-    let session_id = window.session_id.context("Window has no session")?;
-
     let conn = init_db()?;
-    set_icon(&conn, &session_id, icon)?;
 
-    println!("Set icon for window {}: {}", window_id, icon);
+    for window_id in window_ids {
+        // Try daemon first
+        if let Ok(Response::Ok { message }) = send_request(&Request::Tag {
+            window_id,
+            icon: icon.to_string(),
+        }).await {
+            println!("{}", message);
+            continue;
+        }
+
+        // Direct fallback - need to find session first
+        let window = windows
+            .iter()
+            .find(|w| w.kitty_id == window_id)
+            .context("Window not found")?;
+
+        let session_id = window.session_id.as_ref().context("Window has no session")?;
+        set_icon(&conn, session_id, icon)?;
+        println!("Set icon for window {}: {}", window_id, icon);
+    }
     Ok(())
 }
 
-async fn cmd_mark_read(window_id: u64) -> Result<()> {
-    // Try daemon first
-    if let Ok(Response::Ok { message }) = send_request(&Request::MarkRead { window_id }).await {
-        println!("{}", message);
+async fn cmd_set_read(target: &Target) -> Result<()> {
+    let window_ids = resolve_target(target).await?;
+
+    if window_ids.is_empty() {
+        println!("No Claude windows found");
         return Ok(());
     }
 
-    // Direct fallback
     let windows = discover_claude_windows()?;
-    let window = windows
-        .into_iter()
-        .find(|w| w.kitty_id == window_id)
-        .context("Window not found")?;
-
-    let session_id = window.session_id.context("Window has no session")?;
-
     let conn = init_db()?;
-    mark_read(&conn, &session_id)?;
 
-    println!("Marked window {} as read", window_id);
+    for window_id in window_ids {
+        // Try daemon first
+        if let Ok(Response::Ok { message }) = send_request(&Request::MarkRead { window_id }).await {
+            println!("{}", message);
+            continue;
+        }
+
+        // Direct fallback
+        let window = windows
+            .iter()
+            .find(|w| w.kitty_id == window_id)
+            .context("Window not found")?;
+
+        let session_id = window.session_id.as_ref().context("Window has no session")?;
+        mark_read(&conn, session_id)?;
+        println!("Marked window {} as read", window_id);
+    }
     Ok(())
 }
 
