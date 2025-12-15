@@ -73,6 +73,10 @@ pub struct BabelState {
     /// Limited to 100 most recent sessions for performance
     pub fingerprint_index: HashMap<String, SessionFingerprint>,
 
+    /// Session path cache (session_id → .jsonl path)
+    /// Populated during summary index rebuild for O(1) session lookup
+    pub session_paths: HashMap<String, PathBuf>,
+
     /// Cached fingerprints for windows (kitty_id → fingerprint)
     /// Extracted from scrollback, used for matching
     pub window_fingerprints: HashMap<u64, SessionFingerprint>,
@@ -110,6 +114,7 @@ impl BabelState {
             windows: HashMap::new(),
             summary_index: Vec::new(),
             fingerprint_index: HashMap::new(),
+            session_paths: HashMap::new(),
             window_fingerprints: HashMap::new(),
             window_states: HashMap::new(),
             start_time: Instant::now(),
@@ -424,6 +429,7 @@ impl BabelState {
         }
 
         let mut index = Vec::new();
+        let mut paths = HashMap::new();
 
         // Scan all project directories
         for project_entry in std::fs::read_dir(&projects_dir)? {
@@ -450,7 +456,10 @@ impl BabelState {
                     .unwrap_or("")
                     .to_string();
 
-                // Skip agent-spawned sessions - they pollute title matching
+                // Cache session path for O(1) lookup (include agent sessions)
+                paths.insert(session_id.clone(), session_path.clone());
+
+                // Skip agent-spawned sessions for summary index - they pollute title matching
                 // (their summaries often match main window titles)
                 if session_id.starts_with("agent-") {
                     continue;
@@ -469,6 +478,7 @@ impl BabelState {
         }
 
         self.summary_index = index;
+        self.session_paths = paths;
         Ok(())
     }
 
@@ -1291,14 +1301,20 @@ async fn process_request(
 
         Request::WSetDelete { name } => {
             match WSet::delete(&name) {
-                Ok(()) => Response::Ok { message: format!("Deleted WSet '{}'", name) },
-                Err(e) => Response::Error { message: format!("Failed to delete WSet '{}': {}", name, e) },
+                Ok(()) => Response::Ok {
+                    message: format!("Deleted WSet '{}'", name),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Failed to delete WSet '{}': {}", name, e),
+                },
             }
         }
 
         Request::WSetRename { old, new } => {
             match WSet::rename(&old, &new) {
-                Ok(()) => Response::Ok { message: format!("Renamed WSet '{}' to '{}'", old, new) },
+                Ok(()) => Response::Ok {
+                    message: format!("Renamed WSet '{}' to '{}'", old, new),
+                },
                 Err(e) => Response::Error {
                     message: format!("Failed to rename WSet: {}", e),
                 },

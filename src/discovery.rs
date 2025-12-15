@@ -105,23 +105,12 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()> {
         return Ok(());
     }
 
-    // Try to match via user_vars first (already tagged)
-    if let Some(ref session_id) = window.session_id {
-        if let Some(info) = load_session_by_id(session_id)? {
-            window.session_info = Some(info);
-            return Ok(());
-        }
-    }
-
-    // Extract summary from title and search
-    let summary = extract_summary_from_title(&window.title);
-    if summary.is_empty() {
-        return Ok(()); // Not an active Claude session
-    }
-
-    if let Some(info) = find_session_by_summary(&summary)? {
-        // Tag the window for fast future lookups
-        let _ = tag_window(window.kitty_id, &info.session_id);
+    // Use shared resolution logic
+    if let Some(info) = resolve_session(
+        window.session_id.as_deref(),
+        &window.title,
+        window.kitty_id,
+    )? {
         window.session_id = Some(info.session_id.clone());
         window.session_info = Some(info);
     }
@@ -139,20 +128,35 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()> {
 ///    - If found, tag window with session_id for future lookups
 /// 3. Return the session ID (as SessionInfo) if matched, None otherwise
 pub fn match_window_to_session(window: &KittyWindow) -> Result<Option<SessionInfo>> {
-    // Check if already tagged
-    if let Some(session_id) = window.user_vars.get("babel_session_id") {
-        if !session_id.is_empty() {
-            // Try to load SessionInfo from the tagged session_id
-            // We'll search by session_id in the conversation files
-            if let Some(info) = load_session_by_id(session_id)? {
-                return Ok(Some(info));
-            }
-            // If we can't find the session file anymore, fall through to re-match
+    let existing_session_id = window
+        .user_vars
+        .get("babel_session_id")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+
+    resolve_session(existing_session_id, &window.title, window.id)
+}
+
+/// Core session resolution logic (shared by enrich_window and match_window_to_session)
+///
+/// 1. If session_id provided, try to load directly (O(1) if cached, O(n×m) otherwise)
+/// 2. Extract summary from title and search by summary
+/// 3. Tag window with result for fast future lookups
+fn resolve_session(
+    session_id: Option<&str>,
+    title: &str,
+    window_id: u64,
+) -> Result<Option<SessionInfo>> {
+    // Try loading by session_id first (already tagged)
+    if let Some(sid) = session_id {
+        if let Some(info) = load_session_by_id(sid, None)? {
+            return Ok(Some(info));
         }
+        // Session file missing/moved - fall through to re-match by title
     }
 
     // Extract summary from title
-    let summary = extract_summary_from_title(&window.title);
+    let summary = extract_summary_from_title(title);
     if summary.is_empty() {
         return Ok(None); // Not an active Claude session
     }
@@ -160,9 +164,9 @@ pub fn match_window_to_session(window: &KittyWindow) -> Result<Option<SessionInf
     // Find matching session by searching conversation files
     let session_info = find_session_by_summary(&summary)?;
 
-    // If we found a match, tag the window
+    // Tag the window for fast future lookups
     if let Some(ref info) = session_info {
-        tag_window(window.id, &info.session_id)?;
+        let _ = tag_window(window_id, &info.session_id);
     }
 
     Ok(session_info)
@@ -175,19 +179,6 @@ pub fn match_window_to_session(window: &KittyWindow) -> Result<Option<SessionInf
 pub fn tag_window(kitty_id: u64, session_id: &str) -> Result<()> {
     set_user_var(kitty_id, "babel_session_id", session_id)
         .context("Failed to tag window with session ID")
-}
-
-/// Find a window by its session ID
-///
-/// Searches all windows for one tagged with the given session ID.
-pub fn find_window_by_session(session_id: &str) -> Result<Option<ClaudeWindow>> {
-    let windows = discover_claude_windows()?;
-    Ok(windows.into_iter().find(|w| {
-        w.session_info
-            .as_ref()
-            .map(|s| s.session_id.as_str())
-            == Some(session_id)
-    }))
 }
 
 // ============================================================================
@@ -208,15 +199,29 @@ fn extract_summary_from_title(title: &str) -> String {
 
 /// Load session info by session ID
 ///
-/// Searches all projects for a session file matching the given ID.
-/// Returns None if not found.
-fn load_session_by_id(session_id: &str) -> Result<Option<SessionInfo>> {
+/// If `path_cache` is provided and contains the session_id, uses O(1) lookup.
+/// Otherwise falls back to O(n×m) scan of all projects/sessions.
+///
+/// The cache is populated by BabelState::rebuild_summary_index() in daemon mode.
+pub fn load_session_by_id(
+    session_id: &str,
+    path_cache: Option<&std::collections::HashMap<String, std::path::PathBuf>>,
+) -> Result<Option<SessionInfo>> {
     use crate::claude_storage::{get_session_info, list_projects, list_sessions};
 
-    // Search all projects for this session ID
+    // Fast path: use cache if available
+    if let Some(cache) = path_cache {
+        if let Some(session_path) = cache.get(session_id) {
+            if session_path.exists() {
+                return Ok(Some(get_session_info(session_path)?));
+            }
+        }
+        // Cache miss or stale - fall through to scan
+    }
+
+    // Slow path: search all projects for this session ID
     for project_dir in list_projects()? {
         for session_path in list_sessions(&project_dir)? {
-            // Check if filename matches the session ID
             if let Some(file_stem) = session_path.file_stem().and_then(|s| s.to_str()) {
                 if file_stem == session_id {
                     let info = get_session_info(&session_path)?;
