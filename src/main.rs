@@ -177,7 +177,8 @@ enum Commands {
     },
 
     /// Mark a window's conversation as read
-    MarkRead {
+    #[command(alias = "sr")]
+    SetRead {
         /// Kitty window ID
         window_id: u64,
     },
@@ -363,7 +364,7 @@ async fn main() -> Result<()> {
         Commands::GetScrollback { window_id, lines } => cmd_get_scrollback(window_id, lines).await,
         Commands::Send { window_id, text } => cmd_send(window_id, &text).await,
         Commands::SetIcon { window_id, icon } => cmd_set_icon(window_id, &icon).await,
-        Commands::MarkRead { window_id } => cmd_mark_read(window_id).await,
+        Commands::SetRead { window_id } => cmd_mark_read(window_id).await,
 
         // Migration commands - direct only (no daemon needed)
         Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
@@ -1086,54 +1087,42 @@ async fn cmd_mv(
     tracing::debug!(%old_encoded, %new_encoded, "encoded folder names");
     tracing::debug!(?old_project_dir, exists = old_project_dir.exists(), "checking project dir");
 
-    // Anxious mode: show full plan upfront
-    if anxious {
-        println!("=== Step-by-step confirmation ===\n");
-        println!("Plan:");
-        let mut step = 1;
-        if !history_only && source_exists {
-            println!("  {}. Move directory: {} → {}", step, source.display(), dest.display());
-            step += 1;
-        }
-        if old_project_dir.exists() {
-            let session_count = fs::read_dir(&old_project_dir)
-                .map(|e| e.filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                    .count())
-                .unwrap_or(0);
-            println!("  {}. Rename Claude project folder:", step);
-            println!("     {} → {}", old_encoded, new_encoded);
-            println!("     ({} session files)", session_count);
-            step += 1;
-        } else {
-            println!("  {}. (skip) No Claude project folder at: {}", step, old_encoded);
-            step += 1;
-        }
-        println!("  {}. Update path references in ~/.claude/history.jsonl", step);
-        println!();
-    }
+    // Count sessions once for reuse
+    let session_count = if old_project_dir.exists() {
+        fs::read_dir(&old_project_dir)
+            .map(|e| e.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
+    // ─────────────────────────────────────────────────────────────────────────────
     // Step 1: Move the actual directory (unless --history-only or --dry-run)
+    // ─────────────────────────────────────────────────────────────────────────────
     if !history_only && source_exists {
+        if anxious {
+            println!("Step 1: Move directory");
+            println!("  FROM: {}", source.display());
+            println!("  TO:   {}", dest.display());
+        }
+
         if dry_run {
             println!("[DRY RUN] Would move directory:");
             println!("  {} → {}", source.display(), dest.display());
         } else {
-            if anxious {
-                println!("Step 1: Move directory");
-                println!("  FROM: {}", source.display());
-                println!("  TO:   {}", dest.display());
-                if !confirm("Proceed with directory move?")? {
-                    bail!("Aborted by user at step 1 (directory move)");
-                }
+            if anxious && !confirm("Proceed with directory move?")? {
+                bail!("Aborted by user");
             }
 
             // Try rename first (same filesystem)
             if let Err(_) = fs::rename(&source, &dest) {
+                tracing::debug!("rename failed, falling back to copy+delete");
                 if anxious {
                     println!("  (rename failed, will copy+delete for cross-filesystem move)");
                     if !confirm("Proceed with copy+delete?")? {
-                        bail!("Aborted by user at step 1 (cross-filesystem copy)");
+                        bail!("Aborted by user");
                     }
                 }
                 // Fall back to copy + delete for cross-filesystem moves
@@ -1145,45 +1134,33 @@ async fn cmd_mv(
                 fs::remove_dir_all(&source)
                     .with_context(|| format!("Failed to remove source: {}", source.display()))?;
             }
-            if anxious {
-                println!("  ✓ Directory moved\n");
-            } else {
-                println!("Moved directory:");
-                println!("  {} → {}", source.display(), dest.display());
-            }
+
+            println!("  ✓ Directory moved");
         }
         println!();
     }
 
-    // Step 2: Migrate Claude's conversation history
-    // Use canonical paths for migrate_project (it will re-canonicalize, but this ensures consistency)
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Step 2: Migrate Claude's conversation history (project folder + history.jsonl)
+    // These are done atomically by migrate_project(), so one confirmation covers both
+    // ─────────────────────────────────────────────────────────────────────────────
     let old_project_path = &source_canonical;
     let new_project_path = &dest_canonical;
 
     tracing::debug!(?old_project_path, ?new_project_path, "paths for migrate_project");
 
-    if anxious && old_project_dir.exists() {
-        let session_count = fs::read_dir(&old_project_dir)
-            .map(|e| e.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                .count())
-            .unwrap_or(0);
-        println!("Step 2: Rename Claude project folder");
-        println!("  FROM: ~/.claude/projects/{}", old_encoded);
-        println!("  TO:   ~/.claude/projects/{}", new_encoded);
-        println!("  Sessions: {} JSONL files", session_count);
-        if !confirm("Proceed with project folder rename?")? {
-            bail!("Aborted by user at step 2 (project folder rename)");
-        }
-    }
-
     if anxious {
-        println!("Step 3: Update history.jsonl");
-        println!("  File: ~/.claude/history.jsonl");
-        println!("  Replace all occurrences of:");
-        println!("    {} → {}", source.display(), dest.display());
-        if !confirm("Proceed with history update?")? {
-            bail!("Aborted by user at step 3 (history update)");
+        println!("Step 2: Update Claude session data");
+        if old_project_dir.exists() {
+            println!("  Rename: ~/.claude/projects/{}", old_encoded);
+            println!("      →   ~/.claude/projects/{}", new_encoded);
+            println!("          ({} session files)", session_count);
+        }
+        println!("  Update: ~/.claude/history.jsonl");
+        println!("          {} → {}", source_canonical.display(), dest_canonical.display());
+        // Only confirm in non-dry-run mode
+        if !dry_run && !confirm("Proceed?")? {
+            bail!("Aborted by user");
         }
     }
 
@@ -1199,33 +1176,20 @@ async fn cmd_mv(
 
     // Display results
     if result.project_folder_renamed {
-        if anxious {
-            println!("  ✓ Renamed project folder ({} sessions)", result.sessions_preserved);
-        } else {
-            println!("  Renamed project folder:");
-            println!("    {} → {}", result.old_folder, result.new_folder);
-        }
-    } else {
-        println!("  No project folder found at: {}", result.old_folder);
+        println!("  ✓ Renamed project folder ({} sessions)", result.sessions_preserved);
+    } else if !dry_run {
+        println!("  (no project folder at: {})", result.old_folder);
     }
 
     if result.history_entries_updated > 0 {
-        if anxious {
-            println!("  ✓ Updated {} history entries", result.history_entries_updated);
-        } else {
-            println!("  Updated {} history entries", result.history_entries_updated);
-        }
-    } else {
-        println!("  No history entries to update");
-    }
-
-    if result.sessions_preserved > 0 && !anxious {
-        println!("  Preserved {} conversation sessions", result.sessions_preserved);
+        println!("  ✓ Updated {} history entries", result.history_entries_updated);
+    } else if !dry_run {
+        println!("  (no history entries matched)");
     }
 
     println!();
     if dry_run {
-        println!("This was a dry run. No changes were made.");
+        println!("Dry run complete. No changes were made.");
     } else {
         println!("Done! Conversation history maintained.");
     }
