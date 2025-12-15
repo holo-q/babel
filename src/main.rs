@@ -1060,11 +1060,31 @@ async fn cmd_mv(
         }
     }
 
+    // Canonicalize paths for accurate project folder lookup
+    // source must exist, dest may not exist yet
+    let source_canonical = source.canonicalize()
+        .unwrap_or_else(|_| source.clone());
+    let dest_canonical = dest.canonicalize().unwrap_or_else(|_| {
+        if dest.is_absolute() {
+            dest.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&dest))
+                .unwrap_or_else(|_| dest.clone())
+        }
+    });
+
+    tracing::debug!(?source, ?dest, "raw paths from CLI");
+    tracing::debug!(?source_canonical, ?dest_canonical, "canonicalized paths");
+
     // Pre-compute paths for anxious mode preview
-    let old_encoded = path_to_encoded(&source);
-    let new_encoded = path_to_encoded(&dest);
+    let old_encoded = path_to_encoded(&source_canonical);
+    let new_encoded = path_to_encoded(&dest_canonical);
     let claude_base = dirs::home_dir().unwrap().join(".claude");
     let old_project_dir = claude_base.join("projects").join(&old_encoded);
+
+    tracing::debug!(%old_encoded, %new_encoded, "encoded folder names");
+    tracing::debug!(?old_project_dir, exists = old_project_dir.exists(), "checking project dir");
 
     // Anxious mode: show full plan upfront
     if anxious {
@@ -1136,9 +1156,11 @@ async fn cmd_mv(
     }
 
     // Step 2: Migrate Claude's conversation history
-    // Use the canonical paths for the project folders (what Claude sees)
-    let old_project_path = if source_exists { &source } else { &source };
-    let new_project_path = if dest.exists() { &dest } else { &dest };
+    // Use canonical paths for migrate_project (it will re-canonicalize, but this ensures consistency)
+    let old_project_path = &source_canonical;
+    let new_project_path = &dest_canonical;
+
+    tracing::debug!(?old_project_path, ?new_project_path, "paths for migrate_project");
 
     if anxious && old_project_dir.exists() {
         let session_count = fs::read_dir(&old_project_dir)
