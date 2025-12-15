@@ -17,7 +17,7 @@ use claude_babel::claude_storage::{get_recent_sessions, SessionInfo};
 use claude_babel::daemon::{run_daemon, run_daemon_traced};
 use claude_babel::discovery::{discover_claude_windows, ClaudeWindow};
 use claude_babel::fingerprint::migrate_project;
-use claude_babel::ipc::{send_request, socket_path, Request, Response};
+use claude_babel::ipc::{send_request, Request, Response};
 use claude_babel::kitty::{focus_window, get_scrollback, send_text};
 use claude_babel::overlay::{get_metadata, init_db, mark_read, set_icon};
 
@@ -31,6 +31,10 @@ struct Cli {
     /// Output as JSON
     #[arg(long, global = true)]
     json: bool,
+
+    /// Logging args (--debug) - enforced by spaceship-std
+    #[command(flatten)]
+    logging: spaceship_std::logging::LoggingArgs,
 }
 
 #[derive(Subcommand)]
@@ -42,11 +46,6 @@ enum Commands {
         trace: bool,
     },
 
-    /// Stop the running daemon
-    Stop,
-
-    /// Check if daemon is running
-    Ping,
 
     /// List all discovered Claude sessions
     #[command(alias = "list")]
@@ -59,13 +58,31 @@ enum Commands {
     /// List all kitty terminals (not just Claude)
     LsTerminals,
 
-    /// List all kitty panels/windows with their IDs
-    LsPanels,
+    /// List all kitty panes with their IDs
+    ///
+    /// Shows all kitty window panes grouped by OS window. Panes are the
+    /// individual terminal views within a kitty window.
+    #[command(alias = "lsp")]
+    LsPanes,
 
-    /// Show status of a specific window
-    Status {
-        /// Kitty window ID to query
+    /// Check status of a kitty window
+    ///
+    /// Shows detailed information about a Claude window including session info,
+    /// fingerprint data, and activity state. If no window ID is provided, shows
+    /// the currently focused Claude window.
+    #[command(alias = "cw")]
+    CheckWindow {
+        /// Kitty window ID to query (omit for focused window)
         window_id: Option<u64>,
+    },
+
+    /// Check status of a panel pane
+    ///
+    /// Shows information about a richspace-babel panel pane.
+    #[command(alias = "cp")]
+    CheckPane {
+        /// Pane name to query
+        pane_name: Option<String>,
     },
 
     /// Focus a Claude window (rofi picker if no ID given)
@@ -74,10 +91,17 @@ enum Commands {
         window_id: Option<u64>,
     },
 
-    /// Get scrollback from a window
-    Scroll {
+    /// Get scrollback text from a window
+    ///
+    /// Retrieves the full scrollback buffer from a kitty window. Useful for
+    /// debugging or piping to other tools.
+    #[command(alias = "gsb")]
+    GetScrollback {
         /// Kitty window ID
         window_id: u64,
+        /// Maximum number of lines to retrieve
+        #[arg(short, long)]
+        lines: Option<usize>,
     },
 
     /// Send text to a Claude window
@@ -89,12 +113,17 @@ enum Commands {
         text: String,
     },
 
-    /// Tag a window with a custom icon
-    Tag {
+    /// Set a custom icon for a window
+    ///
+    /// Associates a custom emoji or icon with a Claude session. The icon
+    /// appears in `babel ls` output and can be used to visually mark
+    /// important sessions.
+    #[command(alias = "si")]
+    SetIcon {
         /// Kitty window ID
         window_id: u64,
 
-        /// Icon/tag to apply
+        /// Icon/emoji to display (e.g., "🔥", "⭐", "🚧")
         icon: String,
     },
 
@@ -105,28 +134,31 @@ enum Commands {
     },
 
     /// Show conversation history from ~/.claude
+    ///
+    /// Without arguments, shows recent conversations. Pass session IDs as
+    /// positional arguments to show specific sessions.
+    #[command(alias = "h")]
     History {
-        /// Limit number of results
+        /// Session IDs to show (if none, shows recent conversations)
+        #[arg(value_name = "SESSION")]
+        sessions: Vec<String>,
+
+        /// Limit number of results (when no session IDs specified)
         #[arg(short, long, default_value = "20")]
         limit: usize,
+
+        /// Show all sessions (overrides limit)
+        #[arg(long)]
+        all: bool,
     },
 
-    /// Force refresh daemon state
-    Refresh,
 
-    /// Subscribe to daemon events (streaming)
-    Subscribe {
-        /// Event types to subscribe to (empty = all)
-        #[arg(short, long)]
-        events: Vec<String>,
-
-        /// Output format: json (default) or compact
-        #[arg(long, default_value = "json")]
-        format: String,
-    },
-
-    /// Get or refresh workspace titles
-    Titles {
+    /// Update or display workspace titles
+    ///
+    /// Workspace titles are derived from the Claude sessions visible on each
+    /// workspace. Use --refresh to force an update from the current window state.
+    #[command(alias = "ut")]
+    UpdateTitles {
         /// Force refresh titles (otherwise returns cached)
         #[arg(short, long)]
         refresh: bool,
@@ -184,34 +216,57 @@ enum Commands {
     /// and matching session JSONL files. Use this to debug why `babel mv` doesn't
     /// detect a session or why matching fails.
     ///
-    /// At least one of --window, --dir, --session, or --jsonl is required.
+    /// Input is auto-detected:
+    ///   - Pure number (42) → window ID
+    ///   - Path-like (., ./foo, /path) → directory
+    ///   - Otherwise → session ID
+    ///
+    /// Examples:
+    ///   babel fingerprint 42        # Trace window ID 42
+    ///   babel fingerprint .         # Trace current directory
+    ///   babel fingerprint abc123    # Trace session abc123
     #[command(alias = "fp")]
     Fingerprint {
-        /// Kitty window ID to trace (shows fingerprint + best session matches)
-        #[arg(long, short)]
-        window: Option<u64>,
+        /// Window ID, directory path, or session ID (auto-detected)
+        #[arg(value_name = "INPUT")]
+        input: Option<String>,
 
-        /// Directory to scope (shows terminals + sessions in this directory)
-        #[arg(long, short)]
-        dir: Option<PathBuf>,
+        /// Force interpretation as window ID
+        #[arg(long, short = 'w')]
+        window: bool,
 
-        /// Session ID to trace (shows fingerprint + matching terminals)
-        #[arg(long, short)]
-        session: Option<String>,
+        /// Force interpretation as directory
+        #[arg(long, short = 'd')]
+        dir: bool,
 
-        /// JSONL file path to trace directly
-        #[arg(long)]
-        jsonl: Option<PathBuf>,
+        /// Force interpretation as session ID
+        #[arg(long, short = 's')]
+        session: bool,
     },
 
     // ─── WSet Commands ──────────────────────────────────────────────────────────
 
-    /// Save current workspace layout to a WSet
+    /// Manage saved workspace sets (WSet)
+    ///
+    /// Workspace sets capture all Claude windows and their positions across workspaces.
+    /// Use `babel wset save` and `babel wset load` to manage layouts.
+    #[command(alias = "ws")]
+    Wset {
+        #[command(subcommand)]
+        command: WSetCommands,
+    },
+}
+
+/// WSet management subcommands
+#[derive(Subcommand)]
+enum WSetCommands {
+    /// Save current workspace layout
     ///
     /// Captures all Claude windows and their positions across workspaces.
     /// WSet files are stored in ~/.config/claude-babel/wsets/
+    #[command(alias = "s")]
     Save {
-        /// Name for the WSet (defaults to current WSet name, or "default")
+        /// Name for the WSet (defaults to "default")
         name: Option<String>,
 
         /// Overwrite existing WSet without confirmation
@@ -219,30 +274,24 @@ enum Commands {
         force: bool,
     },
 
-    /// Load a workspace layout from a WSet
+    /// Load a workspace layout
     ///
-    /// Closes all existing Claude windows and spawns new ones from the saved state.
+    /// Spawns Claude windows from the saved state.
     /// Sessions that no longer exist in ~/.claude are skipped.
+    #[command(alias = "l")]
     Load {
-        /// Name of WSet to load (defaults to current WSet)
+        /// Name of WSet to load (defaults to "default")
         name: Option<String>,
 
         /// Show what would happen without executing
-        #[arg(long = "dry", id = "dry_run")]
+        #[arg(long = "dry")]
         dry_run: bool,
+
+        /// Step-by-step confirmation mode
+        #[arg(long)]
+        anxious: bool,
     },
 
-    /// Manage saved workspace sets (WSet)
-    #[command(alias = "ws")]
-    Wset {
-        #[command(subcommand)]
-        command: Option<WSetCommands>,
-    },
-}
-
-/// WSet management subcommands
-#[derive(Subcommand)]
-enum WSetCommands {
     /// List all saved WSet files
     #[command(alias = "ls")]
     List,
@@ -273,12 +322,14 @@ enum WSetCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI first to get --debug flag before logging init
+    let cli = Cli::parse();
+
     // Initialize logging via spaceship-std (centralized config + SIGHUP hot-reload)
     // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
     // "babel" = config key and journald identifier, "claude_babel" = Rust crate for filtering
-    spaceship_std::logging::init("babel", "claude_babel");
-
-    let cli = Cli::parse();
+    // --debug flag forces debug level regardless of config
+    spaceship_std::logging::init("babel", "claude_babel", &cli.logging);
 
     match cli.command {
         // Daemon management commands - always direct
@@ -289,24 +340,21 @@ async fn main() -> Result<()> {
                 run_daemon().await
             }
         }
-        Commands::Stop => cmd_stop().await,
-        Commands::Ping => cmd_ping().await,
-        Commands::Refresh => cmd_refresh().await,
-        Commands::Subscribe { events, format } => cmd_subscribe(events, format).await,
-        Commands::Titles { refresh, workspace } => cmd_titles(cli.json, refresh, workspace).await,
+        Commands::UpdateTitles { refresh, workspace } => cmd_update_titles(cli.json, refresh, workspace).await,
 
         // Data commands - use daemon if available
         Commands::Ls { details } => cmd_list(cli.json, details).await,
         Commands::LsTerminals => cmd_ls_terminals(cli.json).await,
-        Commands::LsPanels => cmd_ls_panels(cli.json).await,
-        Commands::Status { window_id } => cmd_status(window_id, cli.json).await,
-        Commands::History { limit } => cmd_history(limit, cli.json).await,
+        Commands::LsPanes => cmd_ls_panes(cli.json).await,
+        Commands::CheckWindow { window_id } => cmd_check_window(window_id, cli.json).await,
+        Commands::CheckPane { pane_name } => cmd_check_pane(pane_name, cli.json).await,
+        Commands::History { sessions, limit, all } => cmd_history(sessions, limit, all, cli.json).await,
 
         // Action commands - use daemon if available
         Commands::Focus { window_id } => cmd_focus(window_id).await,
-        Commands::Scroll { window_id } => cmd_scroll(window_id).await,
+        Commands::GetScrollback { window_id, lines } => cmd_get_scrollback(window_id, lines).await,
         Commands::Send { window_id, text } => cmd_send(window_id, &text).await,
-        Commands::Tag { window_id, icon } => cmd_tag(window_id, &icon).await,
+        Commands::SetIcon { window_id, icon } => cmd_set_icon(window_id, &icon).await,
         Commands::MarkRead { window_id } => cmd_mark_read(window_id).await,
 
         // Migration commands - direct only (no daemon needed)
@@ -315,72 +363,20 @@ async fn main() -> Result<()> {
         }
 
         // Diagnostic commands
-        Commands::Fingerprint { window, dir, session, jsonl } => {
-            cmd_fingerprint(window, dir, session, jsonl, cli.json).await
+        Commands::Fingerprint { input, window, dir, session } => {
+            cmd_fingerprint(input, window, dir, session, cli.json).await
         }
 
         // WSet commands
-        Commands::Save { name, force } => cmd_save(name, force, cli.json).await,
-        Commands::Load { name, dry_run } => cmd_load(name, dry_run, cli.json).await,
         Commands::Wset { command } => cmd_wset(command, cli.json).await,
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Daemon Management Commands
+// Daemon Commands
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn cmd_stop() -> Result<()> {
-    match send_request(&Request::Shutdown).await {
-        Ok(Response::Ok { message }) => {
-            println!("{}", message);
-            Ok(())
-        }
-        Ok(Response::Error { message }) => {
-            tracing::error!("Shutdown failed: {}", message);
-            Ok(())
-        }
-        Err(_) => {
-            println!("Daemon not running");
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-async fn cmd_ping() -> Result<()> {
-    match send_request(&Request::Ping).await {
-        Ok(Response::Pong { uptime_secs }) => {
-            println!("Daemon running (uptime: {}s)", uptime_secs);
-            Ok(())
-        }
-        Err(_) => {
-            println!("Daemon not running");
-            std::process::exit(1);
-        }
-        _ => Ok(()),
-    }
-}
-
-async fn cmd_refresh() -> Result<()> {
-    match send_request(&Request::Refresh).await {
-        Ok(Response::Ok { message }) => {
-            println!("{}", message);
-            Ok(())
-        }
-        Ok(Response::Error { message }) => {
-            tracing::error!("Refresh failed: {}", message);
-            Ok(())
-        }
-        Err(_) => {
-            println!("Daemon not running");
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-async fn cmd_titles(json: bool, refresh: bool, workspace: Option<i32>) -> Result<()> {
+async fn cmd_update_titles(json: bool, refresh: bool, workspace: Option<i32>) -> Result<()> {
     // If refresh requested, trigger it and show results
     if refresh {
         match send_request(&Request::TitleRefresh { workspace }).await {
@@ -436,55 +432,6 @@ async fn cmd_titles(json: bool, refresh: bool, workspace: Option<i32>) -> Result
     }
 }
 
-async fn cmd_subscribe(events: Vec<String>, format: String) -> Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let request = Request::Subscribe { events };
-    let sock_path = socket_path();
-
-    let stream = tokio::net::UnixStream::connect(&sock_path)
-        .await
-        .context("Failed to connect to daemon")?;
-
-    // Send subscribe request
-    let (reader, mut writer) = stream.into_split();
-    let mut request_json = serde_json::to_string(&request)?;
-    request_json.push('\n');
-    writer.write_all(request_json.as_bytes()).await?;
-
-    // Read events forever
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            tracing::info!("Event stream connection closed");
-            break;
-        }
-
-        if format == "compact" {
-            // Parse and format compactly
-            if let Ok(resp) = serde_json::from_str::<Response>(&line) {
-                match resp {
-                    Response::Event { event } => {
-                        println!("[{}] {:?}", event.timestamp.format("%H:%M:%S"), event.event);
-                    }
-                    Response::Subscribed { subscriber_id } => {
-                        tracing::info!(subscriber_id, "Subscribed to events");
-                    }
-                    _ => {}
-                }
-            }
-        } else {
-            // Raw JSON output
-            print!("{}", line);
-        }
-    }
-
-    Ok(())
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data Commands - Daemon or Direct
@@ -589,8 +536,8 @@ async fn cmd_ls_terminals(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// List all kitty panels/windows grouped by OS window
-async fn cmd_ls_panels(json: bool) -> Result<()> {
+/// List all kitty panes grouped by OS window
+async fn cmd_ls_panes(json: bool) -> Result<()> {
     use claude_babel::kitty::list_windows;
     use std::collections::HashMap;
 
@@ -602,7 +549,7 @@ async fn cmd_ls_panels(json: bool) -> Result<()> {
     }
 
     if windows.is_empty() {
-        println!("No kitty panels found");
+        println!("No kitty panes found");
         return Ok(());
     }
 
@@ -612,13 +559,13 @@ async fn cmd_ls_panels(json: bool) -> Result<()> {
         by_os_window.entry(win.os_window_id).or_default().push(win);
     }
 
-    let total_panels: usize = by_os_window.values().map(|v| v.len()).sum();
-    println!("Kitty panels ({} panels in {} OS windows):", total_panels, by_os_window.len());
+    let total_panes: usize = by_os_window.values().map(|v| v.len()).sum();
+    println!("Kitty panes ({} panes in {} OS windows):", total_panes, by_os_window.len());
     println!();
 
-    for (os_id, panels) in by_os_window.iter() {
-        println!("  OS Window {} ({} panels):", os_id, panels.len());
-        for win in panels {
+    for (os_id, panes) in by_os_window.iter() {
+        println!("  OS Window {} ({} panes):", os_id, panes.len());
+        for win in panes {
             let title: String = win.title.chars().take(50).collect();
             let title = if win.title.len() > 50 {
                 format!("{}…", title)
@@ -633,7 +580,7 @@ async fn cmd_ls_panels(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status(window_id: Option<u64>, json: bool) -> Result<()> {
+async fn cmd_check_window(window_id: Option<u64>, json: bool) -> Result<()> {
     let window = get_window(window_id).await?;
 
     match window {
@@ -647,6 +594,8 @@ async fn cmd_status(window_id: Option<u64>, json: bool) -> Result<()> {
         None => {
             if window_id.is_some() {
                 println!("Window not found or not a Claude session");
+                println!();
+                show_available_windows().await?;
             } else {
                 println!("No focused Claude window found");
             }
@@ -656,23 +605,60 @@ async fn cmd_status(window_id: Option<u64>, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_history(limit: usize, json: bool) -> Result<()> {
-    let sessions = get_history(limit).await?;
+async fn cmd_check_pane(pane_name: Option<String>, _json: bool) -> Result<()> {
+    // TODO: Implement once richspace-babel pane querying is available
+    match pane_name {
+        Some(name) => {
+            println!("Pane '{}' not found (richspace-babel integration pending)", name);
+        }
+        None => {
+            println!("No pane name specified");
+            println!();
+            println!("Usage: babel check-pane <PANE_NAME>");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_history(sessions: Vec<String>, limit: usize, all: bool, json: bool) -> Result<()> {
+    // Determine effective limit
+    let effective_limit = if all { usize::MAX } else { limit };
+
+    // If specific sessions requested, filter to those
+    let results = if !sessions.is_empty() {
+        // TODO: Implement session ID filtering via daemon or direct lookup
+        // For now, filter from full history
+        let all_sessions = get_history(usize::MAX).await?;
+        all_sessions
+            .into_iter()
+            .filter(|s| sessions.iter().any(|id| s.session_id.contains(id)))
+            .collect()
+    } else {
+        get_history(effective_limit).await?
+    };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        println!("{}", serde_json::to_string_pretty(&results)?);
+        return Ok(());
+    }
+
+    if results.is_empty() {
+        if !sessions.is_empty() {
+            println!("No sessions found matching: {}", sessions.join(", "));
+        } else {
+            println!("No conversation history found");
+        }
         return Ok(());
     }
 
     if sessions.is_empty() {
-        println!("No conversation history found");
-        return Ok(());
+        println!("Recent conversations:");
+    } else {
+        println!("Matching sessions:");
     }
-
-    println!("Recent conversations:");
     println!();
 
-    for session in &sessions {
+    for session in &results {
         print_session(session)?;
     }
 
@@ -763,16 +749,26 @@ async fn focus_by_id(window_id: u64) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_scroll(window_id: u64) -> Result<()> {
+async fn cmd_get_scrollback(window_id: u64, lines: Option<usize>) -> Result<()> {
     // Try daemon first
     if let Ok(Response::Scrollback { text }) = send_request(&Request::Scroll { window_id }).await {
-        print!("{}", text);
+        let output = if let Some(n) = lines {
+            text.lines().take(n).collect::<Vec<_>>().join("\n")
+        } else {
+            text
+        };
+        print!("{}", output);
         return Ok(());
     }
 
     // Direct fallback
     let scrollback = get_scrollback(window_id).context("Failed to get scrollback")?;
-    print!("{}", scrollback);
+    let output = if let Some(n) = lines {
+        scrollback.lines().take(n).collect::<Vec<_>>().join("\n")
+    } else {
+        scrollback
+    };
+    print!("{}", output);
     Ok(())
 }
 
@@ -792,7 +788,7 @@ async fn cmd_send(window_id: u64, text: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_tag(window_id: u64, icon: &str) -> Result<()> {
+async fn cmd_set_icon(window_id: u64, icon: &str) -> Result<()> {
     // Try daemon first
     if let Ok(Response::Ok { message }) = send_request(&Request::Tag {
         window_id,
@@ -814,7 +810,7 @@ async fn cmd_tag(window_id: u64, icon: &str) -> Result<()> {
     let conn = init_db()?;
     set_icon(&conn, &session_id, icon)?;
 
-    println!("Tagged window {} with: {}", window_id, icon);
+    println!("Set icon for window {}: {}", window_id, icon);
     Ok(())
 }
 
@@ -1259,23 +1255,65 @@ use claude_babel::claude_storage::list_sessions;
 
 /// Debug fingerprint linkage between terminals, sessions, and directories
 ///
-/// At least one input is required. Shows the full trace of fingerprint data
+/// Input is auto-detected or forced via flags. Shows the full trace of fingerprint data
 /// and cross-matching between terminals and session files.
 async fn cmd_fingerprint(
-    window: Option<u64>,
-    dir: Option<PathBuf>,
-    session: Option<String>,
-    jsonl: Option<PathBuf>,
+    input: Option<String>,
+    force_window: bool,
+    force_dir: bool,
+    force_session: bool,
     json: bool,
 ) -> Result<()> {
     use claude_babel::fingerprint::path_to_encoded;
     use console::style;
 
-    // Require at least one input
-    if window.is_none() && dir.is_none() && session.is_none() && jsonl.is_none() {
-        bail!("At least one of --window, --dir, --session, or --jsonl is required.\n\
-               Use 'babel ls' to see all terminals.");
+    // Require input
+    let input = match input {
+        Some(i) => i,
+        None => {
+            bail!("Input required: window ID, directory path, or session ID.\n\
+                   Examples:\n\
+                     babel fingerprint 42        # Window ID\n\
+                     babel fingerprint .         # Current directory\n\
+                     babel fingerprint abc123    # Session ID");
+        }
+    };
+
+    // Determine input type via flags or auto-detection
+    enum InputType {
+        Window(u64),
+        Directory(PathBuf),
+        Session(String),
     }
+
+    let input_type = if force_window {
+        let id = input.parse::<u64>()
+            .context("--window flag set but input is not a valid window ID")?;
+        InputType::Window(id)
+    } else if force_dir {
+        InputType::Directory(PathBuf::from(&input))
+    } else if force_session {
+        InputType::Session(input.clone())
+    } else {
+        // Auto-detect based on content
+        if input.chars().all(|c| c.is_ascii_digit()) {
+            // Pure digits = window ID
+            InputType::Window(input.parse().unwrap())
+        } else if input.starts_with('/') || input.starts_with('.') || input.contains('/') {
+            // Path-like = directory
+            InputType::Directory(PathBuf::from(&input))
+        } else {
+            // Otherwise = session ID
+            InputType::Session(input.clone())
+        }
+    };
+
+    // Convert to the old parameter style for compatibility with existing logic
+    let (window, dir, session): (Option<u64>, Option<PathBuf>, Option<String>) = match input_type {
+        InputType::Window(id) => (Some(id), None, None),
+        InputType::Directory(path) => (None, Some(path), None),
+        InputType::Session(id) => (None, None, Some(id)),
+    };
 
     // Resolve directory to absolute path
     let scope_dir = dir.map(|d| {
@@ -1297,9 +1335,6 @@ async fn cmd_fingerprint(
     }
     if let Some(ref s) = session {
         println!("Input: session {}", s);
-    }
-    if let Some(ref j) = jsonl {
-        println!("Input: jsonl {}", j.display());
     }
     println!();
 
@@ -1385,9 +1420,6 @@ async fn cmd_fingerprint(
             println!("    {}", style("(no project folder found)").dim());
             vec![]
         }
-    } else if let Some(ref j) = jsonl {
-        // JSONL file specified - use its parent directory
-        j.parent().map(|p| vec![p.to_path_buf()]).unwrap_or_default()
     } else if let Some(ref s) = session {
         // Session ID specified - search all projects
         let mut found = Vec::new();
@@ -1422,8 +1454,6 @@ async fn cmd_fingerprint(
         let sessions: Vec<_> = sessions.into_iter().filter(|path| {
             if let Some(ref s) = session {
                 path.file_stem().map(|fs| fs.to_string_lossy().contains(s)).unwrap_or(false)
-            } else if let Some(ref j) = jsonl {
-                path == j
             } else {
                 true
             }
@@ -1573,10 +1603,32 @@ fn format_confidence(conf: MatchConfidence) -> &'static str {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// UX Helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Show available Claude windows when user provides invalid input
+async fn show_available_windows() -> Result<()> {
+    let windows = get_windows().await?;
+
+    if windows.is_empty() {
+        println!("No Claude windows found");
+        return Ok(());
+    }
+
+    println!("Available Claude windows:");
+    for w in &windows {
+        let title = w.title.strip_prefix("✳ ").unwrap_or(&w.title);
+        let title: String = title.chars().take(30).collect();
+        println!("  {:>5}  {:30}  {}", w.kitty_id, title, w.cwd.display());
+    }
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // WSet Commands
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async fn cmd_save(name: Option<String>, _force: bool, json: bool) -> Result<()> {
+async fn cmd_wset_save(name: Option<String>, _force: bool, json: bool) -> Result<()> {
     let request = Request::WSetSave { name };
 
     match send_request(&request).await {
@@ -1608,7 +1660,7 @@ async fn cmd_save(name: Option<String>, _force: bool, json: bool) -> Result<()> 
     }
 }
 
-async fn cmd_load(name: Option<String>, dry_run: bool, json: bool) -> Result<()> {
+async fn cmd_wset_load(name: Option<String>, dry_run: bool, _anxious: bool, json: bool) -> Result<()> {
     // First, get a dry-run preview
     let preview_request = Request::WSetLoad { name: name.clone(), dry_run: true };
 
@@ -1773,40 +1825,17 @@ async fn cmd_load(name: Option<String>, dry_run: bool, json: bool) -> Result<()>
     }
 }
 
-async fn cmd_wset(command: Option<WSetCommands>, json: bool) -> Result<()> {
+async fn cmd_wset(command: WSetCommands, json: bool) -> Result<()> {
     match command {
-        None => {
-            // Show current WSet name
-            match send_request(&Request::WSetCurrent).await {
-                Ok(Response::WSetCurrent { name }) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                            "current": name,
-                        }))?);
-                    } else {
-                        match name {
-                            Some(n) => println!("Current WSet: {}", n),
-                            None => println!("No current WSet (run 'babel save' to create one)"),
-                        }
-                    }
-                    Ok(())
-                }
-                Ok(Response::Error { message }) => {
-                    eprintln!("error: {}", message);
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("error: daemon not running: {}", e);
-                    std::process::exit(1);
-                }
-                Ok(other) => {
-                    eprintln!("error: unexpected response from daemon: {:?}", other);
-                    std::process::exit(1);
-                }
-            }
+        WSetCommands::Save { name, force } => {
+            cmd_wset_save(name, force, json).await
         }
 
-        Some(WSetCommands::List) => {
+        WSetCommands::Load { name, dry_run, anxious } => {
+            cmd_wset_load(name, dry_run, anxious, json).await
+        }
+
+        WSetCommands::List => {
             match send_request(&Request::WSetList).await {
                 Ok(Response::WSetList { wsets, current }) => {
                     if json {
@@ -1850,7 +1879,7 @@ async fn cmd_wset(command: Option<WSetCommands>, json: bool) -> Result<()> {
             }
         }
 
-        Some(WSetCommands::Rename { old, new }) => {
+        WSetCommands::Rename { old, new } => {
             match send_request(&Request::WSetRename { old: old.clone(), new: new.clone() }).await {
                 Ok(Response::Ok { message }) => {
                     if json {
@@ -1879,7 +1908,7 @@ async fn cmd_wset(command: Option<WSetCommands>, json: bool) -> Result<()> {
             }
         }
 
-        Some(WSetCommands::Delete { name }) => {
+        WSetCommands::Delete { name } => {
             match send_request(&Request::WSetDelete { name: name.clone() }).await {
                 Ok(Response::Ok { message }) => {
                     if json {
@@ -1907,7 +1936,7 @@ async fn cmd_wset(command: Option<WSetCommands>, json: bool) -> Result<()> {
             }
         }
 
-        Some(WSetCommands::Describe { name, description }) => {
+        WSetCommands::Describe { name, description } => {
             match send_request(&Request::WSetDescribe { name: name.clone(), description: description.clone() }).await {
                 Ok(Response::Ok { message }) => {
                     if json {
