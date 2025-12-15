@@ -105,24 +105,41 @@ const MUTATION_COMMANDS: &[&str] = &[
 /// - Mutation commands (state-changing): underline
 /// - Namespace commands (wset, daemon, help): normal
 fn style_help_output(help: &str) -> String {
-    let mut result = help.to_string();
+    let mut result = String::new();
 
-    // Style query commands (italic)
-    for cmd in QUERY_COMMANDS {
-        // Match command at start of line with proper spacing (clap's format)
-        let pattern = format!("  {}  ", cmd);
-        let styled = format!("  {}{}{}  ", ITALIC, cmd, RESET);
-        result = result.replace(&pattern, &styled);
-    }
-
-    // Style mutation commands (underline)
-    for cmd in MUTATION_COMMANDS {
-        let pattern = format!("  {}  ", cmd);
-        let styled = format!("  {}{}{}  ", UNDERLINE, cmd, RESET);
-        result = result.replace(&pattern, &styled);
+    for line in help.lines() {
+        let styled_line = style_command_line(line);
+        result.push_str(&styled_line);
+        result.push('\n');
     }
 
     result
+}
+
+/// Style a single line if it contains a command name
+fn style_command_line(line: &str) -> String {
+    // Command lines in clap start with "  command_name" (2 spaces, then command)
+    if !line.starts_with("  ") {
+        return line.to_string();
+    }
+
+    let trimmed = line.trim_start();
+
+    // Check for query commands (italic)
+    for cmd in QUERY_COMMANDS {
+        if trimmed.starts_with(cmd) && trimmed[cmd.len()..].starts_with(' ') {
+            return line.replacen(cmd, &format!("{}{}{}", ITALIC, cmd, RESET), 1);
+        }
+    }
+
+    // Check for mutation commands (underline)
+    for cmd in MUTATION_COMMANDS {
+        if trimmed.starts_with(cmd) && trimmed[cmd.len()..].starts_with(' ') {
+            return line.replacen(cmd, &format!("{}{}{}", UNDERLINE, cmd, RESET), 1);
+        }
+    }
+
+    line.to_string()
 }
 
 #[derive(Parser)]
@@ -448,13 +465,22 @@ enum WSetCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Intercept --help to apply semantic command styling
-    // Must happen before Cli::parse() which would exit on --help
+    // Intercept help display to apply semantic command styling
+    // Cases: `babel --help`, `babel -h`, or `babel` with no subcommand
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") && args.len() <= 2 {
-        // Top-level help requested - render with styled command names
+    let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
+    let no_subcommand = args.len() == 1; // Just "babel" with no args
+
+    if (wants_help && args.len() <= 2) || no_subcommand {
+        // Show styled help - print directly, escape sequences included
         let help = Cli::command().render_help().to_string();
-        print!("{}", style_help_output(&help));
+        let styled = style_help_output(&help);
+        print!("{}", styled);
+
+        // Exit with error code if no subcommand (clap would too)
+        if no_subcommand && !wants_help {
+            std::process::exit(2);
+        }
         return Ok(());
     }
 
