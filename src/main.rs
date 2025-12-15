@@ -63,9 +63,24 @@ async fn resolve_target(target: &Target) -> Result<Vec<u64>> {
     }
 }
 
+/// Spaceship CLI style: bold+underline for command names
+///
+/// This is a standard pattern across spaceship software for instant visual
+/// recognition of actionable commands in help output.
+fn spaceship_styles() -> clap::builder::Styles {
+    use anstyle::{Style, Effects};
+
+    clap::builder::Styles::styled()
+        // Command/subcommand names: bold + underline for instant recognition
+        .literal(Style::new().effects(Effects::BOLD | Effects::UNDERLINE))
+        // Placeholders (VALUE, FILE, etc): just dim
+        .placeholder(Style::new().effects(Effects::DIMMED))
+}
+
 #[derive(Parser)]
 #[command(name = "babel")]
 #[command(about = "Manage Claude Code sessions across kitty windows", long_about = None)]
+#[command(styles = spaceship_styles())]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

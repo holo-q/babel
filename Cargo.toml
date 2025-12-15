@@ -32,9 +32,12 @@ rofi = "0.4"              # Spawn rofi menus and parse selections
 # LLM summarization
 reqwest = { version = "0.12", features = ["json"] }
 
-# Logging - tracing ecosystem for structured, async-safe logging
-# Sink: journald (view with: journalctl -t babel)
-# Level: RUST_LOG env var (default: info), e.g. RUST_LOG=claude_babel=debug
+# Logging - delegated to spaceship-std for centralized config
+# View logs: journalctl -t babel -f
+# Reload: kill -HUP $(pgrep babel)
+spaceship-std = { version = "0.1", path = "../spaceship-std" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-journald = "0.3"
+
+# Config serialization (used by wset.rs for workspace set persistence)
+toml = "0.8"
+anstyle = "1.0.13"
