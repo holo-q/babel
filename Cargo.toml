@@ -38,6 +38,9 @@ reqwest = { version = "0.12", features = ["json"] }
 spaceship-std = { version = "0.1", path = "../spaceship-std" }
 tracing = "0.1"
 
+# Scrollback parsing - ActivityState detection for Claude sessions
+scrollparse = { version = "0.1", path = "../scrollparse", features = ["serde"] }
+
 # Config serialization (used by wset.rs for workspace set persistence)
 toml = "0.8"
 anstyle = "1.0.13"

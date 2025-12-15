@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
 
         // ─── Query Commands (read-only, safe) ────────────────────────────────────
         Commands::Ls { details } => {
-            cli::query::cmd_list(&core, cli.json, details).await
+            cli::query::cmd_ls(&core, cli.json, details).await
         }
 
         Commands::LsTerminals { all } => {
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
         }
 
         // ─── Workspace Sets ──────────────────────────────────────────────────────
-        Commands::Wset { command } => {
+        Commands::WSet { command } => {
             cli::wset::cmd_wset(&core, command, cli.json).await
         }
     }

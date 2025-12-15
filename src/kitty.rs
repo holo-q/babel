@@ -516,6 +516,53 @@ pub fn get_scrollback(id: u64) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Get the last N lines of scrollback from a window
+///
+/// Uses kitty's remote control to extract recent scrollback.
+/// Useful for state detection where only recent lines matter.
+pub fn get_recent_scrollback(id: u64, lines: usize) -> Result<String> {
+    // Get screen content (visible area) which is faster than full scrollback
+    let socket = kitty_socket_path();
+    let output = Command::new("kitten")
+        .args([
+            "@", "--to", &socket, "get-text",
+            "--match", &format!("id:{}", id),
+            "--extent", "screen",
+        ])
+        .output()
+        .context("Failed to execute 'kitten @ get-text'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ get-text failed: {}", stderr);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // Return the last N lines
+    let result: Vec<&str> = text
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    Ok(result.join("\n"))
+}
+
+/// Get the current activity state of a Claude session by window ID
+///
+/// Convenience function that fetches scrollback and detects activity state.
+/// Returns Unknown on any error (window not found, kitten failure, etc.)
+pub fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState {
+    match get_recent_scrollback(id, 20) {
+        Ok(scrollback) => scrollparse::claude::detect_activity_state(&scrollback),
+        Err(_) => scrollparse::claude::ActivityState::Unknown,
+    }
+}
+
 /// Send text to a window's input
 ///
 /// Text is sent as if typed by the user. Does not include a newline by default.

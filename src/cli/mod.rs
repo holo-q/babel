@@ -169,7 +169,7 @@ pub enum Commands {
     // ─── Information Retrieval (italic = query, safe to run) ─────────────────────
 
     /// List all discovered Claude sessions
-    #[command(alias = "list")]
+    #[command()]
     Ls {
         /// Show detailed multiline info for each session
         #[arg(short, long)]
@@ -191,7 +191,7 @@ pub enum Commands {
     ///
     /// Shows all kitty window panes grouped by OS window. Panes are the
     /// individual terminal views within a kitty window.
-    #[command( alias = "lsp")]
+    #[command()]
     LsPanes,
 
     /// Get status of a kitty window
@@ -199,7 +199,7 @@ pub enum Commands {
     /// Shows detailed information about a Claude window including session info,
     /// fingerprint data, and activity state. If no window ID is provided, shows
     /// the currently focused Claude window.
-    #[command(alias = "gw")]
+    #[command()]
     GetWindow {
         /// Kitty window ID to query (omit for focused window)
         window_id: Option<u64>,
@@ -208,7 +208,7 @@ pub enum Commands {
     /// Get status of a panel pane
     ///
     /// Shows information about a richspace-babel panel pane.
-    #[command(alias = "gp")]
+    #[command()]
     GetPane {
         /// Pane name to query
         pane_name: Option<String>,
@@ -218,7 +218,7 @@ pub enum Commands {
     ///
     /// Retrieves the full scrollback buffer from a kitty window. Useful for
     /// debugging or piping to other tools.
-    #[command( alias = "gsb")]
+    #[command()]
     GetScrollback {
         /// Kitty window ID
         window_id: u64,
@@ -274,7 +274,7 @@ pub enum Commands {
     /// important sessions.
     ///
     /// Target can be a window ID or "*" for all windows.
-    #[command( alias = "si")]
+    #[command()]
     SetIcon {
         /// Target: window ID or "*" for all
         target: Target,
@@ -286,7 +286,7 @@ pub enum Commands {
     /// Mark window(s) as read
     ///
     /// Target can be a window ID or "*" for all windows.
-    #[command( alias = "sr")]
+    #[command()]
     SetRead {
         /// Target: window ID or "*" for all
         target: Target,
@@ -306,7 +306,7 @@ pub enum Commands {
     ///   babel set-title 42 "My Custom Title"   # Set specific title
     ///   babel set-title 42                     # Auto-title from session
     ///   babel set-title *                      # Auto-title all windows
-    #[command( alias = "st")]
+    #[command()]
     SetTitle {
         /// Target: window ID or "*" for all
         target: Target,
@@ -375,7 +375,7 @@ pub enum Commands {
     ///   babel fingerprint 42        # Trace window ID 42
     ///   babel fingerprint .         # Trace current directory
     ///   babel fingerprint abc123    # Trace session abc123
-    #[command(alias = "fp")]
+    #[command()]
     Fingerprint {
         /// Window ID, directory path, or session ID (auto-detected)
         #[arg(value_name = "INPUT")]
@@ -398,8 +398,8 @@ pub enum Commands {
     ///
     /// Workspace sets capture all Claude windows and their positions across workspaces.
     /// Use `babel wset save` and `babel wset load` to manage layouts.
-    #[command(alias = "ws")]
-    Wset {
+    #[command()]
+    WSet {
         #[command(subcommand)]
         command: WSetCommands,
     },

@@ -42,11 +42,11 @@ pub struct SessionMetadata {
 ///
 /// Thread-safe for reads, but writes should be serialized at the application level
 /// if concurrent access is needed. For single-user CLI tools this is typically fine.
-pub struct OverlayDb {
+pub struct BabelStorage {
     conn: Connection,
 }
 
-impl OverlayDb {
+impl BabelStorage {
     /// Open or create the overlay database
     ///
     /// Database location: ~/.local/share/babel/overlay.db
@@ -277,7 +277,7 @@ impl OverlayDb {
 
 /// Open the default overlay database
 pub fn init_db() -> Result<Connection> {
-    let db = OverlayDb::open()?;
+    let db = BabelStorage::open()?;
     Ok(db.conn)
 }
 
@@ -349,9 +349,9 @@ mod tests {
     use super::*;
 
     /// Helper: Create an in-memory database for testing
-    fn test_db() -> OverlayDb {
+    fn test_db() -> BabelStorage {
         let conn = Connection::open_in_memory().unwrap();
-        let db = OverlayDb { conn };
+        let db = BabelStorage { conn };
         db.init_schema().unwrap();
         db
     }

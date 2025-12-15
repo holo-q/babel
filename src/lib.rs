@@ -62,8 +62,7 @@
 pub mod claude_storage;
 pub mod kitty;
 pub mod discovery;
-pub mod overlay;
-pub mod state;
+pub mod babel_storage;
 pub mod fire;
 pub mod ipc;
 pub mod daemon;
@@ -72,3 +71,6 @@ pub mod fingerprint;
 pub mod summarizer;
 pub mod wset;
 pub mod core;
+
+// Re-export activity state from scrollparse for convenience
+pub use scrollparse::claude::ActivityState;

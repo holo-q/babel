@@ -4,11 +4,11 @@
 //! to Claude conversations without modifying Claude's native storage.
 
 use anyhow::Result;
-use claude_babel::overlay::{OverlayDb, SessionMetadata};
+use claude_babel::babel_storage::{BabelStorage, SessionMetadata};
 
 fn main() -> Result<()> {
     // Open the database (creates if needed)
-    let db = OverlayDb::open()?;
+    let db = BabelStorage::open()?;
     
     // Example session ID (in real use, this would come from Claude)
     let session_id = "f7e4a9c0-1234-5678-90ab-cdef12345678";

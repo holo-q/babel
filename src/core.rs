@@ -37,8 +37,8 @@ use crate::discovery::ClaudeWindow;
 use crate::claude_storage::{SessionInfo, MigrateResult};
 use crate::ipc::{send_request, is_daemon_running, Request, Response};
 use crate::kitty;
-use crate::overlay;
-use crate::state::{detect_state, SessionState};
+use crate::babel_storage;
+use scrollparse::claude::{detect_activity_state, ActivityState};
 
 /// Core API for Claude session management
 ///
@@ -256,8 +256,8 @@ impl BabelCore {
                 // Get session ID from our state
                 if let Some(window) = state.windows.get(&window_id) {
                     if let Some(session_id) = &window.session_id {
-                        let db = overlay::init_db()?;
-                        overlay::set_icon(&db, session_id, icon)?;
+                        let db = babel_storage::init_db()?;
+                        babel_storage::set_icon(&db, session_id, icon)?;
                     }
                 }
                 // Also set kitty user var for visual feedback
@@ -281,8 +281,8 @@ impl BabelCore {
             CoreMode::Local(state) => {
                 if let Some(window) = state.windows.get(&window_id) {
                     if let Some(session_id) = &window.session_id {
-                        let db = overlay::init_db()?;
-                        overlay::mark_read(&db, session_id)?;
+                        let db = babel_storage::init_db()?;
+                        babel_storage::mark_read(&db, session_id)?;
                     }
                 }
                 Ok(())
@@ -359,9 +359,9 @@ impl BabelCore {
     /// Get the current state of a Claude session (idle, thinking, tool use, etc.)
     ///
     /// Analyzes the window's scrollback to determine what Claude is currently doing.
-    pub async fn get_window_state(&self, window_id: u64) -> Result<SessionState> {
+    pub async fn get_window_state(&self, window_id: u64) -> Result<ActivityState> {
         let scrollback = self.scrollback(window_id, Some(50)).await?;
-        Ok(detect_state(&scrollback))
+        Ok(detect_activity_state(&scrollback))
     }
 
     /// Find all windows whose cwd is inside the given path
@@ -379,7 +379,7 @@ impl BabelCore {
         for win in windows {
             if win.cwd.starts_with(&source) {
                 let state = self.get_window_state(win.kitty_id).await
-                    .unwrap_or(SessionState::Unknown);
+                    .unwrap_or(ActivityState::Unknown);
 
                 let relative_path = win.cwd
                     .strip_prefix(&source)
@@ -466,7 +466,7 @@ impl BabelCore {
 
         // Partition by migratable state
         let (migratable, active): (Vec<_>, Vec<_>) = conflicts.iter().partition(|c| {
-            matches!(c.state, SessionState::Idle | SessionState::AwaitingInput)
+            matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput)
         });
 
         // Check for blocking active windows
@@ -581,7 +581,7 @@ impl BabelCore {
 /// A window whose cwd conflicts with a migration source path
 pub struct ConflictingWindow {
     pub window: ClaudeWindow,
-    pub state: SessionState,
+    pub state: ActivityState,
     /// Path relative to source directory
     pub relative_path: PathBuf,
 }

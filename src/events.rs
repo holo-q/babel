@@ -129,9 +129,9 @@ pub enum BabelEvent {
         /// XFCE workspace number
         workspace: Option<i32>,
         /// Previous state
-        old_state: crate::state::SessionState,
+        old_state: scrollparse::claude::ActivityState,
         /// New state
-        new_state: crate::state::SessionState,
+        new_state: scrollparse::claude::ActivityState,
     },
 
     /// Workspace ambient title updated via Haiku summarization
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_all_event_variants_serialize() {
-        use crate::state::SessionState;
+        use scrollparse::claude::ActivityState;
 
         // Ensure all event types can serialize to JSON
         let events = vec![
@@ -619,8 +619,8 @@ mod tests {
                 kitty_id: 5,
                 session_id: Some("uuid4".to_string()),
                 workspace: Some(1),
-                old_state: SessionState::Idle,
-                new_state: SessionState::Thinking,
+                old_state: ActivityState::Idle,
+                new_state: ActivityState::Thinking,
             },
             BabelEvent::DaemonShutdown,
         ];
@@ -637,14 +637,14 @@ mod tests {
             "session_state_changed".to_string(),
         ]);
 
-        use crate::state::SessionState;
+        use scrollparse::claude::ActivityState;
 
         let state_changed = BabelEvent::SessionStateChanged {
             kitty_id: 1,
             session_id: None,
             workspace: Some(0),
-            old_state: SessionState::Idle,
-            new_state: SessionState::AwaitingInput,
+            old_state: ActivityState::Idle,
+            new_state: ActivityState::AwaitingInput,
         };
         let window_added = BabelEvent::WindowAdded {
             kitty_id: 1,
