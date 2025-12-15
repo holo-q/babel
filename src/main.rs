@@ -148,7 +148,7 @@ enum Commands {
     ///
     /// Usage:
     ///   babel mv ~/OldProject ~/NewProject           # Move + update history
-    ///   babel mv --dry-run ~/OldProject ~/NewProject # Preview changes only
+    ///   babel mv --dry ~/OldProject ~/NewProject      # Preview changes only
     ///   babel mv --history-only ~/Old ~/New          # Update history without moving
     ///   babel mv --anxious ~/Old ~/New               # Step-by-step confirmation
     ///   babel mv --force ~/Old ~/New                 # Force move even with active terminals
@@ -160,7 +160,7 @@ enum Commands {
         dest: PathBuf,
 
         /// Preview changes without executing (shows what would be modified)
-        #[arg(long)]
+        #[arg(long = "dry", id = "dry_run")]
         dry_run: bool,
 
         /// Only update Claude history, don't move the actual directory
@@ -228,7 +228,7 @@ enum Commands {
         name: Option<String>,
 
         /// Show what would happen without executing
-        #[arg(long)]
+        #[arg(long = "dry", id = "dry_run")]
         dry_run: bool,
     },
 
