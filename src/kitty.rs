@@ -104,6 +104,82 @@ pub struct KittyWindow {
     pub platform_window_id: u64,
 }
 
+/// Detection signals for identifying Claude sessions
+///
+/// Multiple signals can be present simultaneously. A window is considered
+/// a Claude session if ANY signal is positive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaudeSignals {
+    /// "claude" found in foreground process cmdline (definitive)
+    pub process_running: bool,
+    /// "✳" prefix in title (Claude's active session indicator)
+    pub title_indicator: bool,
+    /// Has `babel_session_id` user_var (previously tagged by babel)
+    pub babel_tagged: bool,
+    /// Session ID if tagged
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl ClaudeSignals {
+    /// Returns true if any signal suggests this is a Claude session
+    pub fn is_claude(&self) -> bool {
+        self.process_running || self.title_indicator || self.babel_tagged
+    }
+
+    /// Returns a short status string for display
+    pub fn status(&self) -> &'static str {
+        if self.process_running {
+            "running"      // Actively running claude process
+        } else if self.title_indicator {
+            "titled"       // Has ✳ title but process exited (at shell prompt)
+        } else if self.babel_tagged {
+            "tagged"       // Previously tagged but no other signals
+        } else {
+            "none"         // Not a Claude session
+        }
+    }
+
+    /// Returns emoji indicator for the detection status
+    pub fn indicator(&self) -> &'static str {
+        if self.process_running {
+            "●"  // Solid - definitely running
+        } else if self.title_indicator {
+            "◐"  // Half - session exists but at shell
+        } else if self.babel_tagged {
+            "○"  // Empty - was tagged but no active signals
+        } else {
+            " "  // Nothing
+        }
+    }
+}
+
+/// Analyze a window for Claude session signals
+pub fn detect_claude_signals(window: &KittyWindow) -> ClaudeSignals {
+    let process_running = window.foreground_processes.iter().any(|proc| {
+        proc.cmdline.iter().any(|arg| arg.contains("claude"))
+    });
+
+    let title_indicator = window.title.starts_with("✳");
+
+    let babel_tagged = window.user_vars
+        .get("babel_session_id")
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let session_id = window.user_vars
+        .get("babel_session_id")
+        .filter(|s| !s.is_empty())
+        .cloned();
+
+    ClaudeSignals {
+        process_running,
+        title_indicator,
+        babel_tagged,
+        session_id,
+    }
+}
+
 /// A foreground process running in a window
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForegroundProcess {
@@ -200,19 +276,21 @@ pub fn list_windows() -> Result<Vec<KittyWindow>> {
     Ok(windows)
 }
 
-/// Find all windows running claude (checks if "claude" appears in any foreground process cmdline)
+/// Find all windows that are Claude sessions (uses multiple detection signals)
 ///
-/// Used by the overlay to discover active claude sessions.
+/// Detection signals (any match counts):
+/// - "claude" in foreground process cmdline (process actively running)
+/// - "✳" prefix in title (Claude's active session indicator)
+/// - `babel_session_id` user_var set (previously tagged by babel)
+///
+/// This catches sessions that have exited to shell prompt but still have
+/// the ✳ title, or windows that were previously identified and tagged.
 pub fn find_claude_windows() -> Result<Vec<KittyWindow>> {
     let all_windows = list_windows()?;
 
     let claude_windows = all_windows
         .into_iter()
-        .filter(|win| {
-            win.foreground_processes.iter().any(|proc| {
-                proc.cmdline.iter().any(|arg| arg.contains("claude"))
-            })
-        })
+        .filter(|win| detect_claude_signals(win).is_claude())
         .collect();
 
     Ok(claude_windows)

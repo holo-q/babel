@@ -663,12 +663,19 @@ async fn cmd_list(json: bool, details: bool) -> Result<()> {
 
 /// List all kitty terminals (not just Claude sessions)
 async fn cmd_ls_terminals(json: bool) -> Result<()> {
-    use claude_babel::kitty::list_windows;
+    use claude_babel::kitty::{list_windows, detect_claude_signals};
 
     let windows = list_windows().context("Failed to list kitty windows")?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&windows)?);
+        // Include detection signals in JSON output
+        let with_signals: Vec<_> = windows.iter().map(|w| {
+            serde_json::json!({
+                "window": w,
+                "claude_signals": detect_claude_signals(w),
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&with_signals)?);
         return Ok(());
     }
 
@@ -677,26 +684,56 @@ async fn cmd_ls_terminals(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Kitty terminals ({} total):", windows.len());
-    println!();
+    // Count Claude sessions by detection type
+    let mut running = 0;
+    let mut titled = 0;
+    let mut tagged = 0;
+    let mut other = 0;
 
     for win in &windows {
+        let signals = detect_claude_signals(win);
+        if signals.process_running {
+            running += 1;
+        } else if signals.title_indicator {
+            titled += 1;
+        } else if signals.babel_tagged {
+            tagged += 1;
+        } else {
+            other += 1;
+        }
+    }
+
+    println!("Kitty terminals ({} total):", windows.len());
+    println!("  ● running: {}  ◐ titled: {}  ○ tagged: {}  other: {}", running, titled, tagged, other);
+    println!();
+    println!("  {:>5}  {}  {:8}  {}", "ID", "⬤", "PROCESS", "TITLE");
+    println!("  {:>5}  {}  {:8}  {}", "-----", "-", "--------", "-----");
+
+    for win in &windows {
+        let signals = detect_claude_signals(win);
+
         let cmdline = win.foreground_processes
             .first()
             .and_then(|p| p.cmdline.first())
-            .map(|s| s.as_str())
+            .map(|s| {
+                // Extract just the command name from path
+                s.rsplit('/').next().unwrap_or(s)
+            })
             .unwrap_or("?");
 
         // Truncate title
-        let title: String = win.title.chars().take(40).collect();
-        let title = if win.title.len() > 40 {
+        let title: String = win.title.chars().take(50).collect();
+        let title = if win.title.len() > 50 {
             format!("{}…", title)
         } else {
             title
         };
 
-        println!("  {:>5}  {}  {}", win.id, cmdline, title);
+        println!("  {:>5}  {}  {:8}  {}", win.id, signals.indicator(), cmdline, title);
     }
+
+    println!();
+    println!("Legend: ● = claude running, ◐ = has ✳ title, ○ = babel-tagged");
 
     Ok(())
 }
