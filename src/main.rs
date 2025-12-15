@@ -234,40 +234,6 @@ enum Commands {
         all: bool,
     },
 
-    /// Debug fingerprint linkage between terminals, sessions, and directories
-    ///
-    /// Traces the connection between a terminal window, its scrollback fingerprint,
-    /// and matching session JSONL files. Use this to debug why `babel mv` doesn't
-    /// detect a session or why matching fails.
-    ///
-    /// Input is auto-detected:
-    ///   - Pure number (42) → window ID
-    ///   - Path-like (., ./foo, /path) → directory
-    ///   - Otherwise → session ID
-    ///
-    /// Examples:
-    ///   babel fingerprint 42        # Trace window ID 42
-    ///   babel fingerprint .         # Trace current directory
-    ///   babel fingerprint abc123    # Trace session abc123
-    #[command( alias = "fp")]
-    Fingerprint {
-        /// Window ID, directory path, or session ID (auto-detected)
-        #[arg(value_name = "INPUT")]
-        input: Option<String>,
-
-        /// Force interpretation as window ID
-        #[arg(long, short = 'w')]
-        window: bool,
-
-        /// Force interpretation as directory
-        #[arg(long, short = 'd')]
-        dir: bool,
-
-        /// Force interpretation as session ID
-        #[arg(long, short = 's')]
-        session: bool,
-    },
-
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
 
     /// Focus a Claude window (rofi picker if no ID given)
@@ -380,6 +346,42 @@ enum Commands {
         force: bool,
     },
 
+    // ─── Namespace Commands (normal = has subcommands or system) ────────────────
+
+    /// Debug fingerprint linkage between terminals, sessions, and directories
+    ///
+    /// Traces the connection between a terminal window, its scrollback fingerprint,
+    /// and matching session JSONL files. Use this to debug why `babel mv` doesn't
+    /// detect a session or why matching fails.
+    ///
+    /// Input is auto-detected:
+    ///   - Pure number (42) → window ID
+    ///   - Path-like (., ./foo, /path) → directory
+    ///   - Otherwise → session ID
+    ///
+    /// Examples:
+    ///   babel fingerprint 42        # Trace window ID 42
+    ///   babel fingerprint .         # Trace current directory
+    ///   babel fingerprint abc123    # Trace session abc123
+    #[command(alias = "fp")]
+    Fingerprint {
+        /// Window ID, directory path, or session ID (auto-detected)
+        #[arg(value_name = "INPUT")]
+        input: Option<String>,
+
+        /// Force interpretation as window ID
+        #[arg(long, short = 'w')]
+        window: bool,
+
+        /// Force interpretation as directory
+        #[arg(long, short = 'd')]
+        dir: bool,
+
+        /// Force interpretation as session ID
+        #[arg(long, short = 's')]
+        session: bool,
+    },
+
     /// Manage saved workspace sets (WSet)
     ///
     /// Workspace sets capture all Claude windows and their positions across workspaces.
@@ -389,8 +391,6 @@ enum Commands {
         #[command(subcommand)]
         command: WSetCommands,
     },
-
-    // ─── System ─────────────────────────────────────────────────────────────────
 
     /// Start the babel daemon (babeld)
     Daemon {
