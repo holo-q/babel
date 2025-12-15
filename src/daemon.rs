@@ -56,7 +56,7 @@ macro_rules! trace {
 
 /// Summary entry for fast matching
 #[derive(Debug, Clone)]
-struct SummaryEntry {
+pub struct SummaryEntry {
     summary: String,
     session_id: String,
 }

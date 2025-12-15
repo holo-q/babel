@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use claude_babel::core::BabelCore;
 use claude_babel::kitty::get_scrollback;
-use claude_babel::discovery::ClaudeWindow;
 
 use claude_babel::fingerprint::{extract_from_scrollback, extract_from_jsonl, match_fingerprints, MatchConfidence};
 use claude_babel::claude_storage::{list_sessions, path_to_encoded};
