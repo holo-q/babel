@@ -190,21 +190,7 @@ impl DaemonState {
                     trace!("  → Title matched to session: {}", session_id);
                     claude_window.session_id = Some(session_id);
                 } else {
-                    trace!("  → Title match failed, trying fingerprint...");
-                }
-            }
-
-            // Fallback: try fingerprint matching if title match failed
-            if claude_window.session_id.is_none() {
-                if let Some((session_id, confidence, fingerprint)) = self.fingerprint_match(window_id) {
-                    trace!("  → Fingerprint matched to session: {} ({:?})", session_id, confidence);
-                    // Tag the window for future fast lookups
-                    let _ = crate::discovery::tag_window(window_id, &session_id);
-                    claude_window.session_id = Some(session_id);
-                    claude_window.match_confidence = Some(confidence);
-                    claude_window.fingerprint = Some(fingerprint);
-                } else {
-                    trace!("  → Fingerprint match failed (no confident match)");
+                    trace!("  → Title match failed, will defer fingerprinting");
                 }
             }
 
@@ -233,7 +219,7 @@ impl DaemonState {
             }
         }
 
-        // Windows removed
+        // Windows removed - clean up cached fingerprints and states
         for &id in old_ids.difference(&new_ids) {
             // Get workspace from old windows before removal
             if let Some(w) = self.windows.get(&id) {
@@ -241,6 +227,11 @@ impl DaemonState {
                     changed_workspaces.insert(ws);
                 }
             }
+
+            // Clean up cached data for closed window
+            self.window_fingerprints.remove(&id);
+            self.window_states.remove(&id);
+
             self.event_publisher.publish(BabelEvent::WindowRemoved { kitty_id: id });
         }
 
@@ -308,6 +299,121 @@ impl DaemonState {
             .iter()
             .find(|e| e.summary.to_lowercase().contains(&summary_lower))
             .map(|e| e.session_id.clone())
+    }
+
+    /// Get list of window IDs that need fingerprint matching
+    ///
+    /// Called with read lock to identify windows that need matching.
+    /// Caller then releases lock and does expensive I/O.
+    pub fn get_windows_needing_fingerprints(&self) -> Vec<u64> {
+        self.windows
+            .iter()
+            .filter(|(_, w)| w.session_id.is_none())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Apply fingerprint matching results to a window
+    ///
+    /// This applies the results from `fingerprint_match_window_id` back to state.
+    /// Called with write lock after I/O completes.
+    pub fn apply_fingerprint_result(
+        &mut self,
+        window_id: u64,
+        session_id: String,
+        confidence: MatchConfidence,
+        fingerprint: SessionFingerprint,
+    ) {
+        // Tag the window for future fast lookups
+        let _ = crate::discovery::tag_window(window_id, &session_id);
+
+        // Cache the fingerprint
+        self.cache_fingerprint(window_id, fingerprint.clone());
+
+        // Update the window in our state
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.session_id = Some(session_id);
+            window.match_confidence = Some(confidence);
+            window.fingerprint = Some(fingerprint);
+        }
+    }
+
+    /// Perform fingerprint matching for a window ID without holding any lock
+    ///
+    /// This does the expensive I/O (get_scrollback) and matching logic.
+    /// Called outside any locks to avoid blocking readers.
+    ///
+    /// Takes fingerprint_index as parameter to avoid needing &self.
+    pub fn fingerprint_match_window_id(
+        window_id: u64,
+        fingerprint_index: &HashMap<String, SessionFingerprint>,
+    ) -> Option<(String, MatchConfidence, SessionFingerprint)> {
+        trace!("fingerprint_match({}) - index has {} sessions", window_id, fingerprint_index.len());
+
+        // Get scrollback and extract fingerprint (EXPENSIVE I/O - done without lock)
+        let scrollback = match get_scrollback(window_id) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(kitty_id = window_id, error = %e, "Failed to get scrollback");
+                return None;
+            }
+        };
+
+        trace!("  scrollback: {} bytes, {} lines", scrollback.len(), scrollback.lines().count());
+
+        let window_fp = extract_from_scrollback(&scrollback);
+        trace!("  extracted: first_prompt={:?}, prompts={}, tools={:?}, cwd={:?}",
+            window_fp.first_prompt.as_ref().map(|s| &s[..s.len().min(40)]),
+            window_fp.recent_prompts.len(),
+            window_fp.tool_sequence,
+            window_fp.cwd
+        );
+
+        // Find best match in index
+        let mut best_match: Option<(String, MatchConfidence)> = None;
+        let mut top_matches: Vec<(String, MatchConfidence)> = Vec::new();
+
+        for (session_id, session_fp) in fingerprint_index {
+            let confidence = match_fingerprints(&window_fp, session_fp);
+
+            if confidence > MatchConfidence::None {
+                top_matches.push((session_id.clone(), confidence));
+            }
+
+            if confidence >= MatchConfidence::Medium {
+                if let Some((_, best_conf)) = &best_match {
+                    if confidence > *best_conf {
+                        best_match = Some((session_id.clone(), confidence));
+                    }
+                } else {
+                    best_match = Some((session_id.clone(), confidence));
+                }
+            }
+        }
+
+        // Sort and show top matches in trace
+        top_matches.sort_by(|a, b| b.1.cmp(&a.1));
+        if !top_matches.is_empty() {
+            trace!("  top matches:");
+            for (sid, conf) in top_matches.iter().take(5) {
+                trace!("    {:?}: {}", conf, sid);
+            }
+        } else {
+            trace!("  no matches above None confidence");
+        }
+
+        if let Some((session_id, confidence)) = best_match {
+            tracing::info!(
+                kitty_id = window_id,
+                session_id,
+                ?confidence,
+                "Fingerprint matched window to session"
+            );
+            Some((session_id, confidence, window_fp))
+        } else {
+            trace!("  no match >= Medium confidence");
+            None
+        }
     }
 
     /// Rebuild summary index from ~/.claude/projects
@@ -424,78 +530,23 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Try to match a window to a session using fingerprints
-    /// Called when title matching fails
-    /// Returns (session_id, confidence, fingerprint) if match found with confidence >= Medium
-    pub fn fingerprint_match(&mut self, kitty_id: u64) -> Option<(String, MatchConfidence, SessionFingerprint)> {
-        trace!("fingerprint_match({}) - index has {} sessions", kitty_id, self.fingerprint_index.len());
+    /// Cache a fingerprint for a window
+    ///
+    /// Called after successful fingerprint matching to avoid re-extraction
+    fn cache_fingerprint(&mut self, window_id: u64, fingerprint: SessionFingerprint) {
+        self.window_fingerprints.insert(window_id, fingerprint);
 
-        // Get scrollback and extract fingerprint
-        let scrollback = match get_scrollback(kitty_id) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(kitty_id, error = %e, "Failed to get scrollback");
-                return None;
-            }
-        };
-
-        trace!("  scrollback: {} bytes, {} lines", scrollback.len(), scrollback.lines().count());
-
-        let window_fp = extract_from_scrollback(&scrollback);
-        trace!("  extracted: first_prompt={:?}, prompts={}, tools={:?}, cwd={:?}",
-            window_fp.first_prompt.as_ref().map(|s| &s[..s.len().min(40)]),
-            window_fp.recent_prompts.len(),
-            window_fp.tool_sequence,
-            window_fp.cwd
-        );
-
-        // Cache the fingerprint
-        self.window_fingerprints.insert(kitty_id, window_fp.clone());
-
-        // Find best match in index
-        let mut best_match: Option<(String, MatchConfidence)> = None;
-        let mut top_matches: Vec<(String, MatchConfidence)> = Vec::new();
-
-        for (session_id, session_fp) in &self.fingerprint_index {
-            let confidence = match_fingerprints(&window_fp, session_fp);
-
-            if confidence > MatchConfidence::None {
-                top_matches.push((session_id.clone(), confidence));
-            }
-
-            if confidence >= MatchConfidence::Medium {
-                if let Some((_, best_conf)) = &best_match {
-                    if confidence > *best_conf {
-                        best_match = Some((session_id.clone(), confidence));
-                    }
-                } else {
-                    best_match = Some((session_id.clone(), confidence));
+        // Safety net: enforce maximum cache size to prevent unbounded growth
+        // This should rarely trigger since we clean up on window removal,
+        // but protects against edge cases (e.g., fingerprint extraction spam)
+        const MAX_FINGERPRINT_CACHE: usize = 100;
+        if self.window_fingerprints.len() > MAX_FINGERPRINT_CACHE {
+            // Remove oldest entries (just prevent unbounded growth, not critical which ones)
+            while self.window_fingerprints.len() > MAX_FINGERPRINT_CACHE {
+                if let Some(key) = self.window_fingerprints.keys().next().cloned() {
+                    self.window_fingerprints.remove(&key);
                 }
             }
-        }
-
-        // Sort and show top matches in trace
-        top_matches.sort_by(|a, b| b.1.cmp(&a.1));
-        if !top_matches.is_empty() {
-            trace!("  top matches:");
-            for (sid, conf) in top_matches.iter().take(5) {
-                trace!("    {:?}: {}", conf, sid);
-            }
-        } else {
-            trace!("  no matches above None confidence");
-        }
-
-        if let Some((session_id, confidence)) = best_match {
-            tracing::info!(
-                kitty_id,
-                session_id,
-                ?confidence,
-                "Fingerprint matched window to session"
-            );
-            Some((session_id, confidence, window_fp))
-        } else {
-            trace!("  no match >= Medium confidence");
-            None
         }
     }
 }
@@ -649,6 +700,7 @@ pub async fn run_daemon() -> Result<()> {
             Some(event) = event_rx.recv() => {
                 match event {
                     DaemonEvent::KittyPoll => {
+                        // Phase 1: Quick refresh with lock (no I/O)
                         let changed_workspaces = {
                             let mut s = state.write().await;
                             match s.refresh_windows() {
@@ -658,7 +710,28 @@ pub async fn run_daemon() -> Result<()> {
                                     vec![]
                                 }
                             }
-                        };
+                        }; // Lock released here
+
+                        // Phase 2: Get windows needing fingerprints + copy of fingerprint index
+                        // Both are quick read operations
+                        let (needs_matching, fingerprint_index) = {
+                            let s = state.read().await;
+                            let needs = s.get_windows_needing_fingerprints();
+                            let index = s.fingerprint_index.clone();
+                            (needs, index)
+                        }; // Lock released here
+
+                        // Phase 3: Do expensive I/O (get_scrollback) WITHOUT ANY LOCK
+                        // This allows concurrent readers to proceed unblocked
+                        for window_id in needs_matching {
+                            if let Some((session_id, confidence, fingerprint)) =
+                                DaemonState::fingerprint_match_window_id(window_id, &fingerprint_index)
+                            {
+                                // Phase 4: Apply result with write lock (quick operation)
+                                let mut s = state.write().await;
+                                s.apply_fingerprint_result(window_id, session_id, confidence, fingerprint);
+                            }
+                        }
 
                         // Spawn summarization for changed workspaces
                         // Always run - summarizer falls back to project names when API key isn't set
@@ -1008,14 +1081,37 @@ async fn process_request(
         },
 
         Request::Refresh => {
-            let mut s = state.write().await;
-            match s.refresh_windows() {
-                Ok(_changed) => Response::Ok {
-                    message: format!("Refreshed {} windows", s.windows.len()),
-                },
-                Err(e) => Response::Error {
-                    message: format!("Refresh failed: {}", e),
+            // Phase 1: Refresh windows (quick, no I/O)
+            let window_count = {
+                let mut s = state.write().await;
+                match s.refresh_windows() {
+                    Ok(_) => s.windows.len(),
+                    Err(e) => return Response::Error {
+                        message: format!("Refresh failed: {}", e),
+                    }
                 }
+            };
+
+            // Phase 2: Get windows needing fingerprints + index
+            let (needs_matching, fingerprint_index) = {
+                let s = state.read().await;
+                let needs = s.get_windows_needing_fingerprints();
+                let index = s.fingerprint_index.clone();
+                (needs, index)
+            };
+
+            // Phase 3: Do expensive I/O without lock
+            for window_id in needs_matching {
+                if let Some((session_id, confidence, fingerprint)) =
+                    DaemonState::fingerprint_match_window_id(window_id, &fingerprint_index)
+                {
+                    let mut s = state.write().await;
+                    s.apply_fingerprint_result(window_id, session_id, confidence, fingerprint);
+                }
+            }
+
+            Response::Ok {
+                message: format!("Refreshed {} windows", window_count),
             }
         }
 

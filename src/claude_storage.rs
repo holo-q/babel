@@ -12,9 +12,9 @@
 
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context};
+use anyhow::{Result, Context, bail};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -409,6 +409,297 @@ pub fn get_session_path(project_path: &Path, session_id: &str) -> PathBuf {
 /// Check if session file exists
 pub fn session_exists(project_path: &Path, session_id: &str) -> bool {
     get_session_path(project_path, session_id).exists()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Project Migration
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tracks what was changed during migration for user feedback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrateResult {
+    /// Whether the project folder was renamed in ~/.claude/projects/
+    pub project_folder_renamed: bool,
+
+    /// Number of entries updated in ~/.claude/history.jsonl
+    pub history_entries_updated: usize,
+
+    /// Number of session JSONL files preserved (moved with the folder)
+    pub sessions_preserved: usize,
+
+    /// Old project folder name (encoded path)
+    pub old_folder: String,
+
+    /// New project folder name (encoded path)
+    pub new_folder: String,
+}
+
+/// Convert encoded project name back to absolute path
+///
+/// Example: -home-user-project → /home/user/project
+pub fn encoded_to_path(encoded: &str) -> PathBuf {
+    // First character is always a dash (from root /), replace all dashes with /
+    PathBuf::from(encoded.replace('-', "/"))
+}
+
+/// Migrate conversation history when a directory is moved
+///
+/// This updates Claude Code's internal storage to reflect the new path:
+/// 1. Renames the project folder in ~/.claude/projects/
+/// 2. Updates all path references in ~/.claude/history.jsonl
+///
+/// # Arguments
+/// * `old_path` - Original absolute path of the directory
+/// * `new_path` - New absolute path after the move
+/// * `dry_run` - If true, only report what would change without modifying files
+///
+/// # Returns
+/// A `MigrateResult` summarizing what was (or would be) changed.
+///
+/// # Errors
+/// - If old_path and new_path are the same
+/// - If new_path is nested inside old_path
+/// - If a project folder already exists at the new path (conflict)
+pub fn migrate_project(old_path: &Path, new_path: &Path, dry_run: bool) -> Result<MigrateResult> {
+    tracing::debug!(?old_path, ?new_path, dry_run, "starting project migration");
+
+    // Canonicalize paths for comparison (resolve symlinks, remove trailing slashes)
+    // Old path must exist - canonicalize it
+    let old_canonical = old_path.canonicalize()
+        .unwrap_or_else(|_| old_path.to_path_buf());
+    // New path may not exist yet - make it absolute without requiring existence
+    let new_canonical = new_path.canonicalize().unwrap_or_else(|_| {
+        if new_path.is_absolute() {
+            new_path.to_path_buf()
+        } else {
+            // Join with cwd to make absolute
+            std::env::current_dir()
+                .map(|cwd| cwd.join(new_path))
+                .unwrap_or_else(|_| new_path.to_path_buf())
+        }
+    });
+
+    tracing::debug!(?old_canonical, ?new_canonical, "canonicalized paths");
+
+    // Validation: paths must be different
+    if old_canonical == new_canonical {
+        tracing::debug!("paths are identical, aborting");
+        bail!("Source and destination are the same path");
+    }
+
+    // Validation: new path cannot be nested inside old path
+    if new_canonical.starts_with(&old_canonical) {
+        tracing::debug!("new path is nested inside old path, aborting");
+        bail!("Destination cannot be nested inside source: {} is inside {}",
+            new_path.display(), old_path.display());
+    }
+
+    let old_encoded = path_to_encoded(&old_canonical);
+    let new_encoded = path_to_encoded(&new_canonical);
+    tracing::debug!(%old_encoded, %new_encoded, "encoded folder names");
+
+    let projects_dir = claude_base().join("projects");
+    let old_project_dir = projects_dir.join(&old_encoded);
+    let new_project_dir = projects_dir.join(&new_encoded);
+
+    tracing::debug!(
+        ?old_project_dir,
+        old_exists = old_project_dir.exists(),
+        ?new_project_dir,
+        new_exists = new_project_dir.exists(),
+        "checking project directories"
+    );
+
+    // Check for conflicts at destination
+    if new_project_dir.exists() && !dry_run {
+        tracing::debug!("destination project folder already exists, aborting");
+        bail!("Project folder already exists at destination: {}\n\
+               This would overwrite existing conversation history.\n\
+               Either delete the destination folder or use a different path.",
+            new_project_dir.display());
+    }
+
+    let mut result = MigrateResult {
+        project_folder_renamed: false,
+        history_entries_updated: 0,
+        sessions_preserved: 0,
+        old_folder: old_encoded.clone(),
+        new_folder: new_encoded.clone(),
+    };
+
+    // Step 1: Count sessions and rename project folder
+    if old_project_dir.exists() {
+        tracing::debug!(?old_project_dir, "project folder exists, counting sessions");
+
+        // Count session files
+        if let Ok(entries) = fs::read_dir(&old_project_dir) {
+            let sessions: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .collect();
+            result.sessions_preserved = sessions.len();
+
+            for session in &sessions {
+                tracing::debug!(session_file = ?session.path(), "found session file");
+            }
+        }
+        tracing::debug!(sessions_count = result.sessions_preserved, "counted session files");
+
+        if !dry_run {
+            tracing::debug!(?old_project_dir, ?new_project_dir, "renaming project folder");
+            fs::rename(&old_project_dir, &new_project_dir)
+                .with_context(|| format!(
+                    "Failed to rename project folder: {} → {}",
+                    old_project_dir.display(),
+                    new_project_dir.display()
+                ))?;
+            tracing::debug!("project folder renamed successfully");
+        } else {
+            tracing::debug!("dry run: would rename project folder");
+        }
+        result.project_folder_renamed = true;
+    } else {
+        tracing::debug!(?old_project_dir, "project folder does not exist, skipping rename");
+    }
+
+    // Step 2: Update history.jsonl
+    let history_path = claude_base().join("history.jsonl");
+    tracing::debug!(?history_path, exists = history_path.exists(), "checking history.jsonl");
+
+    if history_path.exists() {
+        result.history_entries_updated = update_history_paths(
+            &history_path,
+            &old_canonical,
+            &new_canonical,
+            dry_run,
+        )?;
+        tracing::debug!(entries_updated = result.history_entries_updated, "history.jsonl processed");
+    } else {
+        tracing::debug!("history.jsonl does not exist, skipping");
+    }
+
+    tracing::debug!(?result, "migration complete");
+    Ok(result)
+}
+
+/// Update path references in history.jsonl
+///
+/// Reads the entire history file, updates any entries where the project
+/// path matches old_path (or is a child of old_path), and writes back atomically.
+///
+/// # Arguments
+/// * `history_path` - Path to ~/.claude/history.jsonl
+/// * `old_path` - Original path to replace
+/// * `new_path` - New path to use
+/// * `dry_run` - If true, only count matches without writing
+///
+/// # Returns
+/// Number of entries that were (or would be) updated
+fn update_history_paths(
+    history_path: &Path,
+    old_path: &Path,
+    new_path: &Path,
+    dry_run: bool,
+) -> Result<usize> {
+    tracing::debug!(?history_path, ?old_path, ?new_path, dry_run, "updating history paths");
+
+    let file = File::open(history_path)
+        .context("Failed to open history.jsonl")?;
+
+    let reader = BufReader::new(file);
+    let mut updated_lines = Vec::new();
+    let mut update_count = 0;
+    let mut total_lines = 0;
+    let mut empty_lines = 0;
+    let mut malformed_lines = 0;
+
+    let old_path_str = old_path.to_string_lossy();
+    let new_path_str = new_path.to_string_lossy();
+    tracing::debug!(old_path_str = %old_path_str, new_path_str = %new_path_str, "path strings for matching");
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line.context("Failed to read history line")?;
+        total_lines += 1;
+
+        if line.trim().is_empty() {
+            empty_lines += 1;
+            updated_lines.push(line);
+            continue;
+        }
+
+        // Parse the line as JSON to find "project" field
+        if let Ok(mut entry) = serde_json::from_str::<serde_json::Value>(&line) {
+            let mut modified = false;
+
+            if let Some(project) = entry.get_mut("project") {
+                if let Some(project_str) = project.as_str() {
+                    // Check if this entry's project matches old_path exactly
+                    // or is a child path (for nested projects)
+                    if project_str == old_path_str
+                        || project_str.starts_with(&format!("{}/", old_path_str))
+                    {
+                        // Replace old_path prefix with new_path
+                        let new_project = project_str.replacen(&*old_path_str, &new_path_str, 1);
+                        tracing::debug!(
+                            line_num,
+                            old_project = %project_str,
+                            new_project = %new_project,
+                            "matched history entry, updating path"
+                        );
+                        *project = serde_json::Value::String(new_project);
+                        modified = true;
+                        update_count += 1;
+                    }
+                    // Note: We intentionally don't log non-matches to avoid thousands of log lines
+                }
+            }
+
+            if modified {
+                updated_lines.push(serde_json::to_string(&entry)?);
+            } else {
+                updated_lines.push(line);
+            }
+        } else {
+            // Keep malformed lines as-is
+            malformed_lines += 1;
+            tracing::trace!(line_num, "malformed JSON line, keeping as-is");
+            updated_lines.push(line);
+        }
+    }
+
+    tracing::debug!(
+        total_lines,
+        empty_lines,
+        malformed_lines,
+        update_count,
+        "finished scanning history.jsonl"
+    );
+
+    if !dry_run && update_count > 0 {
+        // Write atomically: temp file + rename
+        let temp_path = history_path.with_extension("jsonl.tmp");
+        tracing::debug!(?temp_path, "writing updated history to temp file");
+
+        let temp_file = File::create(&temp_path)
+            .context("Failed to create temp history file")?;
+        let mut writer = BufWriter::new(temp_file);
+
+        for line in &updated_lines {
+            writeln!(writer, "{}", line)?;
+        }
+        writer.flush()?;
+
+        tracing::debug!(?temp_path, ?history_path, "atomically replacing history.jsonl");
+        fs::rename(&temp_path, history_path)
+            .context("Failed to replace history.jsonl")?;
+        tracing::debug!("history.jsonl updated successfully");
+    } else if dry_run && update_count > 0 {
+        tracing::debug!(update_count, "dry run: would update {} entries", update_count);
+    } else {
+        tracing::debug!("no entries to update");
+    }
+
+    Ok(update_count)
 }
 
 #[cfg(test)]

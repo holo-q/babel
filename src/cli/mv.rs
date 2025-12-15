@@ -28,10 +28,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use claude_babel::claude_storage::path_to_encoded;
+use claude_babel::claude_storage::{path_to_encoded, migrate_project};
 use claude_babel::core::BabelCore;
 use claude_babel::discovery::ClaudeWindow;
-use claude_babel::fingerprint::migrate_project;
 use claude_babel::kitty::{get_scrollback, send_text};
 use claude_babel::state::{detect_state, SessionState};
 
