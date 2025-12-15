@@ -39,13 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the babel daemon (babeld)
-    Daemon {
-        /// Enable verbose trace logging
-        #[arg(long)]
-        trace: bool,
-    },
-
+    // ─── Information Retrieval ──────────────────────────────────────────────────
 
     /// List all discovered Claude sessions
     #[command(alias = "list")]
@@ -85,12 +79,6 @@ enum Commands {
         pane_name: Option<String>,
     },
 
-    /// Focus a Claude window (rofi picker if no ID given)
-    Focus {
-        /// Kitty window ID to focus (omit for interactive rofi picker)
-        window_id: Option<u64>,
-    },
-
     /// Get scrollback text from a window
     ///
     /// Retrieves the full scrollback buffer from a kitty window. Useful for
@@ -102,6 +90,67 @@ enum Commands {
         /// Maximum number of lines to retrieve
         #[arg(short, long)]
         lines: Option<usize>,
+    },
+
+    /// Show conversation history from ~/.claude
+    ///
+    /// Without arguments, shows recent conversations. Pass session IDs as
+    /// positional arguments to show specific sessions.
+    #[command(alias = "h")]
+    History {
+        /// Session IDs to show (if none, shows recent conversations)
+        #[arg(value_name = "SESSION")]
+        sessions: Vec<String>,
+
+        /// Limit number of results (when no session IDs specified)
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Show all sessions (overrides limit)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Debug fingerprint linkage between terminals, sessions, and directories
+    ///
+    /// Traces the connection between a terminal window, its scrollback fingerprint,
+    /// and matching session JSONL files. Use this to debug why `babel mv` doesn't
+    /// detect a session or why matching fails.
+    ///
+    /// Input is auto-detected:
+    ///   - Pure number (42) → window ID
+    ///   - Path-like (., ./foo, /path) → directory
+    ///   - Otherwise → session ID
+    ///
+    /// Examples:
+    ///   babel fingerprint 42        # Trace window ID 42
+    ///   babel fingerprint .         # Trace current directory
+    ///   babel fingerprint abc123    # Trace session abc123
+    #[command(alias = "fp")]
+    Fingerprint {
+        /// Window ID, directory path, or session ID (auto-detected)
+        #[arg(value_name = "INPUT")]
+        input: Option<String>,
+
+        /// Force interpretation as window ID
+        #[arg(long, short = 'w')]
+        window: bool,
+
+        /// Force interpretation as directory
+        #[arg(long, short = 'd')]
+        dir: bool,
+
+        /// Force interpretation as session ID
+        #[arg(long, short = 's')]
+        session: bool,
+    },
+
+    // ─── Actions ────────────────────────────────────────────────────────────────
+
+    /// Focus a Claude window (rofi picker if no ID given)
+    Focus {
+        /// Kitty window ID to focus (omit for interactive rofi picker)
+        window_id: Option<u64>,
     },
 
     /// Send text to a Claude window
@@ -133,25 +182,7 @@ enum Commands {
         window_id: u64,
     },
 
-    /// Show conversation history from ~/.claude
-    ///
-    /// Without arguments, shows recent conversations. Pass session IDs as
-    /// positional arguments to show specific sessions.
-    #[command(alias = "h")]
-    History {
-        /// Session IDs to show (if none, shows recent conversations)
-        #[arg(value_name = "SESSION")]
-        sessions: Vec<String>,
-
-        /// Limit number of results (when no session IDs specified)
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
-
-        /// Show all sessions (overrides limit)
-        #[arg(long)]
-        all: bool,
-    },
-
+    // ─── Management ─────────────────────────────────────────────────────────────
 
     /// Update or display workspace titles
     ///
@@ -210,42 +241,6 @@ enum Commands {
         force: bool,
     },
 
-    /// Debug fingerprint linkage between terminals, sessions, and directories
-    ///
-    /// Traces the connection between a terminal window, its scrollback fingerprint,
-    /// and matching session JSONL files. Use this to debug why `babel mv` doesn't
-    /// detect a session or why matching fails.
-    ///
-    /// Input is auto-detected:
-    ///   - Pure number (42) → window ID
-    ///   - Path-like (., ./foo, /path) → directory
-    ///   - Otherwise → session ID
-    ///
-    /// Examples:
-    ///   babel fingerprint 42        # Trace window ID 42
-    ///   babel fingerprint .         # Trace current directory
-    ///   babel fingerprint abc123    # Trace session abc123
-    #[command(alias = "fp")]
-    Fingerprint {
-        /// Window ID, directory path, or session ID (auto-detected)
-        #[arg(value_name = "INPUT")]
-        input: Option<String>,
-
-        /// Force interpretation as window ID
-        #[arg(long, short = 'w')]
-        window: bool,
-
-        /// Force interpretation as directory
-        #[arg(long, short = 'd')]
-        dir: bool,
-
-        /// Force interpretation as session ID
-        #[arg(long, short = 's')]
-        session: bool,
-    },
-
-    // ─── WSet Commands ──────────────────────────────────────────────────────────
-
     /// Manage saved workspace sets (WSet)
     ///
     /// Workspace sets capture all Claude windows and their positions across workspaces.
@@ -254,6 +249,15 @@ enum Commands {
     Wset {
         #[command(subcommand)]
         command: WSetCommands,
+    },
+
+    // ─── System ─────────────────────────────────────────────────────────────────
+
+    /// Start the babel daemon (babeld)
+    Daemon {
+        /// Enable verbose trace logging
+        #[arg(long)]
+        trace: bool,
     },
 }
 
@@ -330,6 +334,10 @@ async fn main() -> Result<()> {
     // "babel" = config key and journald identifier, "claude_babel" = Rust crate for filtering
     // --debug flag forces debug level regardless of config
     spaceship_std::logging::init("babel", "claude_babel", &cli.logging);
+
+    if cli.logging.debug {
+        tracing::debug!("debug logging enabled via --debug flag");
+    }
 
     match cli.command {
         // Daemon management commands - always direct
