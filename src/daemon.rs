@@ -32,6 +32,7 @@ use crate::fingerprint::{
 use crate::ipc::{create_listener, Request, Response};
 use crate::kitty::{find_claude_windows, focus_window, get_scrollback, send_text};
 use crate::overlay::{init_db, mark_read, set_icon};
+use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -523,7 +524,8 @@ pub async fn run_daemon_traced() -> Result<()> {
 
 /// Run the daemon
 pub async fn run_daemon() -> Result<()> {
-    tracing::info!("Starting babel daemon");
+    // ─── Startup Banner ─────────────────────────────────────────────────────────
+    tracing::info!("babel v{}", env!("CARGO_PKG_VERSION"));
 
     // Initialize state
     let state = Arc::new(RwLock::new(DaemonState::new()));
@@ -531,17 +533,33 @@ pub async fn run_daemon() -> Result<()> {
     // Initialize workspace summarizer
     let summarizer = Arc::new(crate::summarizer::WorkspaceSummarizer::new());
 
-    // Initial scans
+    // ─── Initial Indexing ───────────────────────────────────────────────────────
     {
         let mut s = state.write().await;
         s.rebuild_summary_index().context("Failed to build summary index")?;
         s.rebuild_fingerprint_index().context("Failed to build fingerprint index")?;
         let _ = s.refresh_windows().context("Failed initial window scan")?;
+
+        // Compute meaningful stats
+        let sessions_with_fingerprints = s.fingerprint_index.len();
+        let total_summaries = s.summary_index.len();
+        let windows_found = s.windows.len();
+        let windows_identified = s.windows.values().filter(|w| w.session_id.is_some()).count();
+        let workspaces_active: std::collections::HashSet<_> = s.windows.values()
+            .filter_map(|w| w.workspace)
+            .collect();
+
+        // Log startup state - include key numbers in message for journald visibility
+        if windows_found > 0 {
+            tracing::info!(
+                "Discovered {} windows ({} identified) across {} workspaces",
+                windows_found, windows_identified, workspaces_active.len()
+            );
+        }
+
         tracing::info!(
-            summaries = s.summary_index.len(),
-            fingerprints = s.fingerprint_index.len(),
-            windows = s.windows.len(),
-            "Initial indexing complete"
+            "Indexed {} sessions ({} with fingerprints)",
+            total_summaries, sessions_with_fingerprints
         );
     }
 
@@ -575,7 +593,7 @@ pub async fn run_daemon() -> Result<()> {
                 .watch(&projects_dir, RecursiveMode::Recursive)
                 .unwrap();
 
-            tracing::info!(path = ?projects_dir, "Watching Claude projects directory");
+            tracing::info!(path = %projects_dir.display(), "Watching sessions");
 
             for result in rx {
                 match result {
@@ -601,9 +619,13 @@ pub async fn run_daemon() -> Result<()> {
         let _ = signal_tx.send(DaemonEvent::Shutdown).await;
     });
 
-    // Create socket listener
+    // ─── IPC Socket ──────────────────────────────────────────────────────────────
     let listener = create_listener().await?;
-    tracing::info!(socket = ?crate::ipc::socket_path(), "IPC listener ready");
+    let socket_path = crate::ipc::socket_path();
+    tracing::info!(socket = %socket_path.display(), "IPC listening");
+
+    // ─── Ready ──────────────────────────────────────────────────────────────────
+    tracing::info!("Ready");
 
     // Main event loop
     loop {
@@ -1045,6 +1067,171 @@ async fn process_request(
             };
 
             Response::Ok { message: format!("Refreshed titles:\n{}", titles) }
+        }
+
+        // ─── WSet Operations ────────────────────────────────────────────────────
+
+        Request::WSetSave { name } => {
+            // Determine name: provided or current or "default"
+            let wset_name = match name {
+                Some(n) => n,
+                None => get_current_wset_name().ok().flatten().unwrap_or_else(|| "default".to_string()),
+            };
+
+            // Build WSet from current daemon state
+            let s = state.read().await;
+            let mut wset = WSet::from_daemon_state(&wset_name, &s);
+            drop(s);
+
+            // Save to disk
+            match wset.save() {
+                Ok(_) => {
+                    let wspaces = wset.wspaces.len();
+                    let windows = wset.window_count();
+
+                    // Update _current
+                    if let Err(e) = set_current_wset_name(&wset_name) {
+                        tracing::warn!(error = %e, "Failed to set current wset name");
+                    }
+
+                    Response::WSetSaved { name: wset_name, wspaces, windows }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Failed to save WSet: {}", e),
+                },
+            }
+        }
+
+        Request::WSetLoad { name, dry_run } => {
+            // Determine name: provided or current
+            let wset_name = match name {
+                Some(n) => n,
+                None => match get_current_wset_name() {
+                    Ok(Some(n)) => n,
+                    Ok(None) => return Response::Error {
+                        message: "No current WSet. Specify a name or run 'babel save' first.".to_string(),
+                    },
+                    Err(e) => return Response::Error {
+                        message: format!("Failed to read current WSet: {}", e),
+                    },
+                },
+            };
+
+            // Load WSet from disk
+            let wset = match WSet::load(&wset_name) {
+                Ok(w) => w,
+                Err(e) => return Response::Error {
+                    message: format!("Failed to load WSet '{}': {}", wset_name, e),
+                },
+            };
+
+            let wspaces = wset.wspaces.len();
+            let windows = wset.window_count();
+
+            if dry_run {
+                // Just return what would happen
+                return Response::WSetLoaded {
+                    name: wset_name,
+                    wspaces,
+                    windows,
+                    skipped: vec![],
+                    dry_run: true,
+                };
+            }
+
+            // Actually load: close existing windows and spawn new ones
+            // This is handled by the kitty module's spawn functions
+            let skipped = match crate::kitty::load_wset(&wset).await {
+                Ok(s) => s,
+                Err(e) => return Response::Error {
+                    message: format!("Failed to load WSet: {}", e),
+                },
+            };
+
+            // Update _current
+            if let Err(e) = set_current_wset_name(&wset_name) {
+                tracing::warn!(error = %e, "Failed to set current wset name");
+            }
+
+            // Trigger window refresh to pick up new windows
+            {
+                let mut s = state.write().await;
+                let _ = s.refresh_windows();
+            }
+
+            Response::WSetLoaded {
+                name: wset_name,
+                wspaces,
+                windows,
+                skipped,
+                dry_run: false,
+            }
+        }
+
+        Request::WSetList => {
+            match list_wsets() {
+                Ok(wsets) => {
+                    let current = get_current_wset_name().ok().flatten();
+                    Response::WSetList { wsets, current }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Failed to list WSet files: {}", e),
+                },
+            }
+        }
+
+        Request::WSetCurrent => {
+            match get_current_wset_name() {
+                Ok(name) => Response::WSetCurrent { name },
+                Err(e) => Response::Error {
+                    message: format!("Failed to get current WSet: {}", e),
+                },
+            }
+        }
+
+        Request::WSetDelete { name } => {
+            match WSet::delete(&name) {
+                Ok(()) => Response::Ok {
+                    message: format!("Deleted WSet '{}'", name),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Failed to delete WSet '{}': {}", name, e),
+                },
+            }
+        }
+
+        Request::WSetRename { old, new } => {
+            match WSet::rename(&old, &new) {
+                Ok(()) => Response::Ok {
+                    message: format!("Renamed WSet '{}' to '{}'", old, new),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Failed to rename WSet: {}", e),
+                },
+            }
+        }
+
+        Request::WSetDescribe { name, description } => {
+            // Load, update description, save
+            match WSet::load(&name) {
+                Ok(mut wset) => {
+                    wset.meta.description = description.clone();
+                    match wset.save() {
+                        Ok(_) => {
+                            let desc = description.unwrap_or_else(|| "(cleared)".to_string());
+                            Response::Ok {
+                                message: format!("Set description for '{}': {}", name, desc),
+                            }
+                        }
+                        Err(e) => Response::Error {
+                            message: format!("Failed to save WSet: {}", e),
+                        },
+                    }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Failed to load WSet '{}': {}", name, e),
+                },
+            }
         }
 
         // Subscribe is handled specially in handle_client before reaching process_request

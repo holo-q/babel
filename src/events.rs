@@ -155,6 +155,45 @@ pub enum BabelEvent {
     /// Final event sent before daemon terminates. Subscribers should
     /// reconnect or exit gracefully.
     DaemonShutdown,
+
+    // ─── WSet Events ────────────────────────────────────────────────────────────
+
+    /// WSet saved to disk
+    ///
+    /// Emitted when a WSet is saved via `babel save`.
+    WSetSaved {
+        /// Name of the saved WSet
+        name: String,
+        /// Number of workspaces in the WSet
+        wspaces: usize,
+        /// Total number of windows/sessions saved
+        windows: usize,
+    },
+
+    /// WSet loaded from disk
+    ///
+    /// Emitted when a WSet is fully loaded via `babel load`.
+    /// This is emitted after all windows have been spawned and positioned.
+    WSetLoaded {
+        /// Name of the loaded WSet
+        name: String,
+        /// Number of workspaces in the WSet
+        wspaces: usize,
+        /// Total number of windows/sessions loaded
+        windows: usize,
+        /// Number of sessions that couldn't be restored
+        skipped: usize,
+    },
+
+    /// Current WSet switched
+    ///
+    /// Emitted when the active WSet changes (via save or load).
+    WSetSwitched {
+        /// Previous WSet name (None if no previous)
+        from: Option<String>,
+        /// New WSet name
+        to: String,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -341,6 +380,9 @@ impl EventFilter {
             BabelEvent::SessionStateChanged { .. } => "session_state_changed",
             BabelEvent::WorkspaceTitleUpdated { .. } => "workspace_title_updated",
             BabelEvent::DaemonShutdown => "daemon_shutdown",
+            BabelEvent::WSetSaved { .. } => "wset_saved",
+            BabelEvent::WSetLoaded { .. } => "wset_loaded",
+            BabelEvent::WSetSwitched { .. } => "wset_switched",
         };
 
         self.include.iter().any(|e| e == event_name)

@@ -14,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::claude_storage::SessionInfo;
 use crate::discovery::ClaudeWindow;
 use crate::events::EventMessage;
+use crate::wset::WSetSummary;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Protocol Messages
@@ -74,6 +75,32 @@ pub enum Request {
     /// Force refresh titles for workspace(s)
     /// If workspace is None, refreshes all workspaces with Claude windows
     TitleRefresh { workspace: Option<i32> },
+
+    // ─── WSet Operations ────────────────────────────────────────────────────────
+
+    /// Save current state to a WSet
+    /// If name is None, saves to current WSet (from _current file)
+    WSetSave { name: Option<String> },
+
+    /// Load a WSet, spawning windows for each session
+    /// If name is None, loads current WSet (from _current file)
+    /// dry_run=true returns what would happen without executing
+    WSetLoad { name: Option<String>, dry_run: bool },
+
+    /// List all saved WSet files
+    WSetList,
+
+    /// Get current WSet name (from _current file)
+    WSetCurrent,
+
+    /// Delete a WSet by name
+    WSetDelete { name: String },
+
+    /// Rename a WSet
+    WSetRename { old: String, new: String },
+
+    /// Set description for a WSet
+    WSetDescribe { name: String, description: Option<String> },
 }
 
 /// Response from daemon to CLI
@@ -110,6 +137,37 @@ pub enum Response {
     /// Workspace titles response
     /// Keys are workspace numbers as strings (JSON doesn't support integer map keys)
     Titles { titles: std::collections::HashMap<String, String> },
+
+    // ─── WSet Responses ─────────────────────────────────────────────────────────
+
+    /// WSet saved successfully
+    WSetSaved {
+        name: String,
+        wspaces: usize,
+        windows: usize,
+    },
+
+    /// WSet loaded successfully (or dry-run preview)
+    WSetLoaded {
+        name: String,
+        wspaces: usize,
+        windows: usize,
+        /// Sessions that couldn't be restored (file missing, etc.)
+        skipped: Vec<String>,
+        /// True if this was a dry-run (no windows spawned)
+        dry_run: bool,
+    },
+
+    /// List of all WSet summaries
+    WSetList {
+        wsets: Vec<WSetSummary>,
+        current: Option<String>,
+    },
+
+    /// Current WSet name
+    WSetCurrent {
+        name: Option<String>,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

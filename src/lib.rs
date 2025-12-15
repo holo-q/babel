@@ -28,3 +28,4 @@ pub mod daemon;
 pub mod events;
 pub mod fingerprint;
 pub mod summarizer;
+pub mod wset;

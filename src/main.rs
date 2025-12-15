@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use claude_babel::claude_storage::{get_recent_sessions, SessionInfo};
 use claude_babel::daemon::{run_daemon, run_daemon_traced};
@@ -63,18 +63,66 @@ async fn resolve_target(target: &Target) -> Result<Vec<u64>> {
     }
 }
 
-/// Spaceship CLI style: bold+underline for command names
+/// Spaceship CLI style: per-command styling based on semantics
 ///
-/// This is a standard pattern across spaceship software for instant visual
-/// recognition of actionable commands in help output.
+/// Commands are styled by their behavior:
+/// - Query (read-only): italic - safe to run anytime
+/// - Mutation (state-changing): underline - modifies state
+/// - Namespace (has subcommands): normal - container only
+///
+/// This visual language provides instant recognition of command safety.
 fn spaceship_styles() -> clap::builder::Styles {
     use anstyle::{Style, Effects};
 
     clap::builder::Styles::styled()
-        // Command/subcommand names: bold + underline for instant recognition
-        .literal(Style::new().effects(Effects::BOLD | Effects::UNDERLINE))
-        // Placeholders (VALUE, FILE, etc): just dim
+        // Literals: no special style (we style command names individually)
+        .literal(Style::new())
+        // Placeholders (VALUE, FILE, etc): dim
         .placeholder(Style::new().effects(Effects::DIMMED))
+        // Headers: bold
+        .header(Style::new().effects(Effects::BOLD))
+}
+
+// ANSI escape sequences for command name styling in help output
+const ITALIC: &str = "\x1b[3m";
+const UNDERLINE: &str = "\x1b[4m";
+const RESET: &str = "\x1b[0m";
+
+/// Query commands (read-only, safe) - rendered italic in help
+const QUERY_COMMANDS: &[&str] = &[
+    "ls", "ls-terminals", "ls-panes", "check-window", "check-pane",
+    "get-scrollback", "history", "fingerprint", "focus"
+];
+
+/// Mutation commands (state-changing) - rendered underlined in help
+const MUTATION_COMMANDS: &[&str] = &[
+    "send", "set-icon", "set-read", "set-title", "mv"
+];
+
+/// Style command names in help output based on their semantic category
+///
+/// - Query commands (read-only): italic
+/// - Mutation commands (state-changing): underline
+/// - Namespace commands (wset, daemon, help): normal
+fn style_help_output(help: &str) -> String {
+    let mut result = help.to_string();
+
+    // Style query commands (italic)
+    for cmd in QUERY_COMMANDS {
+        // Match command at start of line with proper spacing (clap's format)
+        let pattern = format!("  {}  ", cmd);
+        let styled = format!("  {}{}{}  ", ITALIC, cmd, RESET);
+        result = result.replace(&pattern, &styled);
+    }
+
+    // Style mutation commands (underline)
+    for cmd in MUTATION_COMMANDS {
+        let pattern = format!("  {}  ", cmd);
+        let styled = format!("  {}{}{}  ", UNDERLINE, cmd, RESET);
+        result = result.replace(&pattern, &styled);
+    }
+
+    result
 }
 
 #[derive(Parser)]
@@ -96,7 +144,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    // ─── Information Retrieval ──────────────────────────────────────────────────
+    // ─── Information Retrieval (italic = query, safe to run) ─────────────────────
 
     /// List all discovered Claude sessions
     #[command(alias = "list")]
@@ -107,13 +155,14 @@ enum Commands {
     },
 
     /// List all kitty terminals (not just Claude)
+    #[command()]
     LsTerminals,
 
     /// List all kitty panes with their IDs
     ///
     /// Shows all kitty window panes grouped by OS window. Panes are the
     /// individual terminal views within a kitty window.
-    #[command(alias = "lsp")]
+    #[command( alias = "lsp")]
     LsPanes,
 
     /// Check status of a kitty window
@@ -121,7 +170,7 @@ enum Commands {
     /// Shows detailed information about a Claude window including session info,
     /// fingerprint data, and activity state. If no window ID is provided, shows
     /// the currently focused Claude window.
-    #[command(alias = "cw")]
+    #[command( alias = "cw")]
     CheckWindow {
         /// Kitty window ID to query (omit for focused window)
         window_id: Option<u64>,
@@ -130,7 +179,7 @@ enum Commands {
     /// Check status of a panel pane
     ///
     /// Shows information about a richspace-babel panel pane.
-    #[command(alias = "cp")]
+    #[command( alias = "cp")]
     CheckPane {
         /// Pane name to query
         pane_name: Option<String>,
@@ -140,7 +189,7 @@ enum Commands {
     ///
     /// Retrieves the full scrollback buffer from a kitty window. Useful for
     /// debugging or piping to other tools.
-    #[command(alias = "gsb")]
+    #[command( alias = "gsb")]
     GetScrollback {
         /// Kitty window ID
         window_id: u64,
@@ -153,7 +202,7 @@ enum Commands {
     ///
     /// Without arguments, shows recent conversations. Pass session IDs as
     /// positional arguments to show specific sessions.
-    #[command(alias = "h")]
+    #[command( alias = "h")]
     History {
         /// Session IDs to show (if none, shows recent conversations)
         #[arg(value_name = "SESSION")]
@@ -183,7 +232,7 @@ enum Commands {
     ///   babel fingerprint 42        # Trace window ID 42
     ///   babel fingerprint .         # Trace current directory
     ///   babel fingerprint abc123    # Trace session abc123
-    #[command(alias = "fp")]
+    #[command( alias = "fp")]
     Fingerprint {
         /// Window ID, directory path, or session ID (auto-detected)
         #[arg(value_name = "INPUT")]
@@ -202,9 +251,10 @@ enum Commands {
         session: bool,
     },
 
-    // ─── Actions ────────────────────────────────────────────────────────────────
+    // ─── Actions (underline = mutation, changes state) ───────────────────────────
 
     /// Focus a Claude window (rofi picker if no ID given)
+    #[command()]
     Focus {
         /// Kitty window ID to focus (omit for interactive rofi picker)
         window_id: Option<u64>,
@@ -213,6 +263,7 @@ enum Commands {
     /// Send text to Claude window(s)
     ///
     /// Target can be a window ID or "*" for all windows.
+    #[command()]
     Send {
         /// Target: window ID or "*" for all
         target: Target,
@@ -228,7 +279,7 @@ enum Commands {
     /// important sessions.
     ///
     /// Target can be a window ID or "*" for all windows.
-    #[command(alias = "si")]
+    #[command( alias = "si")]
     SetIcon {
         /// Target: window ID or "*" for all
         target: Target,
@@ -240,7 +291,7 @@ enum Commands {
     /// Mark window(s) as read
     ///
     /// Target can be a window ID or "*" for all windows.
-    #[command(alias = "sr")]
+    #[command( alias = "sr")]
     SetRead {
         /// Target: window ID or "*" for all
         target: Target,
@@ -260,7 +311,7 @@ enum Commands {
     ///   babel set-title 42 "My Custom Title"   # Set specific title
     ///   babel set-title 42                     # Auto-title from session
     ///   babel set-title *                      # Auto-title all windows
-    #[command(alias = "st")]
+    #[command( alias = "st")]
     SetTitle {
         /// Target: window ID or "*" for all
         target: Target,
@@ -285,6 +336,7 @@ enum Commands {
     ///   babel mv --history-only ~/Old ~/New          # Update history without moving
     ///   babel mv --anxious ~/Old ~/New               # Step-by-step confirmation
     ///   babel mv --force ~/Old ~/New                 # Force move even with active terminals
+    #[command()]
     Mv {
         /// Source directory path
         source: PathBuf,
@@ -396,6 +448,16 @@ enum WSetCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Intercept --help to apply semantic command styling
+    // Must happen before Cli::parse() which would exit on --help
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") && args.len() <= 2 {
+        // Top-level help requested - render with styled command names
+        let help = Cli::command().render_help().to_string();
+        print!("{}", style_help_output(&help));
+        return Ok(());
+    }
+
     // Parse CLI first to get --debug flag before logging init
     let cli = Cli::parse();
 
