@@ -161,10 +161,10 @@ impl WSet {
         }
     }
 
-    /// Build a WSet from current daemon state
+    /// Build a WSet from current babel state
     ///
     /// Groups windows by workspace and captures their session IDs
-    pub fn from_daemon_state(name: &str, state: &BabelState) -> Self {
+    pub fn from_babel_state(name: &str, state: &BabelState) -> Self {
         let now = Utc::now();
 
         // Group windows by workspace

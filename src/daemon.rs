@@ -51,7 +51,7 @@ macro_rules! trace {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Daemon State
+// Babel State
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Summary entry for fast matching
@@ -61,7 +61,7 @@ pub struct SummaryEntry {
     session_id: String,
 }
 
-/// Daemon state - shared across tasks
+/// Babel state - shared across tasks
 pub struct BabelState {
     /// Current Claude windows (kitty_id → ClaudeWindow)
     pub windows: HashMap<u64, ClaudeWindow>,
@@ -1178,9 +1178,9 @@ async fn process_request(
                 None => get_current_wset_name().ok().flatten().unwrap_or_else(|| "default".to_string()),
             };
 
-            // Build WSet from current daemon state
+            // Build WSet from current babel state
             let s = state.read().await;
-            let mut wset = WSet::from_daemon_state(&wset_name, &s);
+            let mut wset = WSet::from_babel_state(&wset_name, &s);
             drop(s);
 
             // Save to disk
@@ -1291,20 +1291,14 @@ async fn process_request(
 
         Request::WSetDelete { name } => {
             match WSet::delete(&name) {
-                Ok(()) => Response::Ok {
-                    message: format!("Deleted WSet '{}'", name),
-                },
-                Err(e) => Response::Error {
-                    message: format!("Failed to delete WSet '{}': {}", name, e),
-                },
+                Ok(()) => Response::Ok { message: format!("Deleted WSet '{}'", name) },
+                Err(e) => Response::Error { message: format!("Failed to delete WSet '{}': {}", name, e) },
             }
         }
 
         Request::WSetRename { old, new } => {
             match WSet::rename(&old, &new) {
-                Ok(()) => Response::Ok {
-                    message: format!("Renamed WSet '{}' to '{}'", old, new),
-                },
+                Ok(()) => Response::Ok { message: format!("Renamed WSet '{}' to '{}'", old, new) },
                 Err(e) => Response::Error {
                     message: format!("Failed to rename WSet: {}", e),
                 },
@@ -1319,13 +1313,9 @@ async fn process_request(
                     match wset.save() {
                         Ok(_) => {
                             let desc = description.unwrap_or_else(|| "(cleared)".to_string());
-                            Response::Ok {
-                                message: format!("Set description for '{}': {}", name, desc),
-                            }
+                            Response::Ok { message: format!("Set description for '{}': {}", name, desc) }
                         }
-                        Err(e) => Response::Error {
-                            message: format!("Failed to save WSet: {}", e),
-                        },
+                        Err(e) => Response::Error { message: format!("Failed to save WSet: {}", e) },
                     }
                 }
                 Err(e) => Response::Error {
