@@ -249,7 +249,8 @@ enum WSetCommands {
 async fn main() -> Result<()> {
     // Initialize logging via spaceship-std (centralized config + SIGHUP hot-reload)
     // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
-    spaceship_std::logging::init("babel");
+    // "babel" = config key and journald identifier, "claude_babel" = Rust crate for filtering
+    spaceship_std::logging::init("babel", "claude_babel");
 
     let cli = Cli::parse();
 
@@ -829,12 +830,17 @@ struct ConflictingWindow {
 /// These windows will break after the move unless migrated. Returns windows
 /// partitioned by state - idle ones can be migrated, active ones block the move.
 fn find_conflicting_windows(source: &Path) -> Result<Vec<ConflictingWindow>> {
+    // Canonicalize to absolute path - kitty's cwd is always absolute, but user may
+    // pass relative path like "." or "foo". Without this, starts_with() always fails.
+    let source = source.canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap().join(source));
+
     let windows = discover_claude_windows()?;
     let mut conflicts = Vec::new();
 
     for win in windows {
         // Check if window's cwd is inside (or equal to) source path
-        if win.cwd.starts_with(source) {
+        if win.cwd.starts_with(&source) {
             // Get window state from scrollback
             let state = match get_scrollback(win.kitty_id) {
                 Ok(scrollback) => detect_state(&scrollback),
@@ -843,7 +849,7 @@ fn find_conflicting_windows(source: &Path) -> Result<Vec<ConflictingWindow>> {
 
             // Calculate relative path for new cwd computation
             let relative_path = win.cwd
-                .strip_prefix(source)
+                .strip_prefix(&source)
                 .unwrap_or(Path::new(""))
                 .to_path_buf();
 
