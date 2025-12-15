@@ -62,7 +62,7 @@ pub struct SummaryEntry {
 }
 
 /// Daemon state - shared across tasks
-pub struct DaemonState {
+pub struct BabelState {
     /// Current Claude windows (kitty_id → ClaudeWindow)
     pub windows: HashMap<u64, ClaudeWindow>,
 
@@ -98,13 +98,13 @@ pub struct DaemonState {
     pub workspace_titles: HashMap<i32, String>,
 }
 
-impl Default for DaemonState {
+impl Default for BabelState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DaemonState {
+impl BabelState {
     pub fn new() -> Self {
         Self {
             windows: HashMap::new(),
@@ -583,7 +583,7 @@ pub async fn run_daemon() -> Result<()> {
     tracing::info!("babel v{}", env!("CARGO_PKG_VERSION"));
 
     // Initialize state
-    let state = Arc::new(RwLock::new(DaemonState::new()));
+    let state = Arc::new(RwLock::new(BabelState::new()));
 
     // Initialize workspace summarizer
     let summarizer = Arc::new(crate::summarizer::WorkspaceSummarizer::new());
@@ -725,7 +725,7 @@ pub async fn run_daemon() -> Result<()> {
                         // This allows concurrent readers to proceed unblocked
                         for window_id in needs_matching {
                             if let Some((session_id, confidence, fingerprint)) =
-                                DaemonState::fingerprint_match_window_id(window_id, &fingerprint_index)
+                                BabelState::fingerprint_match_window_id(window_id, &fingerprint_index)
                             {
                                 // Phase 4: Apply result with write lock (quick operation)
                                 let mut s = state.write().await;
@@ -777,7 +777,7 @@ pub async fn run_daemon() -> Result<()> {
 /// like "refactoring auth system" via Haiku.
 async fn summarize_workspace(
     workspace: i32,
-    state: &Arc<RwLock<DaemonState>>,
+    state: &Arc<RwLock<BabelState>>,
     summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
 ) {
     use crate::summarizer::SessionSummaryInput;
@@ -884,7 +884,7 @@ async fn handle_subscriber(
 
 async fn handle_client(
     mut stream: UnixStream,
-    state: Arc<RwLock<DaemonState>>,
+    state: Arc<RwLock<BabelState>>,
     summarizer: Arc<crate::summarizer::WorkspaceSummarizer>,
 ) -> Result<()> {
     let mut reader = BufReader::new(&mut stream);
@@ -927,7 +927,7 @@ async fn handle_client(
 
 async fn process_request(
     request: Request,
-    state: &Arc<RwLock<DaemonState>>,
+    state: &Arc<RwLock<BabelState>>,
     summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
 ) -> Response {
     match request {
@@ -1103,7 +1103,7 @@ async fn process_request(
             // Phase 3: Do expensive I/O without lock
             for window_id in needs_matching {
                 if let Some((session_id, confidence, fingerprint)) =
-                    DaemonState::fingerprint_match_window_id(window_id, &fingerprint_index)
+                    BabelState::fingerprint_match_window_id(window_id, &fingerprint_index)
                 {
                     let mut s = state.write().await;
                     s.apply_fingerprint_result(window_id, session_id, confidence, fingerprint);

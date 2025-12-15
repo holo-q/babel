@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::DaemonState;
+use crate::daemon::BabelState;
 use crate::discovery::ClaudeWindow;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -164,7 +164,7 @@ impl WSet {
     /// Build a WSet from current daemon state
     ///
     /// Groups windows by workspace and captures their session IDs
-    pub fn from_daemon_state(name: &str, state: &DaemonState) -> Self {
+    pub fn from_daemon_state(name: &str, state: &BabelState) -> Self {
         let now = Utc::now();
 
         // Group windows by workspace

@@ -20,7 +20,7 @@
 //!   // exit, state drops
 //!
 //! Daemon:
-//!   state = DaemonState::new()   // same state
+//!   state = BabelState::new()   // same state
 //!   loop { watch → refresh → serve IPC }
 //! ```
 //!
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail, Context};
 use tracing::{debug, warn, info};
 
-use crate::daemon::DaemonState;
+use crate::daemon::BabelState;
 use crate::discovery::ClaudeWindow;
 use crate::claude_storage::{SessionInfo, MigrateResult};
 use crate::ipc::{send_request, is_daemon_running, Request, Response};
@@ -52,7 +52,7 @@ enum CoreMode {
     /// Connected to babeld - proxy requests via IPC
     Connected,
     /// No daemon - we own the state directly (same structure as daemon)
-    Local(DaemonState),
+    Local(BabelState),
 }
 
 impl BabelCore {
@@ -68,7 +68,7 @@ impl BabelCore {
             Self { mode: CoreMode::Connected }
         } else {
             debug!("daemon not available, initializing local state");
-            let mut state = DaemonState::new();
+            let mut state = BabelState::new();
 
             // Initialize same way daemon does
             if let Err(e) = state.refresh_windows() {
