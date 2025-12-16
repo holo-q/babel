@@ -1,12 +1,14 @@
-//! Action commands - state-changing operations (focus, send, set-*, etc.)
+//! Action commands - state-changing operations (focus, send, set-*, fire, etc.)
 //!
 //! These commands modify window state, send input, or update metadata.
 //! All operations go through BabelCore which handles daemon/ephemeral modes transparently.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use claude_babel::core::BabelCore;
-use claude_babel::discovery::enrich_window;
+use claude_babel::utility::claude_discovery::enrich_window;
 
 use super::{Target, resolve_target};
 
@@ -213,5 +215,160 @@ pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
             .with_context(|| format!("Failed to mark window {} as read", window_id))?;
         println!("Marked window {} as read", window_id);
     }
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fire-and-Forget Sessions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fire a prompt to Claude in a detached background session
+pub async fn cmd_fire(
+    core: &mut BabelCore,
+    prompt: &str,
+    workdir: Option<&Path>,
+    ambient: Option<String>,
+) -> Result<()> {
+    let task = core.fire(prompt, workdir, ambient).await
+        .context("Failed to fire Claude session")?;
+
+    println!("⚡ Fired: {}", task.prompt_preview);
+    println!("   Task ID: {}", task.task_id);
+    println!("   PID: {}", task.pid);
+    println!("   Workdir: {}", task.workdir.display());
+    if let Some(ref sound) = task.ambient_sound {
+        println!("   Ambient: {}", sound);
+    }
+
+    Ok(())
+}
+
+/// List running fire-and-forget tasks
+pub fn cmd_fire_ls(json: bool) -> Result<()> {
+    let tasks = BabelCore::fired_tasks()
+        .context("Failed to list fired tasks")?;
+
+    if tasks.is_empty() {
+        if !json {
+            println!("No running fire tasks");
+        } else {
+            println!("[]");
+        }
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+    } else {
+        println!("Running fire tasks:\n");
+        for task in &tasks {
+            let alive = if task.is_alive() { "🟢" } else { "⚫" };
+            println!("{} [{}] PID {} - {}", alive, task.task_id, task.pid, task.prompt_preview);
+            println!("     {}", task.workdir.display());
+            if let Some(ref sound) = task.ambient_sound {
+                println!("     🔊 {}", sound);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Clean up finished fire tasks
+pub fn cmd_fire_clean() -> Result<()> {
+    let cleaned = BabelCore::cleanup_fired()
+        .context("Failed to clean up fired tasks")?;
+
+    if cleaned == 0 {
+        println!("No finished tasks to clean up");
+    } else {
+        println!("Cleaned up {} finished task(s)", cleaned);
+    }
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Event Monitor
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Stream daemon events to stdout as JSON lines
+///
+/// Subscribes to daemon events and prints each one as a JSON line.
+/// Connection stays open until Ctrl+C or daemon shutdown.
+pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    use claude_babel::utility::ipc::{socket_path, Request, Response};
+
+    let sock_path = socket_path();
+
+    eprintln!("Connecting to daemon at {}...", sock_path.display());
+
+    let mut stream = UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("Failed to connect to daemon at {}", sock_path.display()))?;
+
+    // Send Subscribe request
+    let request = Request::Subscribe { events: filter.clone() };
+    let mut request_json = serde_json::to_string(&request)?;
+    request_json.push('\n');
+    stream.write_all(request_json.as_bytes()).await?;
+
+    // Read subscription acknowledgment
+    let (reader, writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let response: Response = serde_json::from_str(&line)
+        .context("Failed to parse subscription response")?;
+
+    match response {
+        Response::Subscribed { subscriber_id } => {
+            if filter.is_empty() {
+                eprintln!("Subscribed (id: {}) - streaming all events...", subscriber_id);
+            } else {
+                eprintln!("Subscribed (id: {}) - filtering: {:?}", subscriber_id, filter);
+            }
+            eprintln!("Press Ctrl+C to stop\n");
+        }
+        Response::Error { message } => {
+            anyhow::bail!("Subscription failed: {}", message);
+        }
+        other => {
+            anyhow::bail!("Unexpected response: {:?}", other);
+        }
+    }
+
+    // Stream events until connection closes
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).await?;
+
+        if bytes_read == 0 {
+            eprintln!("\nConnection closed by daemon");
+            break;
+        }
+
+        // Parse and re-serialize for pretty printing if it's an event
+        match serde_json::from_str::<Response>(&line) {
+            Ok(Response::Event { event }) => {
+                // Print just the event as a JSON line
+                println!("{}", serde_json::to_string(&event)?);
+            }
+            Ok(other) => {
+                // Print other responses as-is
+                println!("{}", serde_json::to_string(&other)?);
+            }
+            Err(e) => {
+                eprintln!("Parse error: {} - raw: {}", e, line.trim());
+            }
+        }
+    }
+
+    // Explicit drop to avoid unused warning
+    drop(writer);
+
     Ok(())
 }

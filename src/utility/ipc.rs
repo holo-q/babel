@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::claude_storage::SessionInfo;
-use crate::discovery::ClaudeWindow;
+use crate::utility::claude_storage::SessionInfo;
+use crate::utility::claude_discovery::ClaudeWindow;
 use crate::events::EventMessage;
 use crate::wset::WSetSummary;
 

@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::BabelState;
-use crate::discovery::ClaudeWindow;
+use crate::utility::claude_discovery::ClaudeWindow;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data Types

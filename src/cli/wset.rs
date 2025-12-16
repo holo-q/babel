@@ -6,7 +6,7 @@
 use std::io::Write;
 use anyhow::Result;
 use claude_babel::core::BabelCore;
-use claude_babel::ipc::{send_request, Request, Response};
+use claude_babel::utility::ipc::{send_request, Request, Response};
 
 // Re-export WSetCommands from main for now (will be moved to cli module later)
 use super::WSetCommands;

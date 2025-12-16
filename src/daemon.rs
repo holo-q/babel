@@ -22,15 +22,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::claude_storage::{claude_base, get_recent_sessions, get_session_info};
-use crate::discovery::{enrich_window, ClaudeWindow};
+use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_session_info};
+use crate::utility::claude_discovery::{enrich_window, load_wset, ClaudeWindow};
 use crate::events::{BabelEvent, EventFilter, EventMessage, EventPublisher};
 use crate::fingerprint::{
 	SessionFingerprint, MatchConfidence,
 	extract_from_scrollback, extract_from_jsonl, match_fingerprints,
 };
-use crate::ipc::{create_listener, Request, Response};
-use crate::kitty::{find_claude_windows, focus_window, get_scrollback, send_text};
+use crate::utility::ipc::{create_listener, Request, Response};
+use crate::kitty::{focus_window, get_scrollback, send_text};
+use crate::utility::claude_discovery::{find_claude_windows, get_window_activity_state};
 use crate::babel_storage::{init_db, mark_read, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
@@ -173,6 +174,7 @@ impl BabelState {
 				                         .filter(|id| !id.starts_with("agent-"))
 				                         .cloned();
 				ClaudeWindow {
+					socket: kw.socket.clone(),
 					kitty_id: kw.id,
 					title: kw.title.clone(),
 					session_id: existing_session,
@@ -182,6 +184,7 @@ impl BabelState {
 					os_window_id: kw.os_window_id,
 					platform_window_id: kw.platform_window_id,
 					workspace,
+					activity_state: None, // Will be populated from window_states cache
 					fingerprint: None,
 					match_confidence: None,
 				}
@@ -257,7 +260,7 @@ impl BabelState {
 		// Detect session state changes and emit events
 		// This enables richspace-babel to track Claude activity per-workspace
 		for (kitty_id, window) in &new_windows {
-			let new_state = crate::kitty::get_window_activity_state(*kitty_id);
+			let new_state = get_window_activity_state(*kitty_id);
 			let old_state = self.window_states.get(kitty_id).copied();
 
 			match old_state {
@@ -330,7 +333,7 @@ impl BabelState {
 		fingerprint: SessionFingerprint,
 	) {
 		// Tag the window for future fast lookups
-		let _ = crate::discovery::tag_window(window_id, &session_id);
+		let _ = crate::utility::claude_discovery::tag_window(window_id, &session_id);
 
 		// Cache the fingerprint
 		self.cache_fingerprint(window_id, fingerprint.clone());
@@ -486,7 +489,7 @@ impl BabelState {
 	/// Scans 100 most recent sessions by file modification time
 	/// Debounced to avoid excessive rebuilds when multiple JSONL files change rapidly
 	pub fn rebuild_fingerprint_index(&mut self) -> Result<()> {
-		use crate::claude_storage::{list_projects, list_sessions};
+		use crate::utility::claude_storage::{list_projects, list_sessions};
 
 		// Debounce: skip rebuild if last rebuild was less than 2 seconds ago
 		const REBUILD_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -684,7 +687,7 @@ pub async fn run_daemon() -> Result<()> {
 
 	// ─── IPC Socket ──────────────────────────────────────────────────────────────
 	let listener = create_listener().await?;
-	let socket_path = crate::ipc::socket_path();
+	let socket_path = crate::utility::ipc::socket_path();
 	tracing::info!(socket = %socket_path.display(), "IPC listening");
 
 	// ─── Ready ──────────────────────────────────────────────────────────────────
@@ -771,7 +774,7 @@ pub async fn run_daemon() -> Result<()> {
 	}
 
 	// Cleanup socket
-	let _ = std::fs::remove_file(crate::ipc::socket_path());
+	let _ = std::fs::remove_file(crate::utility::ipc::socket_path());
 	Ok(())
 }
 
@@ -941,13 +944,27 @@ async fn process_request(
 	match request {
 		Request::List => {
 			let s = state.read().await;
-			let windows: Vec<ClaudeWindow> = s.windows.values().cloned().collect();
+			let windows: Vec<ClaudeWindow> = s.windows.values()
+				.map(|w| {
+					let mut win = w.clone();
+					// Populate activity_state from cached window_states
+					win.activity_state = s.window_states.get(&w.kitty_id).cloned();
+					win
+				})
+				.collect();
 			Response::Windows { windows }
 		}
 
 		Request::ListWithFingerprints => {
 			let s = state.read().await;
-			let mut windows: Vec<ClaudeWindow> = s.windows.values().cloned().collect();
+			// Clone windows and populate activity states from cache
+			let mut windows: Vec<ClaudeWindow> = s.windows.values()
+				.map(|w| {
+					let mut win = w.clone();
+					win.activity_state = s.window_states.get(&w.kitty_id).cloned();
+					win
+				})
+				.collect();
 			drop(s); // Release lock before expensive operations
 
 			// Extract fingerprints and enrich with session info for each window
@@ -1249,7 +1266,7 @@ async fn process_request(
 
 			// Actually load: close existing windows and spawn new ones
 			// This is handled by the kitty module's spawn functions
-			let skipped = match crate::kitty::load_wset(&wset).await {
+			let skipped = match load_wset(&wset).await {
 				Ok(s) => s,
 				Err(e) => return Response::Error {
 					message: format!("Failed to load WSet: {}", e),

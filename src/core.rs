@@ -33,9 +33,9 @@ use anyhow::{Result, bail, Context};
 use tracing::{debug, warn, info};
 
 use crate::daemon::BabelState;
-use crate::discovery::ClaudeWindow;
-use crate::claude_storage::{SessionInfo, MigrateResult};
-use crate::ipc::{send_request, is_daemon_running, Request, Response};
+use crate::utility::claude_discovery::ClaudeWindow;
+use crate::utility::claude_storage::{SessionInfo, MigrateResult};
+use crate::utility::ipc::{send_request, is_daemon_running, Request, Response};
 use crate::kitty;
 use crate::babel_storage;
 use scrollparse::claude::{detect_activity_state, ActivityState};
@@ -85,7 +85,7 @@ impl BabelCore {
         }
     }
 
-    /// Check if connected to daemon (vs local mode)
+    /// Check if connected to daemon (vs local/ephemeral mode)
     pub fn is_connected(&self) -> bool {
         matches!(self.mode, CoreMode::Connected)
     }
@@ -171,7 +171,7 @@ impl BabelCore {
             }
             CoreMode::Local(_state) => {
                 // Direct file access - same as daemon does internally
-                crate::claude_storage::get_recent_sessions(limit)
+                crate::utility::claude_storage::get_recent_sessions(limit)
             }
         }
     }
@@ -352,6 +352,230 @@ impl BabelCore {
         }
     }
 
+    /// Load a workspace set, spawning windows for each session
+    ///
+    /// This closes all existing Claude windows and spawns new ones from the WSet.
+    /// Returns information about what was loaded and any sessions that couldn't be restored.
+    pub async fn wset_load(&mut self, name: Option<String>, dry_run: bool) -> Result<WSetLoadResult> {
+        match &mut self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::WSetLoad { name: name.clone(), dry_run }).await {
+                    Ok(Response::WSetLoaded { name, wspaces, windows, skipped, dry_run }) => {
+                        Ok(WSetLoadResult { name, wspaces, windows, skipped, dry_run })
+                    }
+                    Ok(Response::Error { message }) => bail!("{}", message),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => bail!("daemon connection failed: {}", e),
+                }
+            }
+            CoreMode::Local(state) => {
+                // Load the wset file
+                let wset_name = match name {
+                    Some(n) => n,
+                    None => crate::wset::get_current_wset_name()?
+                        .ok_or_else(|| anyhow::anyhow!("No current WSet set"))?,
+                };
+                let wset = crate::wset::WSet::load(&wset_name)?;
+
+                if dry_run {
+                    return Ok(WSetLoadResult {
+                        name: wset_name,
+                        wspaces: wset.wspaces.len(),
+                        windows: wset.window_count(),
+                        skipped: vec![],
+                        dry_run: true,
+                    });
+                }
+
+                // Use the impl function from claude_discovery
+                let skipped = crate::utility::claude_discovery::load_wset(&wset).await?;
+
+                // Refresh state after loading
+                if let Err(e) = state.refresh_windows() {
+                    warn!("failed to refresh windows after wset load: {}", e);
+                }
+
+                Ok(WSetLoadResult {
+                    name: wset_name,
+                    wspaces: wset.wspaces.len(),
+                    windows: wset.window_count(),
+                    skipped,
+                    dry_run: false,
+                })
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Working Directory Resolution
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Resolve working directory using smart detection
+    ///
+    /// Uses the detection waterfall:
+    /// 1. Explicit path (if provided and exists)
+    /// 2. Kitty focused window's cwd
+    /// 3. X11 focused window's process cwd
+    /// 4. Project path from process cmdline (.venv, --project)
+    /// 5. Path from window title (IDE patterns)
+    /// 6. Fallback: ~/Workspace
+    pub fn resolve_workdir(explicit: Option<&str>) -> PathBuf {
+        crate::utility::workdir::resolve(explicit)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Detached Claude Spawning
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Spawn Claude in a detached background process
+    ///
+    /// Returns the child PID (best-effort detection).
+    /// The process runs fully detached via setsid.
+    ///
+    /// # Arguments
+    /// * `cwd` - Working directory for the session
+    /// * `args` - Arguments to pass to claude (e.g., `["-p", "my prompt"]`)
+    pub async fn spawn_detached_claude(cwd: &Path, args: &[&str]) -> Result<u32> {
+        use std::process::Command;
+
+        // Build claude command with args
+        // SHELL=/usr/bin/bash: Claude Code doesn't support zsh
+        let args_str = args.iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let claude_script = format!(
+            "cd '{}' && SHELL=/usr/bin/bash claude {} </dev/null >/dev/null 2>&1",
+            cwd.display(),
+            args_str
+        );
+
+        let child = Command::new("setsid")
+            .arg("bash")
+            .arg("-c")
+            .arg(&claude_script)
+            .spawn()
+            .context("failed to spawn detached claude")?;
+
+        let spawn_pid = child.id();
+
+        // Small delay to let process start
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to find actual claude PID (best effort)
+        // Fall back to spawn PID if detection fails
+        let pid = if !args.is_empty() {
+            let search = args[0].chars().take(20).collect::<String>();
+            find_claude_pid(&search).unwrap_or(spawn_pid)
+        } else {
+            spawn_pid
+        };
+
+        Ok(pid)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Fire-and-Forget Sessions
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Fire a prompt to Claude in a detached background session
+    ///
+    /// Combines workdir resolution, detached spawning, and task tracking.
+    /// This is the high-level API for fire-and-forget prompts.
+    ///
+    /// # Arguments
+    /// * `prompt` - The prompt to send to Claude
+    /// * `workdir` - Optional working directory (resolved automatically if None)
+    /// * `ambient_sound` - Optional ambient sound name to associate with task
+    pub async fn fire(
+        &mut self,
+        prompt: &str,
+        workdir: Option<&Path>,
+        ambient_sound: Option<String>,
+    ) -> Result<crate::fire::FiredTask> {
+        use crate::fire::{FiredTask, track_task};
+
+        // Resolve working directory
+        let cwd = match workdir {
+            Some(p) => p.to_path_buf(),
+            None => Self::resolve_workdir(None),
+        };
+
+        info!(?cwd, prompt_len = prompt.len(), "firing claude session");
+
+        // Spawn detached claude with prompt
+        let pid = Self::spawn_detached_claude(&cwd, &["-p", prompt]).await?;
+
+        // Create and track task
+        let task = FiredTask {
+            task_id: FiredTask::new_id(),
+            pid,
+            prompt_preview: prompt.chars().take(60).collect(),
+            workdir: cwd,
+            ambient_sound,
+        };
+
+        track_task(&task)?;
+
+        info!(task_id = %task.task_id, pid = task.pid, "claude fire tracked");
+
+        Ok(task)
+    }
+
+    /// List all currently running fired tasks
+    pub fn fired_tasks() -> Result<Vec<crate::fire::FiredTask>> {
+        crate::fire::list_running_tasks()
+    }
+
+    /// Clean up finished fired tasks
+    pub fn cleanup_fired() -> Result<usize> {
+        crate::fire::cleanup_finished_tasks()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Session Spawning
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Spawn a Claude session in a new kitty window
+    ///
+    /// Uses `kitty-claude` script for consistent window setup. Returns the new
+    /// window ID if found (may be None if window spawns but can't be located).
+    ///
+    /// In connected mode, delegates to daemon. In local mode, spawns directly
+    /// and refreshes state.
+    pub async fn spawn_session(
+        &mut self,
+        session_id: &str,
+        cwd: &Path,
+    ) -> Result<Option<ClaudeWindow>> {
+        match &mut self.mode {
+            CoreMode::Connected => {
+                // Daemon handles spawning - use WSetLoad with single session as workaround
+                // TODO: Add dedicated SpawnSession IPC request
+                warn!("spawn_session in connected mode not yet implemented via IPC");
+                bail!("spawn_session requires local mode or daemon support (coming soon)")
+            }
+            CoreMode::Local(state) => {
+                // Direct spawn using the impl function
+                let window_id = crate::utility::claude_discovery::spawn_claude_session(
+                    session_id, cwd
+                ).await?;
+
+                // Refresh state to pick up new window
+                if let Err(e) = state.refresh_windows() {
+                    warn!("failed to refresh windows after spawn: {}", e);
+                }
+
+                // Return the window if found
+                match window_id {
+                    Some(id) => Ok(state.windows.get(&id).cloned()),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // State Detection
     // ═══════════════════════════════════════════════════════════════════════════
@@ -520,7 +744,7 @@ impl BabelCore {
         }
 
         // Update Claude storage (project folder + history.jsonl)
-        let storage_result = crate::claude_storage::migrate_project(
+        let storage_result = crate::utility::claude_storage::migrate_project(
             &old_canonical,
             &new_canonical,
             options.dry_run,
@@ -614,9 +838,51 @@ pub struct MigrateOutcome {
     pub dry_run: bool,
 }
 
+/// Result of loading a WSet
+#[derive(Debug)]
+pub struct WSetLoadResult {
+    /// Name of the WSet that was loaded
+    pub name: String,
+    /// Number of workspaces in the WSet
+    pub wspaces: usize,
+    /// Total number of windows spawned
+    pub windows: usize,
+    /// Session IDs that couldn't be restored (file missing, etc.)
+    pub skipped: Vec<String>,
+    /// Whether this was a dry run (no windows actually spawned)
+    pub dry_run: bool,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Find a claude process by matching prompt fragment in cmdline
+///
+/// Best-effort PID detection for tracking fired sessions.
+fn find_claude_pid(prompt_fragment: &str) -> Option<u32> {
+    use std::process::Command;
+
+    // Use pgrep to find claude processes
+    let output = Command::new("pgrep")
+        .arg("-f")
+        .arg(format!("claude.*{}", prompt_fragment))
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    // Get the first matching PID
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
 
 /// Escape a path for safe shell usage
 fn shell_escape(path: &Path) -> String {

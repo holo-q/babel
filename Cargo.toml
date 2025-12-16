@@ -35,12 +35,16 @@ reqwest = { version = "0.12", features = ["json"] }
 # Logging - delegated to spaceship-std for centralized config
 # View logs: journalctl -t babel -f
 # Reload: kill -HUP $(pgrep babel)
-spaceship-std = { version = "0.1", path = "../spaceship-std" }
+spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
 tracing = "0.1"
 
 # Scrollback parsing - ActivityState detection for Claude sessions
-scrollparse = { version = "0.1", path = "../scrollparse", features = ["serde"] }
+scrollparse = { version = "0.1", path = "../../Tools/scrollparse", features = ["serde"] }
 
 # Config serialization (used by wset.rs for workspace set persistence)
 toml = "0.8"
 anstyle = "1.0.13"
+
+# TUI - Debug console for IPC traffic inspection and daemon state
+ratatui = "0.29"
+crossterm = "0.29"

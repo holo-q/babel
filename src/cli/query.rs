@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use console::{style, Style};
 
-use claude_babel::claude_storage::SessionInfo;
+use claude_babel::utility::claude_storage::SessionInfo;
 use claude_babel::core::BabelCore;
-use claude_babel::discovery::ClaudeWindow;
+use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
 use claude_babel::fingerprint::extract_from_scrollback;
-use claude_babel::kitty::{detect_claude_signals, discover_all_instances, get_scrollback, list_windows};
+use claude_babel::kitty::{discover_all_instances, get_scrollback, list_panes};
 use claude_babel::babel_storage::{get_metadata, init_db};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -93,7 +93,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: b
 			return Ok(());
 		}
 
-		let total_windows: usize = instances.iter().map(|i| i.windows.len()).sum();
+		let total_windows: usize = instances.iter().map(|i| i.panes.len()).sum();
 		let responsive: usize = instances.iter().filter(|i| i.is_responsive).count();
 
 		println!("Kitty instances ({} sockets, {} responsive, {} total windows):", instances.len(), responsive, total_windows);
@@ -110,7 +110,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: b
 
 			let pid_str = instance.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
 
-			println!("  {} [PID {}] {} windows", status, pid_str, instance.windows.len());
+			println!("  {} [PID {}] {} windows", status, pid_str, instance.panes.len());
 
 			if let Some(ref err) = instance.error {
 				println!("    Error: {}", err);
@@ -118,7 +118,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: b
 			}
 
 			// Show windows for this instance
-			for win in &instance.windows {
+			for win in &instance.panes {
 				let signals = detect_claude_signals(win);
 				let cmdline = win.foreground_processes
 				                 .first()
@@ -143,7 +143,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: b
 	}
 
 	// Default: just show current socket
-	let windows = list_windows().context("Failed to list kitty windows")?;
+	let windows = list_panes().context("Failed to list kitty panes")?;
 
 	if json {
 		// Include detection signals in JSON output
@@ -219,7 +219,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: b
 
 /// List all kitty panes grouped by OS window
 pub async fn cmd_ls_panes(_core: &BabelCore, json: bool) -> Result<()> {
-	let windows = list_windows().context("Failed to list kitty windows")?;
+	let windows = list_panes().context("Failed to list kitty panes")?;
 
 	if json {
 		println!("{}", serde_json::to_string_pretty(&windows)?);

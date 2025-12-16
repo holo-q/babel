@@ -127,6 +127,19 @@ async fn main() -> Result<()> {
             cli::action::cmd_set_title(&core, &target, title.as_deref()).await
         }
 
+        // ─── Fire-and-Forget Sessions ────────────────────────────────────────────
+        Commands::Fire { prompt, workdir, ambient } => {
+            cli::action::cmd_fire(&mut core, &prompt, workdir.as_deref(), ambient).await
+        }
+
+        Commands::FireLs => {
+            cli::action::cmd_fire_ls(cli.json)
+        }
+
+        Commands::FireClean => {
+            cli::action::cmd_fire_clean()
+        }
+
         // ─── Migration & Diagnostics ─────────────────────────────────────────────
         Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
             cli::mv::cmd_mv(&mut core, source, dest, dry_run, history_only, anxious, force, cli.json).await
@@ -139,6 +152,16 @@ async fn main() -> Result<()> {
         // ─── Workspace Sets ──────────────────────────────────────────────────────
         Commands::WSet { command } => {
             cli::wset::cmd_wset(&core, command, cli.json).await
+        }
+
+        // ─── TUI Debug Console ──────────────────────────────────────────────────
+        Commands::Tui => {
+            claude_babel::tui::run_tui().await
+        }
+
+        // ─── CLI Event Monitor ──────────────────────────────────────────────────
+        Commands::Monitor { filter } => {
+            cli::action::cmd_monitor(filter).await
         }
     }
 }

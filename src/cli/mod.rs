@@ -97,7 +97,7 @@ const QUERY_COMMANDS: &[&str] = &[
 
 /// Mutation commands (state-changing) - rendered underlined in help
 const MUTATION_COMMANDS: &[&str] = &[
-    "focus", "send", "set-icon", "set-read", "set-title", "mv"
+    "focus", "send", "set-icon", "set-read", "set-title", "mv", "fire"
 ];
 
 /// Style command names in help output based on their semantic category
@@ -358,6 +358,41 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Fire a prompt to Claude in a detached background session
+    ///
+    /// Launches Claude with your prompt in a new detached terminal. The working
+    /// directory is auto-detected from your current context (focused window, IDE,
+    /// terminal, etc.) or can be explicitly provided.
+    ///
+    /// Fire-and-forget sessions are tracked in ~/.local/state/claude-fire/ for
+    /// monitoring and cleanup.
+    ///
+    /// Examples:
+    ///   babel fire "Write tests for auth module"
+    ///   babel fire -d ~/myproject "Refactor the API"
+    ///   babel fire --ambient rain "Long research task"
+    #[command()]
+    Fire {
+        /// The prompt to send to Claude
+        prompt: String,
+
+        /// Working directory (auto-detected if omitted)
+        #[arg(short = 'd', long = "dir")]
+        workdir: Option<PathBuf>,
+
+        /// Ambient sound name to play during task
+        #[arg(long)]
+        ambient: Option<String>,
+    },
+
+    /// List running fire-and-forget tasks
+    #[command()]
+    FireLs,
+
+    /// Clean up finished fire tasks
+    #[command()]
+    FireClean,
+
     // ─── Namespace Commands (normal = has subcommands or system) ────────────────
 
     /// Debug fingerprint linkage between terminals, sessions, and directories
@@ -409,6 +444,36 @@ pub enum Commands {
         /// Enable verbose trace logging
         #[arg(long)]
         trace: bool,
+    },
+
+    /// Launch interactive TUI debug console
+    ///
+    /// Requires daemon to be running. Shows live view of:
+    /// - Claude windows and their states
+    /// - Fired tasks and their status
+    /// - IPC traffic (SEND/RECV/EVNT) for debugging
+    ///
+    /// Use this for debugging IPC communication and as a reference
+    /// implementation for external monitors like richmon.
+    #[command()]
+    Tui,
+
+    /// Stream daemon events to stdout (CLI monitor)
+    ///
+    /// Subscribes to daemon events and prints them as JSON lines.
+    /// Useful for debugging, piping to other tools, or as a reference
+    /// for building external monitors.
+    ///
+    /// Examples:
+    ///   babel monitor                    # All events
+    ///   babel monitor --filter state     # Only state change events
+    ///   babel monitor | jq '.event'      # Pipe to jq for formatting
+    #[command()]
+    Monitor {
+        /// Filter events by type (e.g., "state", "window", "session")
+        /// Can be specified multiple times. Empty = all events.
+        #[arg(short, long)]
+        filter: Vec<String>,
     },
 }
 

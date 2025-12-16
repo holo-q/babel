@@ -59,18 +59,17 @@
 //! queries kitty and ~/.claude directly. Results are cached for the lifetime of the
 //! BabelCore instance to avoid redundant queries within a single command execution
 
-pub mod claude_storage;
+pub mod utility;
 pub mod kitty;
-pub mod discovery;
 pub mod babel_storage;
 pub mod fire;
-pub mod ipc;
 pub mod daemon;
 pub mod events;
 pub mod fingerprint;
 pub mod summarizer;
 pub mod wset;
 pub mod core;
+pub mod tui;
 
 // Re-export activity state from scrollparse for convenience
 pub use scrollparse::claude::ActivityState;
