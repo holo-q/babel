@@ -387,6 +387,16 @@ impl BabelState {
 		let old_focused = self.windows.values().find(|w| w.is_focused).map(|w| w.addr.clone());
 		let new_focused = new_windows.values().find(|w| w.is_focused).map(|w| w.addr.clone());
 		if old_focused != new_focused {
+			// Emit WindowUnfocused for the window that lost focus
+			if let Some(ref addr) = old_focused {
+				if let Some(w) = self.windows.get(addr) {
+					self.event_publisher.publish(BabelEvent::WindowUnfocused {
+						kitty_id: addr.id,
+						session_id: w.session_id.clone(),
+					});
+				}
+			}
+			// Emit WindowFocused for the window that gained focus
 			if let Some(ref addr) = new_focused {
 				if let Some(w) = new_windows.get(addr) {
 					self.event_publisher.publish(BabelEvent::WindowFocused {

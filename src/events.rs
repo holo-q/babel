@@ -89,6 +89,17 @@ pub enum BabelEvent {
         session_id: Option<String>,
     },
 
+    /// Window lost focus
+    ///
+    /// Emitted when a Claude window loses focus (another window gained it).
+    /// Paired with WindowFocused for complete focus tracking.
+    WindowUnfocused {
+        /// Kitty window ID that lost focus
+        kitty_id: u64,
+        /// Session ID if matched, None if still unmatched
+        session_id: Option<String>,
+    },
+
     // ─── Terminal Events (all kitty windows, not just Claude) ───────────────────
 
     /// Any kitty terminal opened
@@ -416,6 +427,7 @@ impl EventFilter {
             BabelEvent::WindowAdded { .. } => "window_added",
             BabelEvent::WindowRemoved { .. } => "window_removed",
             BabelEvent::WindowFocused { .. } => "window_focused",
+            BabelEvent::WindowUnfocused { .. } => "window_unfocused",
             BabelEvent::TerminalOpened { .. } => "terminal_opened",
             BabelEvent::TerminalClosed { .. } => "terminal_closed",
             BabelEvent::TerminalBecameClaude { .. } => "terminal_became_claude",

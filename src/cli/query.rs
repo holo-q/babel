@@ -14,6 +14,7 @@ use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindo
 use claude_babel::fingerprint::extract_from_scrollback;
 use claude_babel::kitty::{discover_all_instances, get_scrollback, list_panes};
 use claude_babel::babel_storage::{get_metadata, init_db};
+use claude_babel::ActivityState;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Core Query Commands
@@ -330,6 +331,16 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
 	let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
 
+	// Activity state indicator - shows what Claude is doing right now
+	// ⚡ Thinking (yellow), ⚙ ToolUse (cyan), ◆ AwaitingInput (green), ○ Idle (dim), ● Unknown (blue)
+	let (state_icon, state_style) = match win.activity_state {
+		Some(ActivityState::Thinking) => ("⚡", Style::new().yellow()),
+		Some(ActivityState::ToolUse) => ("⚙", Style::new().cyan()),
+		Some(ActivityState::AwaitingInput) => ("◆", Style::new().green()),
+		Some(ActivityState::Idle) => ("○", Style::new().dim()),
+		Some(ActivityState::Unknown) | None => ("●", Style::new().blue()),
+	};
+
 	// Title - strip ✳ prefix if present, use summary from session if available
 	let raw_title = win
 		.session_info
@@ -369,8 +380,9 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 		cwd_display
 	};
 
-	// Format: " ▸● 123 Title                        ~/path"
-	print!(" {}{}", focus_indicator, marker);
+	// Format: " ▸●⚡123 Title                        ~/path"
+	// Components: focus | unread/icon | state | id | title | cwd
+	print!(" {}{}{}", focus_indicator, marker, state_style.apply_to(state_icon));
 	print!("{} ", if win.is_focused { bold.apply_to(&id_str) } else { dim.apply_to(&id_str) });
 	print!("{}", if win.is_focused { yellow.apply_to(title) } else { Style::new().apply_to(title) });
 	println!("  {}", dim.apply_to(&cwd_short));
