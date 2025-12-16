@@ -169,19 +169,15 @@ pub enum Commands {
     // ─── Information Retrieval (italic = query, safe to run) ─────────────────────
 
     /// List all discovered Claude sessions
+    ///
+    /// Automatically scans all kitty instances on the system. Windows from
+    /// non-current sockets are shown but some operations (focus, send) only
+    /// work on the current socket.
     #[command()]
     Ls {
         /// Show detailed multiline info for each session
         #[arg(short, long)]
         details: bool,
-
-        /// Scan all kitty instances (not just current socket)
-        ///
-        /// Like ls-terminals --all, this finds Claude sessions across all
-        /// kitty sockets on the system. Use this if you have multiple kitty
-        /// instances and want to see all Claude windows.
-        #[arg(short, long)]
-        all: bool,
     },
 
     /// List all kitty terminals (not just Claude)

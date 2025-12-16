@@ -22,40 +22,10 @@ use claude_babel::ActivityState;
 
 /// List all Claude sessions (windows with claude running)
 ///
-/// When `all` is true, scans all kitty sockets on the system instead of just the current one.
-/// This is useful when you have multiple kitty instances running.
-pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool, all: bool) -> Result<()> {
-	use claude_babel::kitty::{list_all_panes, get_all_workspaces, PaneAddr};
-	use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
-
-	let mut windows = if all {
-		// Scan all kitty sockets for Claude windows
-		let all_panes = list_all_panes().context("Failed to list all panes")?;
-		let workspaces = get_all_workspaces();
-
-		// Filter to Claude windows and convert to ClaudeWindow
-		all_panes
-			.into_iter()
-			.filter(|p| detect_claude_signals(p).is_claude())
-			.map(|p| {
-				let ws = workspaces.get(&p.platform_window_id).copied();
-				ClaudeWindow {
-					addr: PaneAddr::new(p.socket.clone(), p.id),
-					title: p.title.clone(),
-					session_id: None,
-					session_info: None,
-					cwd: p.cwd.clone(),
-					is_focused: p.is_focused,
-					os_window_id: p.os_window_id,
-					platform_window_id: p.platform_window_id,
-					workspace: ws,
-					activity_state: None, // Would need scrollback to determine
-					fingerprint: None,
-					match_confidence: None,
-				}
-			})
-			.collect()
-	} else if details {
+/// Always scans all kitty sockets on the system. Windows from non-current
+/// sockets are displayed but fenced from operations that require the current socket.
+pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
+	let mut windows = if details {
 		get_windows_with_fingerprints(core).await?
 	} else {
 		core.windows().await?

@@ -26,10 +26,9 @@ Binary output: `target/release/babel`
 ## CLI Usage
 
 ```bash
-# List all discovered Claude sessions
+# List all discovered Claude sessions (scans all kitty instances by default)
 babel ls              # Compact view with activity state indicators
 babel ls -d           # Detailed view with fingerprint data
-babel ls --all        # Scan all kitty instances
 
 # Check specific window status
 babel get-window 42   # By window ID
@@ -125,7 +124,7 @@ Parses Claude's JSONL conversation format:
 - [x] `babel mv` - directory migration preserving Claude history
 - [x] WSet save/load for workspace layouts
 - [x] Daemon mode with IPC and event streaming
-- [x] Multi-socket scan (`babel ls --all`)
+- [x] Multi-socket discovery (default, with fenced operations)
 - [x] Auto-unread on AwaitingInput state change
 
 ### In Progress

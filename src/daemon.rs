@@ -11,13 +11,59 @@
 //!
 //! CLI commands query the daemon over unix socket for instant responses.
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Configuration Constants
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Tuning knobs for daemon behavior. Collected here for visibility and easy adjustment.
+
+mod config {
+    use std::time::Duration;
+
+    /// Interval between kitty window polls (500ms = 2 Hz)
+    ///
+    /// Balance between responsiveness and CPU usage. Lower values catch
+    /// window changes faster but increase polling overhead.
+    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    /// Debounce interval for file watcher events
+    ///
+    /// When multiple files change rapidly (e.g., Claude writing to JSONL),
+    /// coalesce events to avoid redundant index rebuilds.
+    pub const FILE_WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+
+    /// Minimum time between fingerprint index rebuilds
+    ///
+    /// Fingerprint extraction is expensive (reads 100 JSONL files).
+    /// This debounce prevents thrashing when many sessions change.
+    pub const FINGERPRINT_REBUILD_DEBOUNCE: Duration = Duration::from_secs(2);
+
+    /// Maximum sessions in fingerprint index
+    ///
+    /// Limited to N most recent to bound memory usage and matching time.
+    /// Older sessions fall out of the index but remain on disk.
+    pub const FINGERPRINT_INDEX_LIMIT: usize = 100;
+
+    /// Maximum cached window fingerprints
+    ///
+    /// Safety net to prevent unbounded growth. Should rarely trigger
+    /// since we clean up on window removal.
+    pub const FINGERPRINT_CACHE_LIMIT: usize = 100;
+
+    /// Internal event channel capacity
+    ///
+    /// Buffer size for daemon events (KittyPoll, FileChange, Shutdown).
+    /// If full, senders block - should be generous to avoid backpressure.
+    pub const EVENT_CHANNEL_SIZE: usize = 100;
+}
+
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
@@ -648,14 +694,13 @@ impl BabelState {
 	}
 
 	/// Rebuild fingerprint index from ~/.claude/projects
-	/// Scans 100 most recent sessions by file modification time
+	/// Scans most recent sessions by file modification time
 	/// Debounced to avoid excessive rebuilds when multiple JSONL files change rapidly
 	pub fn rebuild_fingerprint_index(&mut self) -> Result<()> {
 		use crate::utility::claude_storage::{list_projects, list_sessions};
 
-		// Debounce: skip rebuild if last rebuild was less than 2 seconds ago
-		const REBUILD_DEBOUNCE: Duration = Duration::from_secs(2);
-		if self.last_fingerprint_rebuild.elapsed() < REBUILD_DEBOUNCE {
+		// Debounce: skip rebuild if last rebuild was too recent
+		if self.last_fingerprint_rebuild.elapsed() < config::FINGERPRINT_REBUILD_DEBOUNCE {
 			return Ok(());
 		}
 
@@ -684,9 +729,9 @@ impl BabelState {
 			}
 		}
 
-		// Sort by modification time (newest first) and take 100
+		// Sort by modification time (newest first) and limit
 		session_files.sort_by(|a, b| b.1.cmp(&a.1));
-		session_files.truncate(100);
+		session_files.truncate(config::FINGERPRINT_INDEX_LIMIT);
 
 		// Build index
 		let mut index = HashMap::new();
@@ -714,10 +759,9 @@ impl BabelState {
 		// Safety net: enforce maximum cache size to prevent unbounded growth
 		// This should rarely trigger since we clean up on window removal,
 		// but protects against edge cases (e.g., fingerprint extraction spam)
-		const MAX_FINGERPRINT_CACHE: usize = 100;
-		if self.window_fingerprints.len() > MAX_FINGERPRINT_CACHE {
+		if self.window_fingerprints.len() > config::FINGERPRINT_CACHE_LIMIT {
 			// Remove oldest entries (just prevent unbounded growth, not critical which ones)
-			while self.window_fingerprints.len() > MAX_FINGERPRINT_CACHE {
+			while self.window_fingerprints.len() > config::FINGERPRINT_CACHE_LIMIT {
 				if let Some(key) = self.window_fingerprints.keys().next().cloned() {
 					self.window_fingerprints.remove(&key);
 				}
@@ -839,12 +883,12 @@ pub async fn run_daemon() -> Result<()> {
 	}
 
 	// Create event channel
-	let (event_tx, mut event_rx) = mpsc::channel::<DaemonEvent>(100);
+	let (event_tx, mut event_rx) = mpsc::channel::<DaemonEvent>(config::EVENT_CHANNEL_SIZE);
 
 	// Spawn kitty poller
 	let poll_tx = event_tx.clone();
 	tokio::spawn(async move {
-		let mut interval = tokio::time::interval(Duration::from_millis(500));
+		let mut interval = tokio::time::interval(config::KITTY_POLL_INTERVAL);
 		loop {
 			interval.tick().await;
 			if poll_tx.send(DaemonEvent::KittyPoll).await.is_err() {
@@ -862,7 +906,7 @@ pub async fn run_daemon() -> Result<()> {
 		std::thread::spawn(move || {
 			let (tx, rx) = std::sync::mpsc::channel();
 
-			let mut debouncer = new_debouncer(Duration::from_millis(500), tx).unwrap();
+			let mut debouncer = new_debouncer(config::FILE_WATCH_DEBOUNCE, tx).unwrap();
 			debouncer
 				.watcher()
 				.watch(&projects_dir, RecursiveMode::Recursive)

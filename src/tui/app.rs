@@ -88,8 +88,6 @@ pub struct TuiApp {
     pub window_selected: usize,
     /// Selected index in fired tasks list
     pub fired_selected: usize,
-    /// Scroll offset in IPC log
-    pub ipc_scroll: usize,
     /// Auto-scroll IPC log to bottom
     pub ipc_auto_scroll: bool,
     /// Cached IPC log entries (refreshed each frame)
@@ -132,7 +130,6 @@ impl TuiApp {
             active_pane: Pane::Windows,
             window_selected: 0,
             fired_selected: 0,
-            ipc_scroll: 0,
             ipc_auto_scroll: true,
             ipc_log: Vec::new(),
             ipc_selected: 0,

@@ -11,7 +11,6 @@ use chrono::{DateTime, Local};
 use tokio::sync::Mutex;
 
 use crate::utility::ipc::{self, Request, Response};
-use crate::events::EventMessage;
 
 /// Maximum entries in the IPC log ring buffer
 const MAX_LOG_ENTRIES: usize = 1000;
@@ -23,7 +22,8 @@ pub enum IpcDirection {
     Send,
     /// Response received from daemon
     Recv,
-    /// Event from daemon subscription
+    /// Event from daemon subscription (reserved for future event streaming)
+    #[allow(dead_code)]
     Event,
 }
 
@@ -90,11 +90,6 @@ impl LoggingIpcClient {
         }
     }
 
-    /// Get a clone of the log Arc for shared access
-    pub fn log_handle(&self) -> Arc<Mutex<VecDeque<IpcLogEntry>>> {
-        Arc::clone(&self.log)
-    }
-
     /// Add an entry to the log (ring buffer)
     async fn log_entry(&self, direction: IpcDirection, content: String) {
         let mut log = self.log.lock().await;
@@ -120,13 +115,6 @@ impl LoggingIpcClient {
         Ok(response)
     }
 
-    /// Log an event from the daemon subscription
-    pub async fn log_event(&self, event: &EventMessage) {
-        if let Ok(json) = serde_json::to_string(event) {
-            self.log_entry(IpcDirection::Event, json).await;
-        }
-    }
-
     /// Get current log entries (for rendering)
     pub async fn get_log(&self) -> Vec<IpcLogEntry> {
         self.log.lock().await.iter().cloned().collect()
@@ -135,11 +123,6 @@ impl LoggingIpcClient {
     /// Clear the log
     pub async fn clear_log(&self) {
         self.log.lock().await.clear();
-    }
-
-    /// Get log length
-    pub async fn log_len(&self) -> usize {
-        self.log.lock().await.len()
     }
 }
 

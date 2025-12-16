@@ -88,8 +88,8 @@ async fn main() -> Result<()> {
         }
 
         // ─── Query Commands (read-only, safe) ────────────────────────────────────
-        Commands::Ls { details, all } => {
-            cli::query::cmd_ls(&core, cli.json, details, all).await
+        Commands::Ls { details } => {
+            cli::query::cmd_ls(&core, cli.json, details).await
         }
 
         Commands::LsTerminals => {
