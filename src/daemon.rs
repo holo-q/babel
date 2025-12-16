@@ -30,8 +30,8 @@ use crate::fingerprint::{
 	extract_from_scrollback, extract_from_jsonl, match_fingerprints,
 };
 use crate::utility::ipc::{create_listener, Request, Response};
-use crate::kitty::{focus_window, get_scrollback, send_text};
-use crate::utility::claude_discovery::{find_claude_windows, get_window_activity_state};
+use crate::kitty::{focus_window, get_scrollback, send_text, list_panes};
+use crate::utility::claude_discovery::{get_window_activity_state, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
@@ -62,10 +62,34 @@ pub struct SummaryEntry {
 	session_id: String,
 }
 
+/// Lightweight terminal info for tracking all kitty windows (not just Claude)
+///
+/// This enables the TUI/monitor to see the full terminal flow - watching
+/// terminals open, close, and transition to Claude sessions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TerminalInfo {
+	/// Kitty window ID
+	pub kitty_id: u64,
+	/// Window title
+	pub title: String,
+	/// Working directory
+	pub cwd: PathBuf,
+	/// XFCE workspace number
+	pub workspace: Option<i32>,
+	/// Whether this terminal is running Claude (is_claude from detect_claude_signals)
+	pub is_claude: bool,
+	/// Whether this is the focused window
+	pub is_focused: bool,
+}
+
 /// Babel state - shared across tasks
 pub struct BabelState {
 	/// Current Claude windows (kitty_id → ClaudeWindow)
 	pub windows: HashMap<u64, ClaudeWindow>,
+
+	/// All kitty terminals (kitty_id → TerminalInfo)
+	/// Includes both Claude and non-Claude terminals for full visibility
+	pub terminals: HashMap<u64, TerminalInfo>,
 
 	/// Summary index for fast title→session matching
 	pub summary_index: Vec<SummaryEntry>,
@@ -113,6 +137,7 @@ impl BabelState {
 	pub fn new() -> Self {
 		Self {
 			windows: HashMap::new(),
+			terminals: HashMap::new(),
 			summary_index: Vec::new(),
 			fingerprint_index: HashMap::new(),
 			session_paths: HashMap::new(),
@@ -130,14 +155,77 @@ impl BabelState {
 	///
 	/// Returns list of workspaces that had windows added or removed,
 	/// for triggering title re-summarization.
+	///
+	/// This now tracks ALL terminals (not just Claude) for full visibility,
+	/// emitting TerminalOpened/TerminalClosed events for all kitty windows.
 	pub fn refresh_windows(&mut self) -> Result<Vec<i32>> {
 		use crate::kitty::get_all_workspaces;
 
-		let kitty_windows = find_claude_windows()?;
+		// Get ALL kitty panes first - we track all terminals for visibility
+		let all_panes = list_panes()?;
+
+		// Filter to just Claude windows for the main tracking
+		let kitty_windows: Vec<_> = all_panes.iter()
+			.filter(|p| detect_claude_signals(p).is_claude())
+			.cloned()
+			.collect();
 
 		// Get workspace mappings in one call
 		let workspaces = get_all_workspaces();
 
+		// ─── Terminal Tracking (ALL kitty windows) ──────────────────────────────────
+		// Build terminal info for all panes and emit terminal events
+		let mut new_terminals = HashMap::new();
+		let old_terminal_ids: std::collections::HashSet<_> = self.terminals.keys().cloned().collect();
+
+		for pane in &all_panes {
+			let workspace = workspaces.get(&pane.platform_window_id).copied();
+			let is_claude = detect_claude_signals(pane).is_claude();
+
+			new_terminals.insert(pane.id, TerminalInfo {
+				kitty_id: pane.id,
+				title: pane.title.clone(),
+				cwd: pane.cwd.clone(),
+				workspace,
+				is_claude,
+				is_focused: pane.is_focused,
+			});
+		}
+
+		let new_terminal_ids: std::collections::HashSet<_> = new_terminals.keys().cloned().collect();
+
+		// Emit TerminalOpened events for new terminals
+		for &id in new_terminal_ids.difference(&old_terminal_ids) {
+			if let Some(t) = new_terminals.get(&id) {
+				self.event_publisher.publish(BabelEvent::TerminalOpened {
+					kitty_id: id,
+					title: t.title.clone(),
+					cwd: t.cwd.clone(),
+					workspace: t.workspace,
+				});
+			}
+		}
+
+		// Emit TerminalClosed events for removed terminals
+		for &id in old_terminal_ids.difference(&new_terminal_ids) {
+			self.event_publisher.publish(BabelEvent::TerminalClosed { kitty_id: id });
+		}
+
+		// Emit TerminalBecameClaude for terminals that just became Claude sessions
+		for (&id, new_term) in &new_terminals {
+			if let Some(old_term) = self.terminals.get(&id) {
+				if !old_term.is_claude && new_term.is_claude {
+					self.event_publisher.publish(BabelEvent::TerminalBecameClaude {
+						kitty_id: id,
+						title: new_term.title.clone(),
+					});
+				}
+			}
+		}
+
+		self.terminals = new_terminals;
+
+		// ─── Claude Window Tracking ─────────────────────────────────────────────────
 		// Build new windows map, preserving enriched data where possible
 		let mut new_windows = HashMap::new();
 
@@ -953,6 +1041,12 @@ async fn process_request(
 				})
 				.collect();
 			Response::Windows { windows }
+		}
+
+		Request::ListTerminals => {
+			let s = state.read().await;
+			let terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
+			Response::Terminals { terminals }
 		}
 
 		Request::ListWithFingerprints => {

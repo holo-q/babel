@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail, Context};
 use tracing::{debug, warn, info};
 
-use crate::daemon::BabelState;
+use crate::daemon::{BabelState, TerminalInfo};
 use crate::utility::claude_discovery::ClaudeWindow;
 use crate::utility::claude_storage::{SessionInfo, MigrateResult};
 use crate::utility::ipc::{send_request, is_daemon_running, Request, Response};
@@ -118,6 +118,30 @@ impl BabelCore {
             CoreMode::Local(state) => {
                 // Direct access to same state structure daemon uses
                 Ok(state.windows.values().cloned().collect())
+            }
+        }
+    }
+
+    /// Get all terminals (not just Claude sessions)
+    ///
+    /// Returns all kitty terminals for visibility into the full terminal flow.
+    /// Useful for watching terminals transition to Claude sessions.
+    pub async fn terminals(&self) -> Result<Vec<TerminalInfo>> {
+        match &self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::ListTerminals).await {
+                    Ok(Response::Terminals { terminals }) => Ok(terminals),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        warn!("daemon request failed: {}", e);
+                        bail!("daemon connection failed: {}", e)
+                    }
+                }
+            }
+            CoreMode::Local(state) => {
+                // In local mode, we don't track terminals (only daemon does)
+                // Return empty list - users should use daemon for full terminal visibility
+                Ok(state.terminals.values().cloned().collect())
             }
         }
     }

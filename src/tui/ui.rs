@@ -95,18 +95,26 @@ fn draw_content(f: &mut Frame, area: Rect, app: &TuiApp) {
     draw_ipc_log_pane(f, content_chunks[1], app);
 }
 
-/// Draw the Windows pane (F1)
+/// Draw the Windows pane (F1) - shows ALL terminals, not just Claude
+///
+/// Claude sessions show activity state indicators (⚡⚙◆○)
+/// Non-Claude terminals show dimmed with "-" indicator
 fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
     let is_active = app.active_pane == Pane::Windows;
     let border_style = pane_border_style(is_active);
 
+    // Count Claude vs non-Claude for title
+    let claude_count = app.terminals.iter().filter(|t| t.is_claude).count();
+    let total_count = app.terminals.len();
+    let title = format!(" Terminals [F1] ({}/{}) ", claude_count, total_count);
+
     let block = Block::default()
-        .title(" Windows [F1] ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    if app.windows.is_empty() {
-        let para = Paragraph::new("No Claude windows")
+    if app.terminals.is_empty() {
+        let para = Paragraph::new("No terminals")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(para, area);
@@ -114,21 +122,31 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
     }
 
     let items: Vec<ListItem> = app
-        .windows
+        .terminals
         .iter()
         .enumerate()
-        .map(|(i, w)| {
-            // Activity state indicator with semantic colors
-            use scrollparse::claude::ActivityState;
-            let (indicator, ind_style) = match w.activity_state {
-                Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),
-                Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),
-                Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),
-                Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),
-                Some(ActivityState::Unknown) | None => (" ", Style::default()),
+        .map(|(i, term)| {
+            // For Claude windows, look up activity state from windows list
+            let (indicator, ind_style) = if term.is_claude {
+                // Find matching Claude window to get activity state
+                let activity = app.windows.iter()
+                    .find(|w| w.kitty_id == term.kitty_id)
+                    .and_then(|w| w.activity_state);
+
+                use scrollparse::claude::ActivityState;
+                match activity {
+                    Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),
+                    Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),
+                    Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),
+                    Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),
+                    Some(ActivityState::Unknown) | None => ("●", Style::default().fg(Color::Blue)),
+                }
+            } else {
+                // Non-Claude terminal - dimmed indicator
+                ("-", Style::default().fg(Color::DarkGray))
             };
 
-            let title = if w.title.is_empty() { "untitled" } else { &w.title };
+            let title = if term.title.is_empty() { "untitled" } else { &term.title };
             let truncated = if title.len() > 16 {
                 format!("{}...", &title[..13])
             } else {
@@ -137,13 +155,16 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
 
             let base_style = if i == app.window_selected && is_active {
                 Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else if !term.is_claude {
+                // Dim non-Claude terminals
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
 
             let line = Line::from(vec![
                 Span::styled(indicator, ind_style),
-                Span::raw(format!(" {:>3} ", w.kitty_id)),
+                Span::raw(format!(" {:>3} ", term.kitty_id)),
                 Span::raw(truncated),
             ]);
 
@@ -222,7 +243,7 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                 None => "?".to_string(),
             };
             format!(
-                "Window {}\n\
+                "Claude Window {}\n\
                  ─────────────────────────\n\
                  state: {}\n\
                  socket: {}\n\
@@ -239,6 +260,22 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                 if w.title.is_empty() { "?" } else { &w.title },
                 w.is_focused,
                 w.workspace.map_or("?".to_string(), |n| n.to_string()),
+            )
+        }
+        DetailContent::Terminal(t) => {
+            format!(
+                "Terminal {} {}\n\
+                 ─────────────────────────\n\
+                 title: {}\n\
+                 cwd: {}\n\
+                 focused: {}\n\
+                 workspace: {}",
+                t.kitty_id,
+                if t.is_claude { "(Claude)" } else { "(non-Claude)" },
+                if t.title.is_empty() { "?" } else { &t.title },
+                t.cwd.display(),
+                t.is_focused,
+                t.workspace.map_or("?".to_string(), |n| n.to_string()),
             )
         }
         DetailContent::FiredTask(t) => {

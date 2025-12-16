@@ -89,6 +89,47 @@ pub enum BabelEvent {
         session_id: Option<String>,
     },
 
+    // ─── Terminal Events (all kitty windows, not just Claude) ───────────────────
+
+    /// Any kitty terminal opened
+    ///
+    /// Emitted when kitty window polling detects a new terminal, regardless of
+    /// whether it's running Claude. Useful for seeing the terminal flow and
+    /// watching windows transition to Claude sessions.
+    TerminalOpened {
+        /// Kitty window ID
+        kitty_id: u64,
+        /// Window title (e.g. "~/project: fish")
+        title: String,
+        /// Working directory
+        cwd: std::path::PathBuf,
+        /// XFCE workspace number, None if not on XFCE
+        workspace: Option<i32>,
+    },
+
+    /// Any kitty terminal closed
+    ///
+    /// Emitted when a terminal is no longer present in kitty ls,
+    /// regardless of whether it was a Claude session.
+    TerminalClosed {
+        /// Kitty window ID that was closed
+        kitty_id: u64,
+    },
+
+    /// Terminal became a Claude session
+    ///
+    /// Emitted when a previously non-Claude terminal is now detected as
+    /// running Claude (user ran `claude` in it). This bridges the gap
+    /// between TerminalOpened and WindowAdded.
+    TerminalBecameClaude {
+        /// Kitty window ID
+        kitty_id: u64,
+        /// New title (likely "✳ ...")
+        title: String,
+    },
+
+    // ─── Claude Session Events ──────────────────────────────────────────────────
+
     /// Session successfully matched to window via fingerprint
     ///
     /// Emitted when the daemon successfully matches a kitty window to a
@@ -375,6 +416,9 @@ impl EventFilter {
             BabelEvent::WindowAdded { .. } => "window_added",
             BabelEvent::WindowRemoved { .. } => "window_removed",
             BabelEvent::WindowFocused { .. } => "window_focused",
+            BabelEvent::TerminalOpened { .. } => "terminal_opened",
+            BabelEvent::TerminalClosed { .. } => "terminal_closed",
+            BabelEvent::TerminalBecameClaude { .. } => "terminal_became_claude",
             BabelEvent::SessionMatched { .. } => "session_matched",
             BabelEvent::SessionUpdated { .. } => "session_updated",
             BabelEvent::SessionStateChanged { .. } => "session_state_changed",

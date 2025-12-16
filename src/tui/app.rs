@@ -16,6 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::daemon::TerminalInfo;
 use crate::fire::FiredTask;
 use crate::utility::claude_discovery::ClaudeWindow;
 use crate::utility::ipc::{self, Request, Response};
@@ -59,6 +60,7 @@ impl Pane {
 #[derive(Debug, Clone)]
 pub enum DetailContent {
     Window(Box<ClaudeWindow>),
+    Terminal(TerminalInfo),
     FiredTask(FiredTask),
     IpcMessage(super::ipc_client::IpcLogEntry),
     None,
@@ -74,6 +76,8 @@ pub struct TuiApp {
     // ─── Data from daemon ───────────────────────────────────────────────────────
     /// Claude windows from daemon cache
     pub windows: Vec<ClaudeWindow>,
+    /// All kitty terminals (including non-Claude) for visibility
+    pub terminals: Vec<TerminalInfo>,
     /// Fire-and-forget tasks from filesystem
     pub fired_tasks: Vec<FiredTask>,
 
@@ -123,6 +127,7 @@ impl TuiApp {
             client,
             daemon_uptime: uptime,
             windows: Vec::new(),
+            terminals: Vec::new(),
             fired_tasks: Vec::new(),
             active_pane: Pane::Windows,
             window_selected: 0,
@@ -138,6 +143,7 @@ impl TuiApp {
 
         // Initial data fetch
         app.refresh_windows().await?;
+        app.refresh_terminals().await?;
         app.refresh_fired_tasks()?;
 
         Ok(app)
@@ -159,6 +165,20 @@ impl TuiApp {
             _ => {}
         }
         self.last_refresh = Instant::now();
+        Ok(())
+    }
+
+    /// Refresh terminals list from daemon (all kitty windows, not just Claude)
+    pub async fn refresh_terminals(&mut self) -> Result<()> {
+        match self.client.send_request(&Request::ListTerminals).await? {
+            Response::Terminals { terminals } => {
+                self.terminals = terminals;
+            }
+            Response::Error { message } => {
+                warn!("Failed to list terminals: {}", message);
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -246,11 +266,11 @@ impl TuiApp {
     fn move_selection(&mut self, delta: i32) {
         match self.active_pane {
             Pane::Windows => {
-                if self.windows.is_empty() {
+                if self.terminals.is_empty() {
                     return;
                 }
                 let new = (self.window_selected as i32 + delta)
-                    .clamp(0, self.windows.len() as i32 - 1) as usize;
+                    .clamp(0, self.terminals.len() as i32 - 1) as usize;
                 self.window_selected = new;
             }
             Pane::Fired => {
@@ -280,8 +300,20 @@ impl TuiApp {
     fn select_current(&mut self) {
         match self.active_pane {
             Pane::Windows => {
-                if let Some(window) = self.windows.get(self.window_selected) {
-                    self.detail_content = DetailContent::Window(Box::new(window.clone()));
+                // Get selected terminal
+                if let Some(term) = self.terminals.get(self.window_selected) {
+                    if term.is_claude {
+                        // For Claude terminals, show full ClaudeWindow details
+                        if let Some(window) = self.windows.iter().find(|w| w.kitty_id == term.kitty_id) {
+                            self.detail_content = DetailContent::Window(Box::new(window.clone()));
+                        } else {
+                            // Fallback to TerminalInfo if window not found
+                            self.detail_content = DetailContent::Terminal(term.clone());
+                        }
+                    } else {
+                        // For non-Claude terminals, show TerminalInfo
+                        self.detail_content = DetailContent::Terminal(term.clone());
+                    }
                 }
             }
             Pane::Fired => {
@@ -364,6 +396,7 @@ async fn run_event_loop(
                 }
                 if key.code == KeyCode::Char('r') {
                     app.refresh_windows().await?;
+                    app.refresh_terminals().await?;
                     app.refresh_fired_tasks()?;
                 }
             }
@@ -376,6 +409,7 @@ async fn run_event_loop(
             // Periodic data refresh
             if app.last_refresh.elapsed() >= refresh_rate {
                 app.refresh_windows().await?;
+                app.refresh_terminals().await?;
                 app.refresh_fired_tasks()?;
                 app.refresh_uptime().await?;
             }
