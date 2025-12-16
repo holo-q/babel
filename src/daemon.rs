@@ -1187,91 +1187,90 @@ async fn handle_client(
 	Ok(())
 }
 
-async fn process_request(
-	request: Request,
-	state: &Arc<RwLock<BabelState>>,
-	summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
-) -> Response {
-	match request {
-		Request::List => {
-			let s = state.read().await;
-			let windows: Vec<ClaudeWindow> = s.windows.values()
-				.map(|w| {
-					let mut win = w.clone();
-					// Populate activity_state from cached window_states
-					win.activity_state = s.get_activity_state(w.id());
-					win
-				})
-				.collect();
-			Response::Windows { windows }
-		}
+// ═══════════════════════════════════════════════════════════════════════════════
+// Request Handlers
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Extracted handlers for each IPC request type. Each handler is a focused function
+// that can be tested independently. The process_request dispatcher delegates to these.
 
-		Request::ListTerminals => {
-			let s = state.read().await;
-			let terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
-			Response::Terminals { terminals }
-		}
+mod handlers {
+	use super::*;
 
-		Request::ListWithFingerprints => {
-			let s = state.read().await;
-			// Clone windows and populate activity states from cache
-			let mut windows: Vec<ClaudeWindow> = s.windows.values()
-				.map(|w| {
-					let mut win = w.clone();
-					win.activity_state = s.get_activity_state(w.id());
-					win
-				})
-				.collect();
-			drop(s); // Release lock before expensive operations
+	/// List all Claude windows with activity states
+	pub async fn list(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		let windows: Vec<ClaudeWindow> = s.windows.values()
+			.map(|w| {
+				let mut win = w.clone();
+				win.activity_state = s.get_activity_state(w.id());
+				win
+			})
+			.collect();
+		Response::Windows { windows }
+	}
 
-			// Extract fingerprints and enrich with session info for each window
-			for win in &mut windows {
-				// Extract fingerprint if not already cached
-				if win.fingerprint.is_none() {
-					if let Ok(scrollback) = get_scrollback(win.id()) {
-						let fp = extract_from_scrollback(&scrollback);
-						win.fingerprint = Some(fp);
-					}
-				}
+	/// List all terminals (Claude and non-Claude)
+	pub async fn list_terminals(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		let terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
+		Response::Terminals { terminals }
+	}
 
-				// Enrich with session info if we have a session_id
-				if win.session_info.is_none() {
-					let _ = enrich_window(win);
+	/// List windows with fingerprints (expensive - extracts from scrollback)
+	pub async fn list_with_fingerprints(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		let mut windows: Vec<ClaudeWindow> = s.windows.values()
+			.map(|w| {
+				let mut win = w.clone();
+				win.activity_state = s.get_activity_state(w.id());
+				win
+			})
+			.collect();
+		drop(s); // Release lock before expensive operations
+
+		for win in &mut windows {
+			if win.fingerprint.is_none() {
+				if let Ok(scrollback) = get_scrollback(win.id()) {
+					let fp = extract_from_scrollback(&scrollback);
+					win.fingerprint = Some(fp);
 				}
 			}
-
-			Response::Windows { windows }
-		}
-
-		Request::Status { window_id } => {
-			let s = state.read().await;
-			let window = if let Some(id) = window_id {
-				s.find_window_by_id(id).cloned()
-			} else {
-				s.windows.values().find(|w| w.is_focused).cloned()
-			};
-			Response::Window { window: Box::new(window) }
-		}
-
-		Request::Enrich { window_id } => {
-			let mut s = state.write().await;
-			if let Some(window) = s.find_window_by_id_mut(window_id) {
-				if let Err(e) = enrich_window(window) {
-					return Response::Error {
-						message: format!("Failed to enrich: {}", e),
-					};
-				}
-				Response::Window {
-					window: Box::new(Some(window.clone())),
-				}
-			} else {
-				Response::Error {
-					message: "Window not found".to_string(),
-				}
+			if win.session_info.is_none() {
+				let _ = enrich_window(win);
 			}
 		}
 
-		Request::Focus { window_id } => match focus_window_any(window_id) {
+		Response::Windows { windows }
+	}
+
+	/// Get status of a specific window or focused window
+	pub async fn status(state: &Arc<RwLock<BabelState>>, window_id: Option<u64>) -> Response {
+		let s = state.read().await;
+		let window = if let Some(id) = window_id {
+			s.find_window_by_id(id).cloned()
+		} else {
+			s.windows.values().find(|w| w.is_focused).cloned()
+		};
+		Response::Window { window: Box::new(window) }
+	}
+
+	/// Enrich a window with session info
+	pub async fn enrich(state: &Arc<RwLock<BabelState>>, window_id: u64) -> Response {
+		let mut s = state.write().await;
+		if let Some(window) = s.find_window_by_id_mut(window_id) {
+			if let Err(e) = enrich_window(window) {
+				return Response::Error { message: format!("Failed to enrich: {}", e) };
+			}
+			Response::Window { window: Box::new(Some(window.clone())) }
+		} else {
+			Response::Error { message: "Window not found".to_string() }
+		}
+	}
+
+	/// Focus a window (may be on non-current socket)
+	pub fn focus(window_id: u64) -> Response {
+		match focus_window_any(window_id) {
 			Ok(result) => {
 				let message = if result.is_non_current {
 					format!("⚠ Focused window {} on non-current socket: {}", window_id, result.addr.short())
@@ -1280,24 +1279,26 @@ async fn process_request(
 				};
 				Response::Ok { message }
 			}
-			Err(e) => Response::Error {
-				message: format!("Focus failed: {}", e),
-			},
-		},
+			Err(e) => Response::Error { message: format!("Focus failed: {}", e) },
+		}
+	}
 
-		Request::Scroll { window_id } => match get_scrollback_any(window_id) {
+	/// Get scrollback from a window
+	pub fn scroll(window_id: u64) -> Response {
+		match get_scrollback_any(window_id) {
 			Ok(result) => {
 				if result.is_non_current {
 					tracing::warn!(window_id, addr = %result.addr.short(), "Scrollback from non-current socket");
 				}
 				Response::Scrollback { text: result.result }
 			}
-			Err(e) => Response::Error {
-				message: format!("Scroll failed: {}", e),
-			},
-		},
+			Err(e) => Response::Error { message: format!("Scroll failed: {}", e) },
+		}
+	}
 
-		Request::Send { window_id, text } => match send_text_any(window_id, &text) {
+	/// Send text to a window
+	pub fn send(window_id: u64, text: &str) -> Response {
+		match send_text_any(window_id, text) {
 			Ok(result) => {
 				let message = if result.is_non_current {
 					format!("⚠ Sent to window {} on non-current socket: {}", window_id, result.addr.short())
@@ -1306,328 +1307,304 @@ async fn process_request(
 				};
 				Response::Ok { message }
 			}
-			Err(e) => Response::Error {
-				message: format!("Send failed: {}", e),
-			},
-		},
+			Err(e) => Response::Error { message: format!("Send failed: {}", e) },
+		}
+	}
 
-		Request::Tag { window_id, icon } => {
-			let s = state.read().await;
-			if let Some(window) = s.find_window_by_id(window_id) {
-				if let Some(session_id) = &window.session_id {
-					match init_db().and_then(|conn| set_icon(&conn, session_id, &icon)) {
-						Ok(()) => Response::Ok {
-							message: format!("Tagged {} with {}", window_id, icon),
-						},
-						Err(e) => Response::Error {
-							message: format!("Tag failed: {}", e),
-						},
-					}
-				} else {
-					Response::Error {
-						message: "Window has no session".to_string(),
-					}
+	/// Tag a window with an icon
+	pub async fn tag(state: &Arc<RwLock<BabelState>>, window_id: u64, icon: &str) -> Response {
+		let s = state.read().await;
+		if let Some(window) = s.find_window_by_id(window_id) {
+			if let Some(session_id) = &window.session_id {
+				match init_db().and_then(|conn| set_icon(&conn, session_id, icon)) {
+					Ok(()) => Response::Ok { message: format!("Tagged {} with {}", window_id, icon) },
+					Err(e) => Response::Error { message: format!("Tag failed: {}", e) },
 				}
 			} else {
-				Response::Error {
-					message: "Window not found".to_string(),
-				}
+				Response::Error { message: "Window has no session".to_string() }
 			}
+		} else {
+			Response::Error { message: "Window not found".to_string() }
 		}
+	}
 
-		Request::MarkRead { window_id } => {
-			let s = state.read().await;
-			if let Some(window) = s.find_window_by_id(window_id) {
-				if let Some(session_id) = &window.session_id {
-					match init_db().and_then(|conn| mark_read(&conn, session_id)) {
-						Ok(()) => Response::Ok {
-							message: format!("Marked {} as read", window_id),
-						},
-						Err(e) => Response::Error {
-							message: format!("Mark read failed: {}", e),
-						},
-					}
-				} else {
-					Response::Error {
-						message: "Window has no session".to_string(),
-					}
+	/// Mark a window as read
+	pub async fn mark_read_handler(state: &Arc<RwLock<BabelState>>, window_id: u64) -> Response {
+		let s = state.read().await;
+		if let Some(window) = s.find_window_by_id(window_id) {
+			if let Some(session_id) = &window.session_id {
+				match init_db().and_then(|conn| mark_read(&conn, session_id)) {
+					Ok(()) => Response::Ok { message: format!("Marked {} as read", window_id) },
+					Err(e) => Response::Error { message: format!("Mark read failed: {}", e) },
 				}
 			} else {
-				Response::Error {
-					message: "Window not found".to_string(),
-				}
+				Response::Error { message: "Window has no session".to_string() }
 			}
+		} else {
+			Response::Error { message: "Window not found".to_string() }
 		}
+	}
 
-		Request::History { limit } => match get_recent_sessions(limit) {
+	/// Get recent session history
+	pub fn history(limit: usize) -> Response {
+		match get_recent_sessions(limit) {
 			Ok(sessions) => Response::History { sessions },
-			Err(e) => Response::Error {
-				message: format!("History failed: {}", e),
-			},
-		},
+			Err(e) => Response::Error { message: format!("History failed: {}", e) },
+		}
+	}
 
-		Request::Ping => {
+	/// Ping - return daemon uptime
+	pub async fn ping(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		Response::Pong { uptime_secs: s.start_time.elapsed().as_secs() }
+	}
+
+	/// Refresh windows and run fingerprint matching
+	pub async fn refresh(state: &Arc<RwLock<BabelState>>) -> Response {
+		// Phase 1: Refresh windows (quick, no I/O)
+		let window_count = {
+			let mut s = state.write().await;
+			match s.refresh_windows() {
+				Ok(_) => s.windows.len(),
+				Err(e) => return Response::Error { message: format!("Refresh failed: {}", e) }
+			}
+		};
+
+		// Phase 2: Get windows needing fingerprints + index
+		let (needs_matching, fingerprint_index) = {
 			let s = state.read().await;
-			Response::Pong {
-				uptime_secs: s.start_time.elapsed().as_secs(),
-			}
-		}
+			(s.get_windows_needing_fingerprints(), s.fingerprint_index.clone())
+		};
 
-		Request::Shutdown => Response::Ok {
-			message: "Shutting down".to_string(),
-		},
-
-		Request::Refresh => {
-			// Phase 1: Refresh windows (quick, no I/O)
-			let window_count = {
-				let mut s = state.write().await;
-				match s.refresh_windows() {
-					Ok(_) => s.windows.len(),
-					Err(e) => return Response::Error {
-						message: format!("Refresh failed: {}", e),
-					}
-				}
-			};
-
-			// Phase 2: Get windows needing fingerprints + index
-			let (needs_matching, fingerprint_index) = {
-				let s = state.read().await;
-				let needs = s.get_windows_needing_fingerprints();
-				let index = s.fingerprint_index.clone();
-				(needs, index)
-			};
-
-			// Phase 3: Do expensive I/O without lock
-			for addr in needs_matching {
-				if let Some((session_id, confidence, fingerprint)) =
-					BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
-				{
-					let mut s = state.write().await;
-					s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
-				}
-			}
-
-			Response::Ok {
-				message: format!("Refreshed {} windows", window_count),
-			}
-		}
-
-		Request::Titles => {
-			let s = state.read().await;
-			// Convert i32 keys to strings for JSON compatibility
-			let titles: std::collections::HashMap<String, String> = s.workspace_titles
-			                                                         .iter()
-			                                                         .map(|(k, v)| (k.to_string(), v.clone()))
-			                                                         .collect();
-			Response::Titles { titles }
-		}
-
-		Request::TitleRefresh { workspace } => {
-			// Get workspaces to refresh
-			let workspaces_to_refresh: Vec<i32> = {
-				let s = state.read().await;
-				if let Some(ws) = workspace {
-					vec![ws]
-				} else {
-					// All unique workspaces with Claude windows
-					s.windows.values()
-					 .filter_map(|w| w.workspace)
-					 .collect::<std::collections::HashSet<_>>()
-					 .into_iter()
-					 .collect()
-				}
-			};
-
-			// Invalidate summarizer cache
-			if let Some(ws) = workspace {
-				summarizer.invalidate(ws).await;
-			} else {
-				summarizer.clear_cache().await;
-			}
-
-			// Regenerate titles synchronously
-			for ws in &workspaces_to_refresh {
-				summarize_workspace(*ws, state, summarizer).await;
-			}
-
-			// Return updated titles
-			let s = state.read().await;
-			let titles = if let Some(ws) = workspace {
-				s.workspace_titles.get(&ws).cloned()
-				 .map(|t| format!("Workspace {}: {}", ws, t))
-				 .unwrap_or_else(|| format!("Workspace {}: (no windows)", ws))
-			} else {
-				workspaces_to_refresh.iter()
-				                     .filter_map(|ws| s.workspace_titles.get(ws).map(|t| format!("  {}: {}", ws, t)))
-				                     .collect::<Vec<_>>()
-				                     .join("\n")
-			};
-
-			Response::Ok { message: format!("Refreshed titles:\n{}", titles) }
-		}
-
-		// ─── WSet Operations ────────────────────────────────────────────────────
-
-		Request::WSetSave { name } => {
-			// Determine name: provided or current or "default"
-			let wset_name = match name {
-				Some(n) => n,
-				None => get_current_wset_name().ok().flatten().unwrap_or_else(|| "default".to_string()),
-			};
-
-			// Build WSet from current babel state
-			let s = state.read().await;
-			let mut wset = WSet::from_babel_state(&wset_name, &s);
-			drop(s);
-
-			// Save to disk
-			match wset.save() {
-				Ok(_) => {
-					let wspaces = wset.wspaces.len();
-					let windows = wset.window_count();
-
-					// Update _current
-					if let Err(e) = set_current_wset_name(&wset_name) {
-						tracing::warn!(error = %e, "Failed to set current wset name");
-					}
-
-					Response::WSetSaved { name: wset_name, wspaces, windows }
-				}
-				Err(e) => Response::Error {
-					message: format!("Failed to save WSet: {}", e),
-				},
-			}
-		}
-
-		Request::WSetLoad { name, dry_run } => {
-			// Determine name: provided or current
-			let wset_name = match name {
-				Some(n) => n,
-				None => match get_current_wset_name() {
-					Ok(Some(n)) => n,
-					Ok(None) => return Response::Error {
-						message: "No current WSet. Specify a name or run 'babel save' first.".to_string(),
-					},
-					Err(e) => return Response::Error {
-						message: format!("Failed to read current WSet: {}", e),
-					},
-				},
-			};
-
-			// Load WSet from disk
-			let wset = match WSet::load(&wset_name) {
-				Ok(w) => w,
-				Err(e) => return Response::Error {
-					message: format!("Failed to load WSet '{}': {}", wset_name, e),
-				},
-			};
-
-			let wspaces = wset.wspaces.len();
-			let windows = wset.window_count();
-
-			if dry_run {
-				// Just return what would happen
-				return Response::WSetLoaded {
-					name: wset_name,
-					wspaces,
-					windows,
-					skipped: vec![],
-					dry_run: true,
-				};
-			}
-
-			// Actually load: close existing windows and spawn new ones
-			// This is handled by the kitty module's spawn functions
-			let skipped = match load_wset(&wset).await {
-				Ok(s) => s,
-				Err(e) => return Response::Error {
-					message: format!("Failed to load WSet: {}", e),
-				},
-			};
-
-			// Update _current
-			if let Err(e) = set_current_wset_name(&wset_name) {
-				tracing::warn!(error = %e, "Failed to set current wset name");
-			}
-
-			// Trigger window refresh to pick up new windows
+		// Phase 3: Do expensive I/O without lock
+		for addr in needs_matching {
+			if let Some((session_id, confidence, fingerprint)) =
+				BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
 			{
 				let mut s = state.write().await;
-				let _ = s.refresh_windows();
-			}
-
-			Response::WSetLoaded {
-				name: wset_name,
-				wspaces,
-				windows,
-				skipped,
-				dry_run: false,
+				s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
 			}
 		}
 
-		Request::WSetList => {
-			match list_wsets() {
-				Ok(wsets) => {
-					let current = get_current_wset_name().ok().flatten();
-					Response::WSetList { wsets, current }
+		Response::Ok { message: format!("Refreshed {} windows", window_count) }
+	}
+
+	/// Get workspace titles
+	pub async fn titles(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		let titles: std::collections::HashMap<String, String> = s.workspace_titles
+			.iter()
+			.map(|(k, v)| (k.to_string(), v.clone()))
+			.collect();
+		Response::Titles { titles }
+	}
+
+	/// Refresh workspace titles
+	pub async fn title_refresh(
+		state: &Arc<RwLock<BabelState>>,
+		summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
+		workspace: Option<i32>,
+	) -> Response {
+		let workspaces_to_refresh: Vec<i32> = {
+			let s = state.read().await;
+			if let Some(ws) = workspace {
+				vec![ws]
+			} else {
+				s.windows.values()
+					.filter_map(|w| w.workspace)
+					.collect::<std::collections::HashSet<_>>()
+					.into_iter()
+					.collect()
+			}
+		};
+
+		if let Some(ws) = workspace {
+			summarizer.invalidate(ws).await;
+		} else {
+			summarizer.clear_cache().await;
+		}
+
+		for ws in &workspaces_to_refresh {
+			summarize_workspace(*ws, state, summarizer).await;
+		}
+
+		let s = state.read().await;
+		let titles = if let Some(ws) = workspace {
+			s.workspace_titles.get(&ws).cloned()
+				.map(|t| format!("Workspace {}: {}", ws, t))
+				.unwrap_or_else(|| format!("Workspace {}: (no windows)", ws))
+		} else {
+			workspaces_to_refresh.iter()
+				.filter_map(|ws| s.workspace_titles.get(ws).map(|t| format!("  {}: {}", ws, t)))
+				.collect::<Vec<_>>()
+				.join("\n")
+		};
+
+		Response::Ok { message: format!("Refreshed titles:\n{}", titles) }
+	}
+
+	// ─── WSet Handlers ─────────────────────────────────────────────────────────
+
+	pub async fn wset_save(state: &Arc<RwLock<BabelState>>, name: Option<String>) -> Response {
+		let wset_name = match name {
+			Some(n) => n,
+			None => get_current_wset_name().ok().flatten().unwrap_or_else(|| "default".to_string()),
+		};
+
+		let s = state.read().await;
+		let mut wset = WSet::from_babel_state(&wset_name, &s);
+		drop(s);
+
+		match wset.save() {
+			Ok(_) => {
+				let wspaces = wset.wspaces.len();
+				let windows = wset.window_count();
+				if let Err(e) = set_current_wset_name(&wset_name) {
+					tracing::warn!(error = %e, "Failed to set current wset name");
 				}
-				Err(e) => Response::Error {
-					message: format!("Failed to list WSet files: {}", e),
-				},
+				Response::WSetSaved { name: wset_name, wspaces, windows }
 			}
+			Err(e) => Response::Error { message: format!("Failed to save WSet: {}", e) },
+		}
+	}
+
+	pub async fn wset_load(state: &Arc<RwLock<BabelState>>, name: Option<String>, dry_run: bool) -> Response {
+		let wset_name = match name {
+			Some(n) => n,
+			None => match get_current_wset_name() {
+				Ok(Some(n)) => n,
+				Ok(None) => return Response::Error {
+					message: "No current WSet. Specify a name or run 'babel save' first.".to_string(),
+				},
+				Err(e) => return Response::Error {
+					message: format!("Failed to read current WSet: {}", e),
+				},
+			},
+		};
+
+		let wset = match WSet::load(&wset_name) {
+			Ok(w) => w,
+			Err(e) => return Response::Error {
+				message: format!("Failed to load WSet '{}': {}", wset_name, e),
+			},
+		};
+
+		let wspaces = wset.wspaces.len();
+		let windows = wset.window_count();
+
+		if dry_run {
+			return Response::WSetLoaded { name: wset_name, wspaces, windows, skipped: vec![], dry_run: true };
 		}
 
-		Request::WSetCurrent => {
-			match get_current_wset_name() {
-				Ok(name) => Response::WSetCurrent { name },
-				Err(e) => Response::Error {
-					message: format!("Failed to get current WSet: {}", e),
-				},
-			}
+		let skipped = match load_wset(&wset).await {
+			Ok(s) => s,
+			Err(e) => return Response::Error { message: format!("Failed to load WSet: {}", e) },
+		};
+
+		if let Err(e) = set_current_wset_name(&wset_name) {
+			tracing::warn!(error = %e, "Failed to set current wset name");
 		}
 
-		Request::WSetDelete { name } => {
-			match WSet::delete(&name) {
-				Ok(()) => Response::Ok {
-					message: format!("Deleted WSet '{}'", name),
-				},
-				Err(e) => Response::Error {
-					message: format!("Failed to delete WSet '{}': {}", name, e),
-				},
-			}
+		{
+			let mut s = state.write().await;
+			let _ = s.refresh_windows();
 		}
 
-		Request::WSetRename { old, new } => {
-			match WSet::rename(&old, &new) {
-				Ok(()) => Response::Ok {
-					message: format!("Renamed WSet '{}' to '{}'", old, new),
-				},
-				Err(e) => Response::Error {
-					message: format!("Failed to rename WSet: {}", e),
-				},
-			}
-		}
+		Response::WSetLoaded { name: wset_name, wspaces, windows, skipped, dry_run: false }
+	}
 
-		Request::WSetDescribe { name, description } => {
-			// Load, update description, save
-			match WSet::load(&name) {
-				Ok(mut wset) => {
-					wset.meta.description = description.clone();
-					match wset.save() {
-						Ok(_) => {
-							let desc = description.unwrap_or_else(|| "(cleared)".to_string());
-							Response::Ok { message: format!("Set description for '{}': {}", name, desc) }
-						}
-						Err(e) => Response::Error { message: format!("Failed to save WSet: {}", e) },
+	pub fn wset_list() -> Response {
+		match list_wsets() {
+			Ok(wsets) => {
+				let current = get_current_wset_name().ok().flatten();
+				Response::WSetList { wsets, current }
+			}
+			Err(e) => Response::Error { message: format!("Failed to list WSet files: {}", e) },
+		}
+	}
+
+	pub fn wset_current() -> Response {
+		match get_current_wset_name() {
+			Ok(name) => Response::WSetCurrent { name },
+			Err(e) => Response::Error { message: format!("Failed to get current WSet: {}", e) },
+		}
+	}
+
+	pub fn wset_delete(name: &str) -> Response {
+		match WSet::delete(name) {
+			Ok(()) => Response::Ok { message: format!("Deleted WSet '{}'", name) },
+			Err(e) => Response::Error { message: format!("Failed to delete WSet '{}': {}", name, e) },
+		}
+	}
+
+	pub fn wset_rename(old: &str, new: &str) -> Response {
+		match WSet::rename(old, new) {
+			Ok(()) => Response::Ok { message: format!("Renamed WSet '{}' to '{}'", old, new) },
+			Err(e) => Response::Error { message: format!("Failed to rename WSet: {}", e) },
+		}
+	}
+
+	pub fn wset_describe(name: &str, description: Option<String>) -> Response {
+		match WSet::load(name) {
+			Ok(mut wset) => {
+				wset.meta.description = description.clone();
+				match wset.save() {
+					Ok(_) => {
+						let desc = description.unwrap_or_else(|| "(cleared)".to_string());
+						Response::Ok { message: format!("Set description for '{}': {}", name, desc) }
 					}
+					Err(e) => Response::Error { message: format!("Failed to save WSet: {}", e) },
 				}
-				Err(e) => Response::Error {
-					message: format!("Failed to load WSet '{}': {}", name, e),
-				},
 			}
+			Err(e) => Response::Error { message: format!("Failed to load WSet '{}': {}", name, e) },
 		}
+	}
+}
 
-		// Subscribe is handled specially in handle_client before reaching process_request
+/// Dispatch IPC requests to appropriate handlers
+///
+/// This dispatcher routes requests to focused handler functions.
+/// Each handler is independently testable and has clear responsibility.
+async fn process_request(
+	request: Request,
+	state: &Arc<RwLock<BabelState>>,
+	summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
+) -> Response {
+	match request {
+		// ─── Query Handlers ─────────────────────────────────────────────────────
+		Request::List => handlers::list(state).await,
+		Request::ListTerminals => handlers::list_terminals(state).await,
+		Request::ListWithFingerprints => handlers::list_with_fingerprints(state).await,
+		Request::Status { window_id } => handlers::status(state, window_id).await,
+		Request::History { limit } => handlers::history(limit),
+		Request::Ping => handlers::ping(state).await,
+		Request::Titles => handlers::titles(state).await,
+
+		// ─── Window Handlers ────────────────────────────────────────────────────
+		Request::Enrich { window_id } => handlers::enrich(state, window_id).await,
+		Request::Focus { window_id } => handlers::focus(window_id),
+		Request::Scroll { window_id } => handlers::scroll(window_id),
+		Request::Send { window_id, text } => handlers::send(window_id, &text),
+
+		// ─── State Handlers ─────────────────────────────────────────────────────
+		Request::Tag { window_id, icon } => handlers::tag(state, window_id, &icon).await,
+		Request::MarkRead { window_id } => handlers::mark_read_handler(state, window_id).await,
+		Request::Refresh => handlers::refresh(state).await,
+		Request::TitleRefresh { workspace } => handlers::title_refresh(state, summarizer, workspace).await,
+
+		// ─── WSet Handlers ──────────────────────────────────────────────────────
+		Request::WSetSave { name } => handlers::wset_save(state, name).await,
+		Request::WSetLoad { name, dry_run } => handlers::wset_load(state, name, dry_run).await,
+		Request::WSetList => handlers::wset_list(),
+		Request::WSetCurrent => handlers::wset_current(),
+		Request::WSetDelete { name } => handlers::wset_delete(&name),
+		Request::WSetRename { old, new } => handlers::wset_rename(&old, &new),
+		Request::WSetDescribe { name, description } => handlers::wset_describe(&name, description),
+
+		// ─── System Handlers ────────────────────────────────────────────────────
+		Request::Shutdown => Response::Ok { message: "Shutting down".to_string() },
+
+		// Subscribe is handled specially in handle_client
 		Request::Subscribe { .. } => Response::Error {
 			message: "Subscribe requests must be handled via handle_client".to_string(),
 		}
