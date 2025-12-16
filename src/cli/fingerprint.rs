@@ -102,7 +102,7 @@ pub async fn cmd_fingerprint(
     let filtered_terminals: Vec<_> = terminals.iter().filter(|w| {
         // Filter by window ID if specified
         if let Some(wid) = window {
-            if w.kitty_id != wid {
+            if w.id() != wid {
                 return false;
             }
         }
@@ -128,7 +128,7 @@ pub async fn cmd_fingerprint(
         let in_scope = scope_dir.as_ref().map(|d| win.cwd.starts_with(d)).unwrap_or(true);
         let scope_marker = if in_scope { style("✓ IN SCOPE").green() } else { style("✗ not in scope").dim() };
 
-        println!("  id:{:<4}  cwd: {}  {}", win.kitty_id, win.cwd.display(), scope_marker);
+        println!("  id:{:<4}  cwd: {}  {}", win.id(), win.cwd.display(), scope_marker);
 
         let title = win.title.strip_prefix("✳ ").unwrap_or(&win.title);
         println!("         title: \"{}\"", title);
@@ -140,10 +140,10 @@ pub async fn cmd_fingerprint(
         }
 
         // Extract fingerprint from scrollback
-        match get_scrollback(win.kitty_id) {
+        match get_scrollback(win.id()) {
             Ok(scrollback) => {
                 let fp = extract_from_scrollback(&scrollback);
-                terminal_fps.push((win.kitty_id, fp.clone()));
+                terminal_fps.push((win.id(), fp.clone()));
 
                 println!();
                 println!("         {}", style("Scrollback Fingerprint:").yellow());

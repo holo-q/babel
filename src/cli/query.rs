@@ -43,7 +43,7 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 		let ws_b = b.workspace.unwrap_or(999);
 		ws_a.cmp(&ws_b)
 		    .then(a.os_window_id.cmp(&b.os_window_id))
-		    .then(a.kitty_id.cmp(&b.kitty_id))
+		    .then(a.id().cmp(&b.id()))
 	});
 
 	// Group and display by workspace
@@ -359,7 +359,7 @@ async fn get_windows_with_fingerprints(core: &BabelCore) -> Result<Vec<ClaudeWin
 	// Extract fingerprints for windows that don't have them
 	for win in &mut windows {
 		if win.fingerprint.is_none() {
-			if let Ok(scrollback) = get_scrollback(win.kitty_id) {
+			if let Ok(scrollback) = get_scrollback(win.id()) {
 				let fp = extract_from_scrollback(&scrollback);
 				win.fingerprint = Some(fp);
 			}
@@ -381,7 +381,7 @@ async fn show_available_windows(core: &BabelCore) -> Result<()> {
 	for w in &windows {
 		let title = w.title.strip_prefix("✳ ").unwrap_or(&w.title);
 		let title: String = title.chars().take(30).collect();
-		println!("  {:>5}  {:30}  {}", w.kitty_id, title, w.cwd.display());
+		println!("  {:>5}  {:30}  {}", w.id(), title, w.cwd.display());
 	}
 	Ok(())
 }
@@ -420,7 +420,7 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	let yellow = Style::new().yellow();
 
 	// Build the line
-	let id_str = format!("{:>3}", win.kitty_id);
+	let id_str = format!("{:>3}", win.id());
 
 	// Unread dot or custom icon
 	let marker = if let Some(icon) = custom_icon {
@@ -484,7 +484,7 @@ pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
 
 	// Header line: focus + ID + title
 	print!("{}", focus_marker);
-	print!("{} ", if win.is_focused { bold.apply_to(format!("[{}]", win.kitty_id)) } else { dim.apply_to(format!("[{}]", win.kitty_id)) });
+	print!("{} ", if win.is_focused { bold.apply_to(format!("[{}]", win.id())) } else { dim.apply_to(format!("[{}]", win.id())) });
 	if win.is_focused {
 		println!("{}", yellow.apply_to(title));
 	} else {

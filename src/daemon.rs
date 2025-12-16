@@ -25,12 +25,17 @@ use tokio::sync::{mpsc, RwLock};
 use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_session_info};
 use crate::utility::claude_discovery::{enrich_window, load_wset, ClaudeWindow};
 use crate::events::{BabelEvent, EventFilter, EventMessage, EventPublisher};
+use crate::kitty::PaneAddr;
 use crate::fingerprint::{
 	SessionFingerprint, MatchConfidence,
 	extract_from_scrollback, extract_from_jsonl, match_fingerprints,
 };
 use crate::utility::ipc::{create_listener, Request, Response};
-use crate::kitty::{focus_window, get_scrollback, send_text, list_panes};
+use crate::kitty::{
+    get_scrollback,  // used in fingerprint_match_addr
+    focus_window_any, get_scrollback_any, send_text_any,
+    list_all_panes, discover_all_instances, default_socket,
+};
 use crate::utility::claude_discovery::{get_window_activity_state, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
@@ -68,8 +73,8 @@ pub struct SummaryEntry {
 /// terminals open, close, and transition to Claude sessions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerminalInfo {
-	/// Kitty window ID
-	pub kitty_id: u64,
+	/// Unique address of this pane (socket + kitty ID)
+	pub addr: PaneAddr,
 	/// Window title
 	pub title: String,
 	/// Working directory
@@ -82,14 +87,42 @@ pub struct TerminalInfo {
 	pub is_focused: bool,
 }
 
-/// Babel state - shared across tasks
-pub struct BabelState {
-	/// Current Claude windows (kitty_id → ClaudeWindow)
-	pub windows: HashMap<u64, ClaudeWindow>,
+impl TerminalInfo {
+	/// Get the kitty window ID (convenience)
+	pub fn id(&self) -> u64 {
+		self.addr.id
+	}
+}
 
-	/// All kitty terminals (kitty_id → TerminalInfo)
+/// Status of a kitty socket
+///
+/// Used to track which sockets are responsive and emit warnings
+/// when multiple kitty instances are detected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SocketStatus {
+	/// Whether this is the current/default socket
+	pub is_current: bool,
+	/// Whether the socket responded to queries
+	pub is_responsive: bool,
+	/// Number of panes in this instance
+	pub pane_count: usize,
+	/// Last error message if any
+	pub last_error: Option<String>,
+}
+
+/// Babel state - shared across tasks
+///
+/// All window/terminal state is keyed by PaneAddr (socket + id) to support
+/// multiple kitty instances. This enables graceful degradation when things
+/// are "fucked" - multiple instances, dead sockets, etc.
+pub struct BabelState {
+	/// Current Claude windows (PaneAddr → ClaudeWindow)
+	/// Keyed by PaneAddr to handle ID collisions across kitty instances
+	pub windows: HashMap<PaneAddr, ClaudeWindow>,
+
+	/// All kitty terminals (PaneAddr → TerminalInfo)
 	/// Includes both Claude and non-Claude terminals for full visibility
-	pub terminals: HashMap<u64, TerminalInfo>,
+	pub terminals: HashMap<PaneAddr, TerminalInfo>,
 
 	/// Summary index for fast title→session matching
 	pub summary_index: Vec<SummaryEntry>,
@@ -102,13 +135,13 @@ pub struct BabelState {
 	/// Populated during summary index rebuild for O(1) session lookup
 	pub session_paths: HashMap<String, PathBuf>,
 
-	/// Cached fingerprints for windows (kitty_id → fingerprint)
+	/// Cached fingerprints for windows (PaneAddr → fingerprint)
 	/// Extracted from scrollback, used for matching
-	pub window_fingerprints: HashMap<u64, SessionFingerprint>,
+	pub window_fingerprints: HashMap<PaneAddr, SessionFingerprint>,
 
-	/// Cached activity states for windows (kitty_id → ActivityState)
+	/// Cached activity states for windows (PaneAddr → ActivityState)
 	/// Used to detect state changes and emit SessionStateChanged events
-	pub window_states: HashMap<u64, scrollparse::claude::ActivityState>,
+	pub window_states: HashMap<PaneAddr, scrollparse::claude::ActivityState>,
 
 	/// When the daemon started
 	pub start_time: Instant,
@@ -125,6 +158,10 @@ pub struct BabelState {
 	/// Current workspace titles (workspace → title)
 	/// Authoritative source - frontends query this via IPC
 	pub workspace_titles: HashMap<i32, String>,
+
+	/// Known kitty sockets and their status
+	/// Populated during window refresh to track multi-socket situations
+	pub socket_status: HashMap<String, SocketStatus>,
 }
 
 impl Default for BabelState {
@@ -148,21 +185,36 @@ impl BabelState {
 			last_fingerprint_rebuild: Instant::now(),
 			event_publisher: EventPublisher::new(),
 			workspace_titles: HashMap::new(),
+			socket_status: HashMap::new(),
 		}
 	}
 
-	/// Refresh kitty windows
+	/// Refresh kitty windows from ALL sockets
 	///
 	/// Returns list of workspaces that had windows added or removed,
 	/// for triggering title re-summarization.
 	///
-	/// This now tracks ALL terminals (not just Claude) for full visibility,
-	/// emitting TerminalOpened/TerminalClosed events for all kitty windows.
+	/// Multi-socket support: polls all discovered kitty instances (not just default).
+	/// This enables graceful degradation when multiple instances exist.
 	pub fn refresh_windows(&mut self) -> Result<Vec<i32>> {
 		use crate::kitty::get_all_workspaces;
 
-		// Get ALL kitty panes first - we track all terminals for visibility
-		let all_panes = list_panes()?;
+		// ─── Multi-Socket Discovery ─────────────────────────────────────────────────
+		// Query all kitty instances, update socket_status
+		let instances = discover_all_instances();
+		let current_socket = default_socket();
+
+		self.socket_status = instances.iter()
+			.map(|i| (i.socket.clone(), SocketStatus {
+				is_current: i.socket == current_socket,
+				is_responsive: i.is_responsive,
+				pane_count: i.panes.len(),
+				last_error: i.error.clone(),
+			}))
+			.collect();
+
+		// Get ALL kitty panes from ALL sockets
+		let all_panes = list_all_panes()?;
 
 		// Filter to just Claude windows for the main tracking
 		let kitty_windows: Vec<_> = all_panes.iter()
@@ -173,17 +225,18 @@ impl BabelState {
 		// Get workspace mappings in one call
 		let workspaces = get_all_workspaces();
 
-		// ─── Terminal Tracking (ALL kitty windows) ──────────────────────────────────
+		// ─── Terminal Tracking (ALL kitty windows from ALL sockets) ─────────────────
 		// Build terminal info for all panes and emit terminal events
-		let mut new_terminals = HashMap::new();
-		let old_terminal_ids: std::collections::HashSet<_> = self.terminals.keys().cloned().collect();
+		let mut new_terminals: HashMap<PaneAddr, TerminalInfo> = HashMap::new();
+		let old_terminal_addrs: std::collections::HashSet<_> = self.terminals.keys().cloned().collect();
 
 		for pane in &all_panes {
+			let addr = pane.addr();
 			let workspace = workspaces.get(&pane.platform_window_id).copied();
 			let is_claude = detect_claude_signals(pane).is_claude();
 
-			new_terminals.insert(pane.id, TerminalInfo {
-				kitty_id: pane.id,
+			new_terminals.insert(addr.clone(), TerminalInfo {
+				addr,
 				title: pane.title.clone(),
 				cwd: pane.cwd.clone(),
 				workspace,
@@ -192,13 +245,13 @@ impl BabelState {
 			});
 		}
 
-		let new_terminal_ids: std::collections::HashSet<_> = new_terminals.keys().cloned().collect();
+		let new_terminal_addrs: std::collections::HashSet<_> = new_terminals.keys().cloned().collect();
 
 		// Emit TerminalOpened events for new terminals
-		for &id in new_terminal_ids.difference(&old_terminal_ids) {
-			if let Some(t) = new_terminals.get(&id) {
+		for addr in new_terminal_addrs.difference(&old_terminal_addrs) {
+			if let Some(t) = new_terminals.get(addr) {
 				self.event_publisher.publish(BabelEvent::TerminalOpened {
-					kitty_id: id,
+					kitty_id: addr.id,
 					title: t.title.clone(),
 					cwd: t.cwd.clone(),
 					workspace: t.workspace,
@@ -207,16 +260,16 @@ impl BabelState {
 		}
 
 		// Emit TerminalClosed events for removed terminals
-		for &id in old_terminal_ids.difference(&new_terminal_ids) {
-			self.event_publisher.publish(BabelEvent::TerminalClosed { kitty_id: id });
+		for addr in old_terminal_addrs.difference(&new_terminal_addrs) {
+			self.event_publisher.publish(BabelEvent::TerminalClosed { kitty_id: addr.id });
 		}
 
 		// Emit TerminalBecameClaude for terminals that just became Claude sessions
-		for (&id, new_term) in &new_terminals {
-			if let Some(old_term) = self.terminals.get(&id) {
+		for (addr, new_term) in &new_terminals {
+			if let Some(old_term) = self.terminals.get(addr) {
 				if !old_term.is_claude && new_term.is_claude {
 					self.event_publisher.publish(BabelEvent::TerminalBecameClaude {
-						kitty_id: id,
+						kitty_id: addr.id,
 						title: new_term.title.clone(),
 					});
 				}
@@ -227,14 +280,14 @@ impl BabelState {
 
 		// ─── Claude Window Tracking ─────────────────────────────────────────────────
 		// Build new windows map, preserving enriched data where possible
-		let mut new_windows = HashMap::new();
+		let mut new_windows: HashMap<PaneAddr, ClaudeWindow> = HashMap::new();
 
 		for kw in kitty_windows {
-			let window_id = kw.id;
+			let addr = kw.addr();
 			let workspace = workspaces.get(&kw.platform_window_id).copied();
 
 			// Check if we have existing data for this window (use get, not remove)
-			let mut claude_window = if let Some(existing) = self.windows.get(&window_id) {
+			let mut claude_window = if let Some(existing) = self.windows.get(&addr) {
 				// Clone existing and update dynamic fields
 				let mut updated = existing.clone();
 				updated.workspace = workspace;
@@ -262,8 +315,7 @@ impl BabelState {
 				                         .filter(|id| !id.starts_with("agent-"))
 				                         .cloned();
 				ClaudeWindow {
-					socket: kw.socket.clone(),
-					kitty_id: kw.id,
+					addr: addr.clone(),
 					title: kw.title.clone(),
 					session_id: existing_session,
 					session_info: None,
@@ -280,7 +332,7 @@ impl BabelState {
 
 			// Try to match unmatched windows using summary index
 			if claude_window.session_id.is_none() {
-				trace!("Window {} needs matching (title: {})", window_id, claude_window.title);
+				trace!("Window {} needs matching (title: {})", addr.short(), claude_window.title);
 
 				if let Some(session_id) = self.match_title_to_session(&claude_window.title) {
 					trace!("  → Title matched to session: {}", session_id);
@@ -290,21 +342,21 @@ impl BabelState {
 				}
 			}
 
-			new_windows.insert(window_id, claude_window);
+			new_windows.insert(addr, claude_window);
 		}
 
 		// Detect and emit events for window changes
-		let old_ids: std::collections::HashSet<_> = self.windows.keys().cloned().collect();
-		let new_ids: std::collections::HashSet<_> = new_windows.keys().cloned().collect();
+		let old_addrs: std::collections::HashSet<_> = self.windows.keys().cloned().collect();
+		let new_addrs: std::collections::HashSet<_> = new_windows.keys().cloned().collect();
 
 		// Track workspaces that need re-summarization
 		let mut changed_workspaces: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
 		// Windows added
-		for &id in new_ids.difference(&old_ids) {
-			if let Some(w) = new_windows.get(&id) {
+		for addr in new_addrs.difference(&old_addrs) {
+			if let Some(w) = new_windows.get(addr) {
 				self.event_publisher.publish(BabelEvent::WindowAdded {
-					kitty_id: id,
+					kitty_id: addr.id,
 					title: w.title.clone(),
 					workspace: w.workspace,
 				});
@@ -316,29 +368,29 @@ impl BabelState {
 		}
 
 		// Windows removed - clean up cached fingerprints and states
-		for &id in old_ids.difference(&new_ids) {
+		for addr in old_addrs.difference(&new_addrs) {
 			// Get workspace from old windows before removal
-			if let Some(w) = self.windows.get(&id) {
+			if let Some(w) = self.windows.get(addr) {
 				if let Some(ws) = w.workspace {
 					changed_workspaces.insert(ws);
 				}
 			}
 
 			// Clean up cached data for closed window
-			self.window_fingerprints.remove(&id);
-			self.window_states.remove(&id);
+			self.window_fingerprints.remove(addr);
+			self.window_states.remove(addr);
 
-			self.event_publisher.publish(BabelEvent::WindowRemoved { kitty_id: id });
+			self.event_publisher.publish(BabelEvent::WindowRemoved { kitty_id: addr.id });
 		}
 
 		// Check for focus changes
-		let old_focused = self.windows.values().find(|w| w.is_focused).map(|w| w.kitty_id);
-		let new_focused = new_windows.values().find(|w| w.is_focused).map(|w| w.kitty_id);
+		let old_focused = self.windows.values().find(|w| w.is_focused).map(|w| w.addr.clone());
+		let new_focused = new_windows.values().find(|w| w.is_focused).map(|w| w.addr.clone());
 		if old_focused != new_focused {
-			if let Some(id) = new_focused {
-				if let Some(w) = new_windows.get(&id) {
+			if let Some(ref addr) = new_focused {
+				if let Some(w) = new_windows.get(addr) {
 					self.event_publisher.publish(BabelEvent::WindowFocused {
-						kitty_id: id,
+						kitty_id: addr.id,
 						session_id: w.session_id.clone(),
 					});
 				}
@@ -347,26 +399,26 @@ impl BabelState {
 
 		// Detect session state changes and emit events
 		// This enables richspace-babel to track Claude activity per-workspace
-		for (kitty_id, window) in &new_windows {
-			let new_state = get_window_activity_state(*kitty_id);
-			let old_state = self.window_states.get(kitty_id).copied();
+		for (addr, window) in &new_windows {
+			let new_state = get_window_activity_state(addr.id);
+			let old_state = self.window_states.get(addr).copied();
 
 			match old_state {
 				Some(old) if old != new_state => {
 					// State changed - emit event
-					trace!("Window {} state change: {:?} -> {:?}", kitty_id, old, new_state);
+					trace!("Window {} state change: {:?} -> {:?}", addr.short(), old, new_state);
 					self.event_publisher.publish(BabelEvent::SessionStateChanged {
-						kitty_id: *kitty_id,
+						kitty_id: addr.id,
 						session_id: window.session_id.clone(),
 						workspace: window.workspace,
 						old_state: old,
 						new_state,
 					});
-					self.window_states.insert(*kitty_id, new_state);
+					self.window_states.insert(addr.clone(), new_state);
 				}
 				None => {
 					// New window - initialize state (no event, WindowAdded already fired)
-					self.window_states.insert(*kitty_id, new_state);
+					self.window_states.insert(addr.clone(), new_state);
 				}
 				_ => {
 					// State unchanged
@@ -375,7 +427,7 @@ impl BabelState {
 		}
 
 		// Clean up states for removed windows
-		self.window_states.retain(|id, _| new_windows.contains_key(id));
+		self.window_states.retain(|addr, _| new_windows.contains_key(addr));
 
 		self.windows = new_windows;
 		self.last_kitty_scan = Instant::now();
@@ -397,60 +449,62 @@ impl BabelState {
 		    .map(|e| e.session_id.clone())
 	}
 
-	/// Get list of window IDs that need fingerprint matching
+	/// Get list of window addresses that need fingerprint matching
 	///
 	/// Called with read lock to identify windows that need matching.
 	/// Caller then releases lock and does expensive I/O.
-	pub fn get_windows_needing_fingerprints(&self) -> Vec<u64> {
+	pub fn get_windows_needing_fingerprints(&self) -> Vec<PaneAddr> {
 		self.windows
 		    .iter()
 		    .filter(|(_, w)| w.session_id.is_none())
-		    .map(|(id, _)| *id)
+		    .map(|(addr, _)| addr.clone())
 		    .collect()
 	}
 
 	/// Apply fingerprint matching results to a window
 	///
-	/// This applies the results from `fingerprint_match_window_id` back to state.
+	/// This applies the results from `fingerprint_match_addr` back to state.
 	/// Called with write lock after I/O completes.
 	pub fn apply_fingerprint_result(
 		&mut self,
-		window_id: u64,
+		addr: &PaneAddr,
 		session_id: String,
 		confidence: MatchConfidence,
 		fingerprint: SessionFingerprint,
 	) {
 		// Tag the window for future fast lookups
-		let _ = crate::utility::claude_discovery::tag_window(window_id, &session_id);
+		let _ = crate::utility::claude_discovery::tag_window(addr.id, &session_id);
 
 		// Cache the fingerprint
-		self.cache_fingerprint(window_id, fingerprint.clone());
+		self.cache_fingerprint(addr.clone(), fingerprint.clone());
 
 		// Update the window in our state
-		if let Some(window) = self.windows.get_mut(&window_id) {
+		if let Some(window) = self.windows.get_mut(addr) {
 			window.session_id = Some(session_id);
 			window.match_confidence = Some(confidence);
 			window.fingerprint = Some(fingerprint);
 		}
 	}
 
-	/// Perform fingerprint matching for a window ID without holding any lock
+	/// Perform fingerprint matching for a window address without holding any lock
 	///
 	/// This does the expensive I/O (get_scrollback) and matching logic.
 	/// Called outside any locks to avoid blocking readers.
 	///
 	/// Takes fingerprint_index as parameter to avoid needing &self.
-	pub fn fingerprint_match_window_id(
-		window_id: u64,
+	pub fn fingerprint_match_addr(
+		addr: &PaneAddr,
 		fingerprint_index: &HashMap<String, SessionFingerprint>,
 	) -> Option<(String, MatchConfidence, SessionFingerprint)> {
-		trace!("fingerprint_match({}) - index has {} sessions", window_id, fingerprint_index.len());
+		use crate::kitty::get_scrollback_on_socket;
 
-		// Get scrollback and extract fingerprint (EXPENSIVE I/O - done without lock)
-		let scrollback = match get_scrollback(window_id) {
+		trace!("fingerprint_match({}) - index has {} sessions", addr.short(), fingerprint_index.len());
+
+		// Get scrollback using the pane's socket (EXPENSIVE I/O - done without lock)
+		let scrollback = match get_scrollback_on_socket(&addr.socket, addr.id) {
 			Ok(s) => s,
 			Err(e) => {
-				tracing::warn!(kitty_id = window_id, error = %e, "Failed to get scrollback");
+				tracing::warn!(addr = %addr.short(), error = %e, "Failed to get scrollback");
 				return None;
 			}
 		};
@@ -500,7 +554,7 @@ impl BabelState {
 
 		if let Some((session_id, confidence)) = best_match {
 			tracing::info!(
-                kitty_id = window_id,
+                addr = %addr.short(),
                 session_id,
                 ?confidence,
                 "Fingerprint matched window to session"
@@ -634,8 +688,8 @@ impl BabelState {
 	/// Cache a fingerprint for a window
 	///
 	/// Called after successful fingerprint matching to avoid re-extraction
-	fn cache_fingerprint(&mut self, window_id: u64, fingerprint: SessionFingerprint) {
-		self.window_fingerprints.insert(window_id, fingerprint);
+	fn cache_fingerprint(&mut self, addr: PaneAddr, fingerprint: SessionFingerprint) {
+		self.window_fingerprints.insert(addr, fingerprint);
 
 		// Safety net: enforce maximum cache size to prevent unbounded growth
 		// This should rarely trigger since we clean up on window removal,
@@ -649,6 +703,37 @@ impl BabelState {
 				}
 			}
 		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════════════
+	// ID → PaneAddr Resolution Helpers
+	// ═══════════════════════════════════════════════════════════════════════════════
+	//
+	// IPC requests use window_id: u64 for backwards compatibility.
+	// These helpers resolve IDs to windows by searching across all sockets.
+
+	/// Find a window by its kitty ID (searches across all sockets)
+	///
+	/// Returns None if no window with that ID exists in any socket
+	pub fn find_window_by_id(&self, id: u64) -> Option<&ClaudeWindow> {
+		self.windows.values().find(|w| w.id() == id)
+	}
+
+	/// Find a window by its kitty ID (mutable, searches across all sockets)
+	pub fn find_window_by_id_mut(&mut self, id: u64) -> Option<&mut ClaudeWindow> {
+		self.windows.values_mut().find(|w| w.id() == id)
+	}
+
+	/// Find the PaneAddr for a given window ID
+	pub fn find_addr_by_id(&self, id: u64) -> Option<&PaneAddr> {
+		self.windows.iter().find(|(_, w)| w.id() == id).map(|(addr, _)| addr)
+	}
+
+	/// Get activity state for a window by its kitty ID
+	pub fn get_activity_state(&self, id: u64) -> Option<scrollparse::claude::ActivityState> {
+		self.find_addr_by_id(id)
+			.and_then(|addr| self.window_states.get(addr))
+			.cloned()
 	}
 }
 
@@ -717,6 +802,20 @@ pub async fn run_daemon() -> Result<()> {
             "Indexed {} sessions ({} with fingerprints)",
             total_summaries, sessions_with_fingerprints
         );
+
+		// Multi-socket warning at startup
+		let socket_count = s.socket_status.len();
+		if socket_count > 1 {
+			tracing::warn!(
+				"⚠ Multiple kitty instances detected ({} sockets)",
+				socket_count
+			);
+			for (socket, status) in &s.socket_status {
+				let marker = if status.is_current { "●" } else { "○" };
+				let short = socket.rsplit("kitty.sock-").next().unwrap_or(socket);
+				tracing::warn!("  {} {} ({} panes)", marker, short, status.pane_count);
+			}
+		}
 	}
 
 	// Create event channel
@@ -822,13 +921,13 @@ pub async fn run_daemon() -> Result<()> {
 
                         // Phase 3: Do expensive I/O (get_scrollback) WITHOUT ANY LOCK
                         // This allows concurrent readers to proceed unblocked
-                        for window_id in needs_matching {
+                        for addr in needs_matching {
                             if let Some((session_id, confidence, fingerprint)) =
-                                BabelState::fingerprint_match_window_id(window_id, &fingerprint_index)
+                                BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
                             {
                                 // Phase 4: Apply result with write lock (quick operation)
                                 let mut s = state.write().await;
-                                s.apply_fingerprint_result(window_id, session_id, confidence, fingerprint);
+                                s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
                             }
                         }
 
@@ -1036,7 +1135,7 @@ async fn process_request(
 				.map(|w| {
 					let mut win = w.clone();
 					// Populate activity_state from cached window_states
-					win.activity_state = s.window_states.get(&w.kitty_id).cloned();
+					win.activity_state = s.get_activity_state(w.id());
 					win
 				})
 				.collect();
@@ -1055,7 +1154,7 @@ async fn process_request(
 			let mut windows: Vec<ClaudeWindow> = s.windows.values()
 				.map(|w| {
 					let mut win = w.clone();
-					win.activity_state = s.window_states.get(&w.kitty_id).cloned();
+					win.activity_state = s.get_activity_state(w.id());
 					win
 				})
 				.collect();
@@ -1065,7 +1164,7 @@ async fn process_request(
 			for win in &mut windows {
 				// Extract fingerprint if not already cached
 				if win.fingerprint.is_none() {
-					if let Ok(scrollback) = get_scrollback(win.kitty_id) {
+					if let Ok(scrollback) = get_scrollback(win.id()) {
 						let fp = extract_from_scrollback(&scrollback);
 						win.fingerprint = Some(fp);
 					}
@@ -1083,7 +1182,7 @@ async fn process_request(
 		Request::Status { window_id } => {
 			let s = state.read().await;
 			let window = if let Some(id) = window_id {
-				s.windows.get(&id).cloned()
+				s.find_window_by_id(id).cloned()
 			} else {
 				s.windows.values().find(|w| w.is_focused).cloned()
 			};
@@ -1092,7 +1191,7 @@ async fn process_request(
 
 		Request::Enrich { window_id } => {
 			let mut s = state.write().await;
-			if let Some(window) = s.windows.get_mut(&window_id) {
+			if let Some(window) = s.find_window_by_id_mut(window_id) {
 				if let Err(e) = enrich_window(window) {
 					return Response::Error {
 						message: format!("Failed to enrich: {}", e),
@@ -1108,26 +1207,41 @@ async fn process_request(
 			}
 		}
 
-		Request::Focus { window_id } => match focus_window(window_id) {
-			Ok(()) => Response::Ok {
-				message: format!("Focused window {}", window_id),
-			},
+		Request::Focus { window_id } => match focus_window_any(window_id) {
+			Ok(result) => {
+				let message = if result.is_non_current {
+					format!("⚠ Focused window {} on non-current socket: {}", window_id, result.addr.short())
+				} else {
+					format!("Focused window {}", window_id)
+				};
+				Response::Ok { message }
+			}
 			Err(e) => Response::Error {
 				message: format!("Focus failed: {}", e),
 			},
 		},
 
-		Request::Scroll { window_id } => match get_scrollback(window_id) {
-			Ok(text) => Response::Scrollback { text },
+		Request::Scroll { window_id } => match get_scrollback_any(window_id) {
+			Ok(result) => {
+				if result.is_non_current {
+					tracing::warn!(window_id, addr = %result.addr.short(), "Scrollback from non-current socket");
+				}
+				Response::Scrollback { text: result.result }
+			}
 			Err(e) => Response::Error {
 				message: format!("Scroll failed: {}", e),
 			},
 		},
 
-		Request::Send { window_id, text } => match send_text(window_id, &text) {
-			Ok(()) => Response::Ok {
-				message: format!("Sent to window {}", window_id),
-			},
+		Request::Send { window_id, text } => match send_text_any(window_id, &text) {
+			Ok(result) => {
+				let message = if result.is_non_current {
+					format!("⚠ Sent to window {} on non-current socket: {}", window_id, result.addr.short())
+				} else {
+					format!("Sent to window {}", window_id)
+				};
+				Response::Ok { message }
+			}
 			Err(e) => Response::Error {
 				message: format!("Send failed: {}", e),
 			},
@@ -1135,7 +1249,7 @@ async fn process_request(
 
 		Request::Tag { window_id, icon } => {
 			let s = state.read().await;
-			if let Some(window) = s.windows.get(&window_id) {
+			if let Some(window) = s.find_window_by_id(window_id) {
 				if let Some(session_id) = &window.session_id {
 					match init_db().and_then(|conn| set_icon(&conn, session_id, &icon)) {
 						Ok(()) => Response::Ok {
@@ -1159,7 +1273,7 @@ async fn process_request(
 
 		Request::MarkRead { window_id } => {
 			let s = state.read().await;
-			if let Some(window) = s.windows.get(&window_id) {
+			if let Some(window) = s.find_window_by_id(window_id) {
 				if let Some(session_id) = &window.session_id {
 					match init_db().and_then(|conn| mark_read(&conn, session_id)) {
 						Ok(()) => Response::Ok {
@@ -1220,12 +1334,12 @@ async fn process_request(
 			};
 
 			// Phase 3: Do expensive I/O without lock
-			for window_id in needs_matching {
+			for addr in needs_matching {
 				if let Some((session_id, confidence, fingerprint)) =
-					BabelState::fingerprint_match_window_id(window_id, &fingerprint_index)
+					BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
 				{
 					let mut s = state.write().await;
-					s.apply_fingerprint_result(window_id, session_id, confidence, fingerprint);
+					s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
 				}
 			}
 

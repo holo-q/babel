@@ -130,7 +130,7 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
             let (indicator, ind_style) = if term.is_claude {
                 // Find matching Claude window to get activity state
                 let activity = app.windows.iter()
-                    .find(|w| w.kitty_id == term.kitty_id)
+                    .find(|w| w.id() == term.addr.id)
                     .and_then(|w| w.activity_state);
 
                 use scrollparse::claude::ActivityState;
@@ -164,7 +164,7 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
 
             let line = Line::from(vec![
                 Span::styled(indicator, ind_style),
-                Span::raw(format!(" {:>3} ", term.kitty_id)),
+                Span::raw(format!(" {:>3} ", term.addr.id)),
                 Span::raw(truncated),
             ]);
 
@@ -252,9 +252,9 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                  title: {}\n\
                  focused: {}\n\
                  workspace: {}",
-                w.kitty_id,
+                w.id(),
                 state_str,
-                w.socket,
+                w.socket(),
                 w.cwd.display(),
                 w.session_id.as_deref().unwrap_or("?"),
                 if w.title.is_empty() { "?" } else { &w.title },
@@ -266,12 +266,14 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
             format!(
                 "Terminal {} {}\n\
                  ─────────────────────────\n\
+                 socket: {}\n\
                  title: {}\n\
                  cwd: {}\n\
                  focused: {}\n\
                  workspace: {}",
-                t.kitty_id,
+                t.addr.id,
                 if t.is_claude { "(Claude)" } else { "(non-Claude)" },
+                t.addr.short(),
                 if t.title.is_empty() { "?" } else { &t.title },
                 t.cwd.display(),
                 t.is_focused,

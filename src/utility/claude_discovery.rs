@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use crate::utility::claude_storage::{find_session_by_summary, SessionInfo};
 use crate::fingerprint::{SessionFingerprint, MatchConfidence};
-use crate::kitty::{list_panes, set_user_var, get_recent_scrollback, close_window, get_pane, move_window_to_workspace, KittyPane};
+use crate::kitty::{list_panes, set_user_var, get_recent_scrollback, close_window, get_pane, move_window_to_workspace, KittyPane, PaneAddr};
 use crate::wset::WSet;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -141,11 +141,13 @@ pub fn find_claude_windows() -> Result<Vec<KittyPane>> {
 }
 
 /// A kitty window matched to its Claude session
+///
+/// Uniquely identified by `addr` (PaneAddr = socket + kitty window ID).
+/// This supports multiple kitty instances where window IDs may collide.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeWindow {
-    /// Socket for the kitty instance this window belongs to
-    pub socket: String,
-    pub kitty_id: u64,
+    /// Unique address of this pane across all kitty instances
+    pub addr: PaneAddr,
     pub title: String,
     pub session_id: Option<String>,
     pub session_info: Option<SessionInfo>,
@@ -170,39 +172,58 @@ pub struct ClaudeWindow {
 }
 
 impl ClaudeWindow {
+    // ─── Convenience Accessors ──────────────────────────────────────────────────
+
+    /// Get the kitty window ID
+    pub fn id(&self) -> u64 {
+        self.addr.id
+    }
+
+    /// Get the socket path
+    pub fn socket(&self) -> &str {
+        &self.addr.socket
+    }
+
+    /// Check if this window is on the current/default kitty socket
+    pub fn is_current_socket(&self) -> bool {
+        self.addr.is_current_socket()
+    }
+
+    // ─── Operations ─────────────────────────────────────────────────────────────
+
     /// Focus this window
     pub fn focus(&self) -> Result<()> {
-        crate::kitty::focus_pane_on_socket(&self.socket, self.kitty_id)
+        crate::kitty::focus_pane_on_socket(&self.addr.socket, self.addr.id)
     }
 
     /// Send text to this window's input
     pub fn send_text(&self, text: &str) -> Result<()> {
-        crate::kitty::send_text_on_socket(&self.socket, self.kitty_id, text)
+        crate::kitty::send_text_on_socket(&self.addr.socket, self.addr.id, text)
     }
 
     /// Set a user variable on this window
     pub fn set_user_var(&self, key: &str, value: &str) -> Result<()> {
-        crate::kitty::set_user_var_on_socket(&self.socket, self.kitty_id, key, value)
+        crate::kitty::set_user_var_on_socket(&self.addr.socket, self.addr.id, key, value)
     }
 
     /// Set the title of this window
     pub fn set_title(&self, title: &str) -> Result<()> {
-        crate::kitty::set_title_on_socket(&self.socket, self.kitty_id, title)
+        crate::kitty::set_title_on_socket(&self.addr.socket, self.addr.id, title)
     }
 
     /// Get the full scrollback buffer
     pub fn scrollback(&self) -> Result<String> {
-        crate::kitty::get_scrollback_on_socket(&self.socket, self.kitty_id)
+        crate::kitty::get_scrollback_on_socket(&self.addr.socket, self.addr.id)
     }
 
     /// Get the last N lines of scrollback
     pub fn recent_scrollback(&self, lines: usize) -> Result<String> {
-        crate::kitty::get_recent_scrollback_on_socket(&self.socket, self.kitty_id, lines)
+        crate::kitty::get_recent_scrollback_on_socket(&self.addr.socket, self.addr.id, lines)
     }
 
     /// Close this window
     pub fn close(&self) -> Result<()> {
-        crate::kitty::close_pane_on_socket(&self.socket, self.kitty_id)
+        crate::kitty::close_pane_on_socket(&self.addr.socket, self.addr.id)
     }
 }
 
@@ -232,8 +253,7 @@ pub fn discover_claude_windows() -> Result<Vec<ClaudeWindow>> {
             let workspace = workspaces.get(&window.platform_window_id).copied();
 
             ClaudeWindow {
-                socket: window.socket.clone(),
-                kitty_id: window.id,
+                addr: window.addr(),
                 title: window.title.clone(),
                 session_id,
                 session_info: None, // Lazy - only load on demand
@@ -266,7 +286,7 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()> {
     if let Some(info) = resolve_session(
         window.session_id.as_deref(),
         &window.title,
-        window.kitty_id,
+        window.id(),
     )? {
         window.session_id = Some(info.session_id.clone());
         window.session_info = Some(info);

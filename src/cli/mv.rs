@@ -99,7 +99,7 @@ pub async fn cmd_mv(
 			for c in &conflicts {
 				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput) {
 					let new_cwd = dest.join(&c.relative_path);
-					println!("  id:{} → cd {}", c.window.kitty_id, new_cwd.display());
+					println!("  id:{} → cd {}", c.window.id(), new_cwd.display());
 				}
 			}
 			println!();
@@ -194,7 +194,7 @@ fn display_conflicts(conflicts: &[ConflictingWindow], source: &Path) {
 		};
 		let title = c.window.title.strip_prefix("✳ ").unwrap_or(&c.window.title);
 		let title_short: String = title.chars().take(40).collect();
-		println!("  {} id:{:<4} \"{}\"", state_str, c.window.kitty_id, title_short);
+		println!("  {} id:{:<4} \"{}\"", state_str, c.window.id(), title_short);
 	}
 	println!();
 }

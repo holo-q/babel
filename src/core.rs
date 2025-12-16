@@ -181,7 +181,7 @@ impl BabelCore {
             }
             CoreMode::Local(state) => {
                 match window_id {
-                    Some(id) => Ok(state.windows.get(&id).cloned()),
+                    Some(id) => Ok(state.find_window_by_id(id).cloned()),
                     None => Ok(state.windows.values().find(|w| w.is_focused).cloned()),
                 }
             }
@@ -286,7 +286,7 @@ impl BabelCore {
             }
             CoreMode::Local(state) => {
                 // Get session ID from our state
-                if let Some(window) = state.windows.get(&window_id) {
+                if let Some(window) = state.find_window_by_id(window_id) {
                     if let Some(session_id) = &window.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::set_icon(&db, session_id, icon)?;
@@ -311,7 +311,7 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(state) => {
-                if let Some(window) = state.windows.get(&window_id) {
+                if let Some(window) = state.find_window_by_id(window_id) {
                     if let Some(session_id) = &window.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::mark_read(&db, session_id)?;
@@ -601,7 +601,7 @@ impl BabelCore {
 
                 // Return the window if found
                 match window_id {
-                    Some(id) => Ok(state.windows.get(&id).cloned()),
+                    Some(id) => Ok(state.find_window_by_id(id).cloned()),
                     None => Ok(None),
                 }
             }
@@ -634,7 +634,7 @@ impl BabelCore {
 
         for win in windows {
             if win.cwd.starts_with(&source) {
-                let state = self.get_window_state(win.kitty_id).await
+                let state = self.get_window_state(win.id()).await
                     .unwrap_or(ActivityState::Unknown);
 
                 let relative_path = win.cwd
@@ -743,17 +743,17 @@ impl BabelCore {
                 let session_id = conflict.window.session_id.as_deref();
 
                 if let Err(e) = self.migrate_terminal(
-                    conflict.window.kitty_id,
+                    conflict.window.id(),
                     &new_cwd,
                     session_id,
                 ).await {
                     warn!(
-                        window_id = conflict.window.kitty_id,
+                        window_id = conflict.window.id(),
                         error = %e,
                         "failed to migrate terminal"
                     );
                 } else {
-                    migrated_terminals.push(conflict.window.kitty_id);
+                    migrated_terminals.push(conflict.window.id());
                 }
             }
         }
@@ -791,7 +791,7 @@ impl BabelCore {
             storage: storage_result,
             directory_moved,
             terminals_migrated: migrated_terminals,
-            active_terminals: active.iter().map(|c| c.window.kitty_id).collect(),
+            active_terminals: active.iter().map(|c| c.window.id()).collect(),
             dry_run: options.dry_run,
         })
     }
@@ -955,7 +955,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 pub async fn resolve_target(core: &BabelCore, target: &str) -> Result<Vec<u64>> {
     if target == "*" {
         let windows = core.windows().await?;
-        Ok(windows.iter().map(|w| w.kitty_id).collect())
+        Ok(windows.iter().map(|w| w.id()).collect())
     } else {
         let id = target.parse::<u64>()
             .map_err(|_| anyhow::anyhow!("invalid target '{}': expected window ID or '*'", target))?;

@@ -55,7 +55,7 @@ pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result
         Target::Window(id) => Ok(vec![*id]),
         Target::All => {
             let windows = core.windows().await?;
-            Ok(windows.iter().map(|w| w.kitty_id).collect())
+            Ok(windows.iter().map(|w| w.id()).collect())
         }
     }
 }

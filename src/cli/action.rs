@@ -32,7 +32,7 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
     let mut windows = core.windows().await?;
 
     for window_id in window_ids {
-        let window = windows.iter_mut().find(|w| w.kitty_id == window_id);
+        let window = windows.iter_mut().find(|w| w.id() == window_id);
 
         let new_title = if let Some(custom) = title {
             // Use custom title as-is
@@ -93,7 +93,7 @@ pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>) -> Result<()> {
         let ws_b = b.workspace.unwrap_or(999);
         ws_a.cmp(&ws_b)
             .then(a.os_window_id.cmp(&b.os_window_id))
-            .then(a.kitty_id.cmp(&b.kitty_id))
+            .then(a.id().cmp(&b.id()))
     });
 
     // Format entries for rofi: "[ws] title │ ~/path"
@@ -120,7 +120,7 @@ pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>) -> Result<()> {
             .unwrap_or_else(|_| win.cwd.display().to_string());
 
         let label = format!("[{}] {} │ {}", ws, title_display, cwd);
-        (win.kitty_id, label)
+        (win.id(), label)
     }).collect();
 
     // Launch rofi

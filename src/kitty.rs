@@ -111,6 +111,55 @@ fn runtime_dir_path() -> String {
 // Data Structures
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Address of a pane across kitty instances
+///
+/// Like a network address but for terminal panes.
+/// Uniquely identifies a pane even when multiple kitty instances exist.
+///
+/// Window IDs are only unique within a single kitty instance. When multiple
+/// kitty instances are running (e.g., after a crash or intentional multi-instance),
+/// the same window ID can exist in different sockets. PaneAddr solves this by
+/// combining socket + id into a composite key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct PaneAddr {
+    /// Socket path (e.g., "unix:/run/user/1000/kitty.sock-12345")
+    pub socket: String,
+    /// Pane ID within that socket's kitty instance
+    pub id: u64,
+}
+
+impl PaneAddr {
+    pub fn new(socket: impl Into<String>, id: u64) -> Self {
+        Self { socket: socket.into(), id }
+    }
+
+    /// Create from KittyPane
+    pub fn from_pane(pane: &KittyPane) -> Self {
+        Self::new(&pane.socket, pane.id)
+    }
+
+    /// Short display form for warnings/logs
+    /// e.g., "42@12345" (window 42 on kitty.sock-12345)
+    pub fn short(&self) -> String {
+        let sock_short = self.socket
+            .rsplit("kitty.sock-")
+            .next()
+            .unwrap_or(&self.socket);
+        format!("{}@{}", self.id, sock_short)
+    }
+
+    /// Check if this pane is on the current/default socket
+    pub fn is_current_socket(&self) -> bool {
+        self.socket == default_socket()
+    }
+}
+
+impl std::fmt::Display for PaneAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.socket, self.id)
+    }
+}
+
 /// A kitty pane with all relevant metadata
 ///
 /// Each pane carries its `socket` so operations can target the correct kitty instance.
@@ -135,6 +184,11 @@ pub struct KittyPane {
 }
 
 impl KittyPane {
+    /// Get the address of this pane
+    pub fn addr(&self) -> PaneAddr {
+        PaneAddr::from_pane(self)
+    }
+
     /// Focus this pane
     pub fn focus(&self) -> Result<()> {
         focus_pane_on_socket(&self.socket, self.id)
@@ -404,8 +458,8 @@ pub fn list_all_panes() -> Result<Vec<KittyPane>> {
     let sockets = find_all_sockets();
     let mut all_panes = Vec::new();
 
-    for socket in sockets {
-        match list_panes_on_socket(&socket) {
+    for socket in &sockets {
+        match list_panes_on_socket(socket) {
             Ok(panes) => all_panes.extend(panes),
             Err(e) => {
                 tracing::debug!(socket = %socket, error = %e, "Failed to query kitty instance");
@@ -544,6 +598,120 @@ pub fn list_windows() -> Result<Vec<KittyPane>> { list_panes() }
 pub fn get_window(id: u64) -> Result<Option<KittyPane>> { get_pane(id) }
 #[doc(hidden)]
 pub fn list_windows_from_socket(socket: &str) -> Result<Vec<KittyPane>> { list_panes_from_socket(socket) }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Public API: Multi-Socket Operations (search all sockets)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of a multi-socket operation
+///
+/// Contains the result and whether the pane was on a non-current socket
+/// (which may warrant a warning to the user).
+#[derive(Debug)]
+pub struct MultiSocketResult<T> {
+    pub result: T,
+    /// The address of the pane that was operated on
+    pub addr: PaneAddr,
+    /// True if the pane was on a non-current socket
+    pub is_non_current: bool,
+}
+
+impl<T> MultiSocketResult<T> {
+    /// Format a warning message if on non-current socket
+    pub fn warning(&self) -> Option<String> {
+        if self.is_non_current {
+            Some(format!("⚠ Operating on non-current socket: {}", self.addr.short()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Focus a pane by ID, searching all sockets
+///
+/// Returns the pane address and whether it was on a non-current socket.
+pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            pane.focus()?;
+            Ok(MultiSocketResult { result: (), addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
+
+/// Send text to a pane by ID, searching all sockets
+pub fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            pane.send_text(text)?;
+            Ok(MultiSocketResult { result: (), addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
+
+/// Get scrollback from a pane by ID, searching all sockets
+pub fn get_scrollback_any(id: u64) -> Result<MultiSocketResult<String>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            let text = pane.scrollback()?;
+            Ok(MultiSocketResult { result: text, addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
+
+/// Set title on a pane by ID, searching all sockets
+pub fn set_title_any(id: u64, title: &str) -> Result<MultiSocketResult<()>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            pane.set_title(title)?;
+            Ok(MultiSocketResult { result: (), addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
+
+/// Set user var on a pane by ID, searching all sockets
+pub fn set_user_var_any(id: u64, key: &str, value: &str) -> Result<MultiSocketResult<()>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            pane.set_user_var(key, value)?;
+            Ok(MultiSocketResult { result: (), addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
+
+/// Close a pane by ID, searching all sockets
+pub fn close_window_any(id: u64) -> Result<MultiSocketResult<()>> {
+    let current = default_socket();
+    match get_pane_all(id)? {
+        Some(pane) => {
+            let addr = pane.addr();
+            let is_non_current = pane.socket != current;
+            pane.close()?;
+            Ok(MultiSocketResult { result: (), addr, is_non_current })
+        }
+        None => bail!("Window {} not found in any kitty instance", id),
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Workspace Operations (wmctrl)

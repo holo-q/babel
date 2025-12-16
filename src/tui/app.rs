@@ -304,7 +304,7 @@ impl TuiApp {
                 if let Some(term) = self.terminals.get(self.window_selected) {
                     if term.is_claude {
                         // For Claude terminals, show full ClaudeWindow details
-                        if let Some(window) = self.windows.iter().find(|w| w.kitty_id == term.kitty_id) {
+                        if let Some(window) = self.windows.iter().find(|w| w.id() == term.addr.id) {
                             self.detail_content = DetailContent::Window(Box::new(window.clone()));
                         } else {
                             // Fallback to TerminalInfo if window not found
