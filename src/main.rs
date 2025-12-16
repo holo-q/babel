@@ -66,6 +66,16 @@ async fn main() -> Result<()> {
     // Connect to daemon or use ephemeral mode
     let mut core = BabelCore::connect().await;
 
+    // Print mode indicator to stderr for commands that use BabelCore
+    // Skip for daemon/tui/monitor which have their own connection handling
+    let show_mode = !matches!(
+        cli.command,
+        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. }
+    );
+    if show_mode && !cli.json {
+        eprintln!("[{}]", core.mode_label());
+    }
+
     // Route to appropriate handler based on subcommand
     match cli.command {
         // ─── Daemon Management ───────────────────────────────────────────────────

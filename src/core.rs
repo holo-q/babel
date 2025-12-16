@@ -90,6 +90,14 @@ impl BabelCore {
         matches!(self.mode, CoreMode::Connected)
     }
 
+    /// Get mode label for display (e.g., "daemon" or "local")
+    pub fn mode_label(&self) -> &'static str {
+        match &self.mode {
+            CoreMode::Connected => "daemon",
+            CoreMode::Local(_) => "local",
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Query Operations (read-only)
     // ═══════════════════════════════════════════════════════════════════════════
