@@ -27,34 +27,50 @@ Binary output: `target/release/babel`
 
 ```bash
 # List all discovered Claude sessions
-babel list
+babel ls              # Compact view with activity state indicators
+babel ls -d           # Detailed view with fingerprint data
+babel ls --all        # Scan all kitty instances
 
-# Show status of a window
-babel status <window_id>
+# Check specific window status
+babel get-window 42   # By window ID
+babel get-window      # Focused Claude window
 
-# Focus a Claude window
-babel focus <window_id>
+# Window control
+babel focus 42        # Focus window (or omit ID for rofi picker)
+babel send 42 "text"  # Send text to window
+babel send * "text"   # Broadcast to all windows
 
-# Send text to a window
-babel send <window_id> "Your prompt here"
-
-# Tag a window with custom icon
-babel tag <window_id> 🔥
-
-# Mark conversation as read
-babel mark-read <window_id>
+# Session metadata
+babel set-icon 42 🔥   # Custom icon indicator
+babel set-read 42      # Mark as read
+babel set-title 42     # Auto-title from session
+babel set-title * "My Title"  # Custom title
 
 # View conversation history
-babel history --limit 10
+babel history         # Recent conversations
+babel history -l 50   # Limit results
+babel history abc123  # Specific session ID
 
-# Open a specific session
-babel open <session_id>
+# Fire-and-forget Claude launch
+babel fire "Implement feature X"           # Auto-detect CWD
+babel fire -d ~/project "Fix the bug"      # Explicit directory
+babel fire-ls                              # List running fire tasks
+babel fire-clean                           # Clean up finished tasks
 
-# Fire-and-forget Claude launch (smart CWD detection)
-babel fire
+# Directory migration (preserves Claude history)
+babel mv ~/old ~/new          # Move + update history paths
+babel mv --dry ~/old ~/new    # Preview changes only
+babel mv --history-only       # Just update history
 
-# Fire with explicit directory
-babel fire /path/to/project
+# Workspace sets
+babel wset save mysetup       # Save current layout
+babel wset load mysetup       # Restore layout
+babel wset ls                 # List saved sets
+
+# Daemon mode
+babel daemon           # Start daemon (use systemctl for production)
+babel monitor          # Stream daemon events
+babel tui              # Interactive debug console
 ```
 
 ## Architecture
@@ -97,15 +113,28 @@ Parses Claude's JSONL conversation format:
 
 ## Development Status
 
-**Current**: Project scaffold with module stubs
+**Current**: Feature-complete CLI with daemon mode
 
-**TODO**:
-- [ ] Implement kitty protocol wrappers
-- [ ] Complete session discovery correlation logic
-- [ ] Build overlay UI for session selection
-- [ ] Integrate state detection into CLI commands
-- [ ] Implement full fire.rs CWD detection from kitty JSON
-- [ ] Add tests for discovery heuristics
+### Completed
+- [x] Kitty protocol wrappers (remote control, scrollback, user_vars)
+- [x] Session discovery via fingerprinting + scrollback analysis
+- [x] Activity state detection (idle, thinking, tool use, awaiting input)
+- [x] Overlay metadata (icons, read/unread, chapter history, notes)
+- [x] wmctrl-like window control (focus, send-text, set-title)
+- [x] Fire mode with smart CWD detection
+- [x] `babel mv` - directory migration preserving Claude history
+- [x] WSet save/load for workspace layouts
+- [x] Daemon mode with IPC and event streaming
+- [x] Multi-socket scan (`babel ls --all`)
+- [x] Auto-unread on AwaitingInput state change
+
+### In Progress
+- [ ] Simplified prompt representations via Haiku summarization (40%)
+- [ ] Conversation pager TUI (spec in Docs/17-conversation-pager-spec.md)
+
+### Planned
+- [ ] Launch Claude with workspace context (ambient awareness)
+- [ ] Captain Claude orchestration (multi-session coordination)
 - [ ] Performance profiling for large conversation histories
 
 ## Design Notes
