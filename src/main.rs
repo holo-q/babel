@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
             cli::query::cmd_ls(&core, cli.json, details).await
         }
 
-        Commands::LsTerminals { all } => {
-            cli::query::cmd_ls_terminals(&core, cli.json, all).await
+        Commands::LsTerminals => {
+            cli::query::cmd_ls_terminals(&core, cli.json).await
         }
 
         Commands::LsPanes => {

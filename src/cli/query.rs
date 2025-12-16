@@ -78,141 +78,66 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 }
 
 /// List all kitty terminals (not just Claude sessions)
-pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool, scan_all_sockets: bool) -> Result<()> {
-	if scan_all_sockets {
-		// Scan ALL kitty sockets on the system
-		let instances = discover_all_instances();
-
-		if json {
-			println!("{}", serde_json::to_string_pretty(&instances)?);
-			return Ok(());
-		}
-
-		if instances.is_empty() {
-			println!("No kitty sockets found");
-			return Ok(());
-		}
-
-		let total_windows: usize = instances.iter().map(|i| i.panes.len()).sum();
-		let responsive: usize = instances.iter().filter(|i| i.is_responsive).count();
-
-		println!("Kitty instances ({} sockets, {} responsive, {} total windows):", instances.len(), responsive, total_windows);
-		println!();
-
-		for instance in &instances {
-			let status = if instance.is_current {
-				"● current"
-			} else if instance.is_responsive {
-				"○ other"
-			} else {
-				"✗ dead"
-			};
-
-			let pid_str = instance.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
-
-			println!("  {} [PID {}] {} windows", status, pid_str, instance.panes.len());
-
-			if let Some(ref err) = instance.error {
-				println!("    Error: {}", err);
-				continue;
-			}
-
-			// Show windows for this instance
-			for win in &instance.panes {
-				let signals = detect_claude_signals(win);
-				let cmdline = win.foreground_processes
-				                 .first()
-				                 .and_then(|p| p.cmdline.first())
-				                 .map(|s| s.rsplit('/').next().unwrap_or(s))
-				                 .unwrap_or("?");
-
-				let title: String = win.title.chars().take(40).collect();
-				let title = if win.title.len() > 40 { format!("{}…", title) } else { title };
-
-				println!("    {:>5} {} {:8}  {}", win.id, signals.indicator(), cmdline, title);
-			}
-			println!();
-		}
-
-		if instances.len() > 1 {
-			println!("⚠ Multiple kitty instances detected - terminals may be unreachable!");
-			println!("  Consider: pkill kitty && kitty (to consolidate)");
-		}
-
-		return Ok(());
-	}
-
-	// Default: just show current socket
-	let windows = list_panes().context("Failed to list kitty panes")?;
+///
+/// Scans ALL kitty sockets on the system, showing terminals from all instances.
+pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
+	let instances = discover_all_instances();
 
 	if json {
-		// Include detection signals in JSON output
-		let with_signals: Vec<_> = windows.iter().map(|w| {
-			serde_json::json!({
-                "window": w,
-                "claude_signals": detect_claude_signals(w),
-            })
-		}).collect();
-		println!("{}", serde_json::to_string_pretty(&with_signals)?);
+		println!("{}", serde_json::to_string_pretty(&instances)?);
 		return Ok(());
 	}
 
-	if windows.is_empty() {
-		println!("No kitty windows found");
+	if instances.is_empty() {
+		println!("No kitty sockets found");
 		return Ok(());
 	}
 
-	// Count Claude sessions by detection type
-	let mut running = 0;
-	let mut titled = 0;
-	let mut tagged = 0;
-	let mut other = 0;
+	let total_windows: usize = instances.iter().map(|i| i.panes.len()).sum();
+	let responsive: usize = instances.iter().filter(|i| i.is_responsive).count();
 
-	for win in &windows {
-		let signals = detect_claude_signals(win);
-		if signals.process_running {
-			running += 1;
-		} else if signals.title_indicator {
-			titled += 1;
-		} else if signals.babel_tagged {
-			tagged += 1;
-		} else {
-			other += 1;
-		}
-	}
-
-	println!("Kitty terminals ({} total):", windows.len());
-	println!("  ● running: {}  ◐ titled: {}  ○ tagged: {}  other: {}", running, titled, tagged, other);
+	println!("Kitty instances ({} sockets, {} responsive, {} total windows):", instances.len(), responsive, total_windows);
 	println!();
-	println!("  {:>5}  {}  {:8}  {}", "ID", "⬤", "PROCESS", "TITLE");
-	println!("  {:>5}  {}  {:8}  {}", "-----", "-", "--------", "-----");
 
-	for win in &windows {
-		let signals = detect_claude_signals(win);
-
-		let cmdline = win.foreground_processes
-		                 .first()
-		                 .and_then(|p| p.cmdline.first())
-		                 .map(|s| {
-			                 // Extract just the command name from path
-			                 s.rsplit('/').next().unwrap_or(s)
-		                 })
-		                 .unwrap_or("?");
-
-		// Truncate title
-		let title: String = win.title.chars().take(50).collect();
-		let title = if win.title.len() > 50 {
-			format!("{}…", title)
+	for instance in &instances {
+		let status = if instance.is_current {
+			"● current"
+		} else if instance.is_responsive {
+			"○ other"
 		} else {
-			title
+			"✗ dead"
 		};
 
-		println!("  {:>5}  {}  {:8}  {}", win.id, signals.indicator(), cmdline, title);
+		let pid_str = instance.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+
+		println!("  {} [PID {}] {} windows", status, pid_str, instance.panes.len());
+
+		if let Some(ref err) = instance.error {
+			println!("    Error: {}", err);
+			continue;
+		}
+
+		// Show windows for this instance
+		for win in &instance.panes {
+			let signals = detect_claude_signals(win);
+			let cmdline = win.foreground_processes
+			                 .first()
+			                 .and_then(|p| p.cmdline.first())
+			                 .map(|s| s.rsplit('/').next().unwrap_or(s))
+			                 .unwrap_or("?");
+
+			let title: String = win.title.chars().take(40).collect();
+			let title = if win.title.len() > 40 { format!("{}…", title) } else { title };
+
+			println!("    {:>5} {} {:8}  {}", win.id, signals.indicator(), cmdline, title);
+		}
+		println!();
 	}
 
-	println!();
-	println!("Legend: ● = claude running, ◐ = has ✳ title, ○ = babel-tagged");
-	println!("Tip: Use --all to scan all kitty sockets (finds orphaned terminals)");
+	if instances.len() > 1 {
+		println!("⚠ Multiple kitty instances detected - terminals may be unreachable!");
+		println!("  Consider: pkill kitty && kitty (to consolidate)");
+	}
 
 	Ok(())
 }

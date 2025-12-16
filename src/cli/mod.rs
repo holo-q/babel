@@ -178,14 +178,10 @@ pub enum Commands {
 
     /// List all kitty terminals (not just Claude)
     ///
-    /// By default, shows terminals from the current kitty socket.
-    /// Use --all to scan ALL kitty sockets on the system (finds orphaned terminals).
+    /// Scans ALL kitty sockets on the system, showing terminals from all
+    /// kitty instances. Useful for finding orphaned terminals.
     #[command()]
-    LsTerminals {
-        /// Scan all kitty sockets (finds orphaned terminals on other instances)
-        #[arg(short, long)]
-        all: bool,
-    },
+    LsTerminals,
 
     /// List all kitty panes with their IDs
     ///
