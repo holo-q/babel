@@ -37,7 +37,7 @@ use crate::kitty::{
     list_all_panes, discover_all_instances, default_socket,
 };
 use crate::utility::claude_discovery::{get_window_activity_state, detect_claude_signals};
-use crate::babel_storage::{init_db, mark_read, set_icon};
+use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -425,6 +425,16 @@ impl BabelState {
 						new_state,
 					});
 					self.window_states.insert(addr.clone(), new_state);
+
+					// Auto-unread when Claude finishes working and awaits input
+					// This ensures users see the yellow dot when there's new content to review
+					if new_state == scrollparse::claude::ActivityState::AwaitingInput {
+						if let Some(ref session_id) = window.session_id {
+							if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
+								tracing::warn!(session_id, error = %e, "Failed to auto-unread session");
+							}
+						}
+					}
 				}
 				None => {
 					// New window - initialize state (no event, WindowAdded already fired)
