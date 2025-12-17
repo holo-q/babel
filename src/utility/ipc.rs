@@ -14,6 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::utility::claude_storage::SessionInfo;
 use crate::utility::claude_discovery::ClaudeWindow;
 use crate::daemon::TerminalInfo;
+use crate::kitty::KittyPane;
 use crate::events::EventMessage;
 use crate::wset::WSetSummary;
 
@@ -31,6 +32,10 @@ pub enum Request {
     /// List all kitty terminals (not just Claude)
     /// Useful for seeing the full terminal flow and watching transitions
     ListTerminals,
+
+    /// List raw kitty panes from all sockets
+    /// Unlike ListTerminals, this returns raw KittyPane data without enrichment
+    ListPanes,
 
     /// List all Claude windows with fingerprint data (slow - extracts scrollback)
     ListWithFingerprints,
@@ -117,6 +122,9 @@ pub enum Response {
 
     /// Success with all terminal list (not just Claude)
     Terminals { terminals: Vec<TerminalInfo> },
+
+    /// Success with raw kitty panes from all sockets
+    Panes { panes: Vec<KittyPane> },
 
     /// Success with single window
     /// Boxed to reduce enum size (ClaudeWindow is 432 bytes)

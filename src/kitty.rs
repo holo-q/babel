@@ -38,16 +38,24 @@ use anyhow::{Result, Context, bail};
 
 /// Get the default kitty socket path for remote control.
 ///
-/// Finds the first `kitty.sock-*` in XDG_RUNTIME_DIR.
-/// Falls back to `kitty.sock` if none found (usually doesn't exist).
+/// Priority:
+/// 1. KITTY_LISTEN_ON environment variable (set by kitty in its shells)
+/// 2. First `kitty.sock-*` found in XDG_RUNTIME_DIR
+/// 3. Fallback to `kitty.sock` (usually doesn't exist)
 ///
 /// Note: kitten auto-detects from TTY, but systemd services have no TTY,
 /// so we must explicitly pass `--to unix:$socket_path`.
 pub fn default_socket() -> String {
+    // Priority 1: KITTY_LISTEN_ON env var (most authoritative - set by running kitty)
+    if let Ok(socket) = std::env::var("KITTY_LISTEN_ON") {
+        if !socket.is_empty() {
+            return socket;
+        }
+    }
+
     let runtime_dir = runtime_dir_path();
 
-    // Find kitty.sock-* sockets (the ACTUAL socket kitty creates)
-    // Despite listen_on config saying "kitty.sock", kitty creates "kitty.sock-$PID"
+    // Priority 2: Find kitty.sock-* sockets (kitty creates "kitty.sock-$PID")
     if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
         let sockets: Vec<_> = entries
             .filter_map(|e| e.ok())

@@ -1365,6 +1365,17 @@ mod handlers {
 		Response::Terminals { terminals }
 	}
 
+	/// List raw kitty panes from all sockets (no enrichment)
+	///
+	/// Unlike list_terminals, this returns raw KittyPane data directly from kitty,
+	/// without any babel enrichment. Queries all responsive kitty instances.
+	pub async fn list_panes() -> Response {
+		match crate::kitty::list_all_panes() {
+			Ok(panes) => Response::Panes { panes },
+			Err(e) => Response::Error { message: format!("Failed to list panes: {}", e) },
+		}
+	}
+
 	/// List windows with fingerprints (expensive - extracts from scrollback)
 	pub async fn list_with_fingerprints(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
@@ -1722,6 +1733,7 @@ async fn process_request(
 		// ─── Query Handlers ─────────────────────────────────────────────────────
 		Request::List => handlers::list(state).await,
 		Request::ListTerminals => handlers::list_terminals(state).await,
+		Request::ListPanes => handlers::list_panes().await,
 		Request::ListWithFingerprints => handlers::list_with_fingerprints(state).await,
 		Request::Status { window_id } => handlers::status(state, window_id).await,
 		Request::History { limit } => handlers::history(limit),

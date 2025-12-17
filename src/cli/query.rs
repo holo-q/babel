@@ -11,8 +11,7 @@ use console::{style, Style};
 use claude_babel::utility::claude_storage::SessionInfo;
 use claude_babel::core::BabelCore;
 use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
-use claude_babel::fingerprint::extract_from_scrollback;
-use claude_babel::kitty::{discover_all_instances, get_scrollback, list_panes};
+use claude_babel::kitty::discover_all_instances;
 use claude_babel::babel_storage::{get_metadata, init_db};
 use claude_babel::ActivityState;
 
@@ -26,7 +25,8 @@ use claude_babel::ActivityState;
 /// sockets are displayed but fenced from operations that require the current socket.
 pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 	let mut windows = if details {
-		get_windows_with_fingerprints(core).await?
+		// Use core method which properly handles daemon/local mode and multi-socket
+		core.windows_with_fingerprints().await?
 	} else {
 		core.windows().await?
 	};
@@ -146,41 +146,65 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
 	Ok(())
 }
 
-/// List all kitty panes grouped by OS window
-pub async fn cmd_ls_panes(_core: &BabelCore, json: bool) -> Result<()> {
-	let windows = list_panes().context("Failed to list kitty panes")?;
+/// List all kitty panes grouped by socket and OS window
+///
+/// Now queries all responsive kitty sockets via the core (daemon or local mode).
+pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
+	let panes = core.panes().await.context("Failed to list kitty panes")?;
 
 	if json {
-		println!("{}", serde_json::to_string_pretty(&windows)?);
+		println!("{}", serde_json::to_string_pretty(&panes)?);
 		return Ok(());
 	}
 
-	if windows.is_empty() {
+	if panes.is_empty() {
 		println!("No kitty panes found");
 		return Ok(());
 	}
 
-	// Group by OS window
-	let mut by_os_window: HashMap<u64, Vec<_>> = HashMap::new();
-	for win in windows {
-		by_os_window.entry(win.os_window_id).or_default().push(win);
+	// Group by socket, then by OS window
+	let mut by_socket: HashMap<String, HashMap<u64, Vec<_>>> = HashMap::new();
+	for pane in panes {
+		by_socket
+			.entry(pane.socket.clone())
+			.or_default()
+			.entry(pane.os_window_id)
+			.or_default()
+			.push(pane);
 	}
 
-	let total_panes: usize = by_os_window.values().map(|v| v.len()).sum();
-	println!("Kitty panes ({} panes in {} OS windows):", total_panes, by_os_window.len());
+	let total_panes: usize = by_socket.values()
+		.flat_map(|s| s.values())
+		.map(|v| v.len())
+		.sum();
+	let total_sockets = by_socket.len();
+	let total_os_windows: usize = by_socket.values().map(|s| s.len()).sum();
+
+	println!("Kitty panes ({} panes in {} OS windows across {} socket{}):",
+		total_panes, total_os_windows, total_sockets,
+		if total_sockets == 1 { "" } else { "s" });
 	println!();
 
-	for (os_id, panes) in by_os_window.iter() {
-		println!("  OS Window {} ({} panes):", os_id, panes.len());
-		for win in panes {
-			let title: String = win.title.chars().take(50).collect();
-			let title = if win.title.len() > 50 {
-				format!("{}…", title)
-			} else {
-				title
-			};
-			let focus = if win.is_focused { "*" } else { " " };
-			println!("    {:>5}{} {}", win.id, focus, title);
+	let current_socket = claude_babel::kitty::default_socket();
+	for (socket, os_windows) in by_socket.iter() {
+		// Show socket indicator: ● current, ○ other
+		let is_current = socket == &current_socket;
+		let marker = if is_current { "●" } else { "○" };
+		let socket_short = socket.rsplit("kitty.sock-").next().unwrap_or(socket);
+		println!("  {} Socket {} ({} OS windows)", marker, socket_short, os_windows.len());
+
+		for (os_id, panes) in os_windows.iter() {
+			println!("    OS Window {} ({} panes):", os_id, panes.len());
+			for pane in panes {
+				let title: String = pane.title.chars().take(45).collect();
+				let title = if pane.title.len() > 45 {
+					format!("{}…", title)
+				} else {
+					title
+				};
+				let focus = if pane.is_focused { "*" } else { " " };
+				println!("      {:>5}{} {}", pane.id, focus, title);
+			}
 		}
 	}
 
@@ -279,24 +303,6 @@ pub async fn cmd_history(core: &BabelCore, sessions: Vec<String>, limit: usize, 
 // Helper Functions - Data Fetching
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Get all Claude windows with fingerprints extracted from scrollback
-/// This is used by cmd_list when --details is requested
-async fn get_windows_with_fingerprints(core: &BabelCore) -> Result<Vec<ClaudeWindow>> {
-	// Get windows via core (handles daemon/direct fallback)
-	let mut windows = core.windows().await?;
-
-	// Extract fingerprints for windows that don't have them
-	for win in &mut windows {
-		if win.fingerprint.is_none() {
-			if let Ok(scrollback) = get_scrollback(win.id()) {
-				let fp = extract_from_scrollback(&scrollback);
-				win.fingerprint = Some(fp);
-			}
-		}
-	}
-	Ok(windows)
-}
-
 /// Show available Claude windows for user selection
 async fn show_available_windows(core: &BabelCore) -> Result<()> {
 	let windows = core.windows().await?;
@@ -307,10 +313,10 @@ async fn show_available_windows(core: &BabelCore) -> Result<()> {
 	}
 
 	println!("Available Claude windows:");
-	for w in &windows {
-		let title = w.title.strip_prefix("✳ ").unwrap_or(&w.title);
+	for wnd in &windows {
+		let title = wnd.title.strip_prefix("✳ ").unwrap_or(&wnd.title);
 		let title: String = title.chars().take(30).collect();
-		println!("  {:>5}  {:30}  {}", w.id(), title, w.cwd.display());
+		println!("  {:>5}  {:30}  {}", wnd.id(), title, wnd.cwd.display());
 	}
 	Ok(())
 }
@@ -320,23 +326,27 @@ async fn show_available_windows(core: &BabelCore) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Print a single window in compact format
-pub fn print_window(win: &ClaudeWindow) -> Result<()> {
+pub fn print_window(wnd: &ClaudeWindow) -> Result<()> {
 	let conn = init_db()?;
 
 	// Get overlay metadata if we have a session ID
-	let meta = win
+	let meta = wnd
 		.session_id
 		.as_ref()
 		.and_then(|id| get_metadata(&conn, id).ok().flatten());
 
 	// Indicators
-	let focus_indicator = if win.is_focused { "▸" } else { " " };
+	let focus_indicator = if wnd.is_focused { "▸" } else { " " };
 	let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
 	let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
 
+	// Socket indicator - show warning for windows on non-current kitty instance
+	let current_socket = claude_babel::kitty::default_socket();
+	let is_current_socket = wnd.socket() == current_socket;
+
 	// Activity state indicator - shows what Claude is doing right now
 	// ⚡ Thinking (yellow), ⚙ ToolUse (cyan), ◆ AwaitingInput (green), ○ Idle (dim), ● Unknown (blue)
-	let (state_icon, state_style) = match win.activity_state {
+	let (state_icon, state_style) = match wnd.activity_state {
 		Some(ActivityState::Thinking) => ("⚡", Style::new().yellow()),
 		Some(ActivityState::ToolUse) => ("⚙", Style::new().cyan()),
 		Some(ActivityState::AwaitingInput) => ("◆", Style::new().green()),
@@ -345,12 +355,12 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	};
 
 	// Title - strip ✳ prefix if present, use summary from session if available
-	let raw_title = win
+	let raw_title = wnd
 		.session_info
 		.as_ref()
 		.and_then(|s| s.summaries.first())
 		.map(|s| s.summary.as_str())
-		.unwrap_or(&win.title);
+		.unwrap_or(&wnd.title);
 	let title = raw_title.strip_prefix("✳ ").unwrap_or(raw_title);
 
 	// Styles
@@ -359,7 +369,7 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	let yellow = Style::new().yellow();
 
 	// Build the line
-	let id_str = format!("{:>3}", win.id());
+	let id_str = format!("{:>3}", wnd.id());
 
 	// Unread dot or custom icon
 	let marker = if let Some(icon) = custom_icon {
@@ -371,10 +381,10 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	};
 
 	// Compact cwd - just the last component or ~ prefix
-	let cwd_display = win.cwd
+	let cwd_display = wnd.cwd
 	                     .strip_prefix(dirs::home_dir().unwrap_or_default())
 	                     .map(|p| format!("~/{}", p.display()))
-	                     .unwrap_or_else(|_| win.cwd.display().to_string());
+	                     .unwrap_or_else(|_| wnd.cwd.display().to_string());
 
 	// Truncate cwd if too long
 	let cwd_short = if cwd_display.len() > 30 {
@@ -384,21 +394,29 @@ pub fn print_window(win: &ClaudeWindow) -> Result<()> {
 	};
 
 	// Format: " ▸●⚡123 Title                        ~/path"
-	// Components: focus | unread/icon | state | id | title | cwd
+	// Components: focus | unread/icon | state | id | title | cwd [socket]
+	// Socket indicator: nothing for current, ⚠sock-XXXXX for non-current
 	print!(" {}{}{}", focus_indicator, marker, state_style.apply_to(state_icon));
-	print!("{} ", if win.is_focused { bold.apply_to(&id_str) } else { dim.apply_to(&id_str) });
-	print!("{}", if win.is_focused { yellow.apply_to(title) } else { Style::new().apply_to(title) });
-	println!("  {}", dim.apply_to(&cwd_short));
+	print!("{} ", if wnd.is_focused { bold.apply_to(&id_str) } else { dim.apply_to(&id_str) });
+	print!("{}", if wnd.is_focused { yellow.apply_to(title) } else { Style::new().apply_to(title) });
+	print!("  {}", dim.apply_to(&cwd_short));
+
+	// Show socket warning for non-current socket
+	if !is_current_socket {
+		let sock_short = wnd.socket().rsplit("kitty.sock-").next().unwrap_or("other");
+		print!(" {}", Style::new().red().apply_to(format!("⚠{}", sock_short)));
+	}
+	println!();
 
 	Ok(())
 }
 
 /// Print a single window in detailed format with all metadata
-pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
+pub fn print_window_detailed(wnd: &ClaudeWindow) -> Result<()> {
 	let conn = init_db()?;
 
 	// Get overlay metadata if we have a session ID
-	let meta = win
+	let meta = wnd
 		.session_id
 		.as_ref()
 		.and_then(|id| get_metadata(&conn, id).ok().flatten());
@@ -410,22 +428,22 @@ pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
 	let cyan = Style::new().cyan();
 
 	// Title - strip ✳ prefix
-	let raw_title = win
+	let raw_title = wnd
 		.session_info
 		.as_ref()
 		.and_then(|s| s.summaries.first())
 		.map(|s| s.summary.as_str())
-		.unwrap_or(&win.title);
+		.unwrap_or(&wnd.title);
 	let title = raw_title.strip_prefix("✳ ").unwrap_or(raw_title);
 
 	// Focus/unread indicators
-	let focus_marker = if win.is_focused { "▸ " } else { "  " };
+	let focus_marker = if wnd.is_focused { "▸ " } else { "  " };
 	let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
 
 	// Header line: focus + ID + title
 	print!("{}", focus_marker);
-	print!("{} ", if win.is_focused { bold.apply_to(format!("[{}]", win.id())) } else { dim.apply_to(format!("[{}]", win.id())) });
-	if win.is_focused {
+	print!("{} ", if wnd.is_focused { bold.apply_to(format!("[{}]", wnd.id())) } else { dim.apply_to(format!("[{}]", wnd.id())) });
+	if wnd.is_focused {
 		println!("{}", yellow.apply_to(title));
 	} else {
 		println!("{}", title);
@@ -435,15 +453,15 @@ pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
 	let indent = "      ";
 
 	// CWD - full path
-	let cwd_display = win.cwd
+	let cwd_display = wnd.cwd
 	                     .strip_prefix(dirs::home_dir().unwrap_or_default())
 	                     .map(|p| format!("~/{}", p.display()))
-	                     .unwrap_or_else(|_| win.cwd.display().to_string());
+	                     .unwrap_or_else(|_| wnd.cwd.display().to_string());
 	println!("{}{} {}", indent, dim.apply_to("cwd"), cwd_display);
 
 	// Session ID with confidence if fingerprint matched
-	if let Some(ref session_id) = win.session_id {
-		if let Some(confidence) = win.match_confidence {
+	if let Some(ref session_id) = wnd.session_id {
+		if let Some(confidence) = wnd.match_confidence {
 			println!("{}{} {} ({:?} confidence)",
 			         indent,
 			         dim.apply_to("session"),
@@ -456,7 +474,7 @@ pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
 	}
 
 	// Fingerprint data if available
-	if let Some(ref fp) = win.fingerprint {
+	if let Some(ref fp) = wnd.fingerprint {
 		println!("{}{}", indent, dim.apply_to("fingerprint:"));
 
 		if let Some(ref first) = fp.first_prompt {
@@ -483,7 +501,7 @@ pub fn print_window_detailed(win: &ClaudeWindow) -> Result<()> {
 	}
 
 	// Session info (when available)
-	if let Some(ref info) = win.session_info {
+	if let Some(ref info) = wnd.session_info {
 		// Project path
 		let project_display = info.project
 		                          .strip_prefix(dirs::home_dir().unwrap_or_default())

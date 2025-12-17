@@ -146,6 +146,29 @@ impl BabelCore {
         }
     }
 
+    /// Get raw kitty panes from all sockets
+    ///
+    /// Returns raw KittyPane data without babel enrichment. Queries all
+    /// responsive kitty instances directly. Useful for low-level kitty inspection.
+    pub async fn panes(&self) -> Result<Vec<kitty::KittyPane>> {
+        match &self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::ListPanes).await {
+                    Ok(Response::Panes { panes }) => Ok(panes),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        warn!("daemon request failed: {}", e);
+                        bail!("daemon connection failed: {}", e)
+                    }
+                }
+            }
+            CoreMode::Local(_) => {
+                // Query kitty directly - same as daemon does
+                kitty::list_all_panes()
+            }
+        }
+    }
+
     /// Get windows with fingerprints extracted from scrollback
     pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudeWindow>> {
         match &self.mode {
