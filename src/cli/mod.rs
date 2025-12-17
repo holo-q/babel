@@ -14,6 +14,7 @@ pub mod action;
 pub mod mv;
 pub mod fingerprint;
 pub mod wset;
+pub mod legend;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands

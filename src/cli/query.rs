@@ -14,6 +14,7 @@ use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindo
 use claude_babel::kitty::discover_all_instances;
 use claude_babel::babel_storage::{get_metadata, init_db};
 use claude_babel::ActivityState;
+use crate::cli::legend::Legend;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Core Query Commands
@@ -77,6 +78,9 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 			print_window(win)?;
 		}
 	}
+
+	// Print legend showing what the symbols mean
+	Legend::for_ls().print();
 
 	Ok(())
 }
@@ -143,6 +147,11 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
 		println!("  Consider: pkill kitty && kitty (to consolidate)");
 	}
 
+	// Print legend explaining socket status symbols (only in human-readable mode)
+	if !json {
+		Legend::for_ls_terminals().print();
+	}
+
 	Ok(())
 }
 
@@ -207,6 +216,8 @@ pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
 			}
 		}
 	}
+
+	Legend::for_ls_panes().print();
 
 	Ok(())
 }
@@ -329,6 +340,9 @@ pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 		}
 		println!();
 	}
+
+	// Print legend showing socket status symbols and focused indicator
+	Legend::for_ls_sockets().print();
 
 	Ok(())
 }
