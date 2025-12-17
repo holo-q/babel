@@ -82,7 +82,7 @@ use crate::kitty::{
     focus_window_any, get_scrollback_any, send_text_any,
     list_all_panes, discover_all_instances, default_socket,
 };
-use crate::utility::claude_discovery::{get_window_activity_state, detect_claude_signals};
+use crate::utility::claude_discovery::{get_window_activity_with_scrollback, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
@@ -156,6 +156,106 @@ pub struct SocketStatus {
 	pub last_error: Option<String>,
 }
 
+/// Per-window scrollback activity tracking for ActivityPulse events
+///
+/// Tracks scrollback changes to detect when Claude is outputting tokens
+/// or executing tools. Used to emit fine-grained activity pulses for
+/// reactive UI animations in frontends like richspace-babel.
+#[derive(Debug, Clone)]
+pub struct ScrollbackActivity {
+	/// Fast hash of scrollback content (for change detection)
+	/// Using FxHash for speed - collisions are tolerable for this use case
+	pub content_hash: u64,
+	/// Scrollback length in bytes (for computing delta intensity)
+	pub byte_length: usize,
+	/// Recent delta sizes (rolling window for intensity smoothing)
+	/// Stored as (bytes_delta, timestamp) pairs
+	pub recent_deltas: std::collections::VecDeque<(usize, Instant)>,
+	/// Timestamp of last content change
+	pub last_change: Option<Instant>,
+}
+
+impl ScrollbackActivity {
+	pub fn new() -> Self {
+		Self {
+			content_hash: 0,
+			byte_length: 0,
+			recent_deltas: std::collections::VecDeque::with_capacity(10),
+			last_change: None,
+		}
+	}
+
+	/// Update with new scrollback content, return (changed, delta_bytes)
+	pub fn update(&mut self, scrollback: &str) -> (bool, usize) {
+		use std::hash::{Hash, Hasher};
+		use std::collections::hash_map::DefaultHasher;
+
+		// Fast hash (FxHash would be better but DefaultHasher is fine)
+		let mut hasher = DefaultHasher::new();
+		scrollback.hash(&mut hasher);
+		let new_hash = hasher.finish();
+
+		let new_len = scrollback.len();
+		let delta = new_len.saturating_sub(self.byte_length);
+
+		if new_hash != self.content_hash {
+			self.content_hash = new_hash;
+			self.byte_length = new_len;
+			self.last_change = Some(Instant::now());
+
+			// Track delta for intensity smoothing
+			self.recent_deltas.push_back((delta, Instant::now()));
+			// Keep only last 10 deltas
+			while self.recent_deltas.len() > 10 {
+				self.recent_deltas.pop_front();
+			}
+
+			(true, delta)
+		} else {
+			(false, 0)
+		}
+	}
+
+	/// Compute activity intensity from recent deltas (0.0-1.0)
+	///
+	/// Higher intensity when:
+	/// - Recent large deltas (lots of output)
+	/// - Frequent changes (rapid token output)
+	pub fn compute_intensity(&self) -> f32 {
+		if self.recent_deltas.is_empty() {
+			return 0.0;
+		}
+
+		let now = Instant::now();
+		let window = std::time::Duration::from_secs(2);
+
+		// Sum recent deltas within window
+		let recent_bytes: usize = self.recent_deltas
+			.iter()
+			.filter(|(_, ts)| now.duration_since(*ts) < window)
+			.map(|(bytes, _)| *bytes)
+			.sum();
+
+		// Map to intensity:
+		// - 0-100 bytes: 0.0-0.3 (few tokens)
+		// - 100-500 bytes: 0.3-0.6 (steady output)
+		// - 500+ bytes: 0.6-1.0 (rapid output/tool execution)
+		let intensity = match recent_bytes {
+			0..=100 => recent_bytes as f32 / 100.0 * 0.3,
+			101..=500 => 0.3 + (recent_bytes - 100) as f32 / 400.0 * 0.3,
+			_ => (0.6 + (recent_bytes - 500) as f32 / 1000.0 * 0.4).min(1.0),
+		};
+
+		intensity
+	}
+}
+
+impl Default for ScrollbackActivity {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 /// Babel state - shared across tasks
 ///
 /// All window/terminal state is keyed by PaneAddr (socket + id) to support
@@ -188,6 +288,10 @@ pub struct BabelState {
 	/// Cached activity states for windows (PaneAddr → ActivityState)
 	/// Used to detect state changes and emit SessionStateChanged events
 	pub window_states: HashMap<PaneAddr, scrollparse::claude::ActivityState>,
+
+	/// Scrollback activity tracking for ActivityPulse events (PaneAddr → ScrollbackActivity)
+	/// Tracks content hashes and deltas to detect token output / tool execution
+	pub window_activity: HashMap<PaneAddr, ScrollbackActivity>,
 
 	/// When the daemon started
 	pub start_time: Instant,
@@ -226,6 +330,7 @@ impl BabelState {
 			session_paths: HashMap::new(),
 			window_fingerprints: HashMap::new(),
 			window_states: HashMap::new(),
+			window_activity: HashMap::new(),
 			start_time: Instant::now(),
 			last_kitty_scan: Instant::now(),
 			last_fingerprint_rebuild: Instant::now(),
@@ -455,10 +560,13 @@ impl BabelState {
 
 		// Detect session state changes and emit events
 		// This enables richspace-babel to track Claude activity per-workspace
+		// Also track scrollback changes for ActivityPulse events
 		for (addr, window) in &new_windows {
-			let new_state = get_window_activity_state(addr.id);
+			// Get both state and scrollback in one fetch to avoid double I/O
+			let (new_state, scrollback) = get_window_activity_with_scrollback(addr.id);
 			let old_state = self.window_states.get(addr).copied();
 
+			// ─── State Change Detection ─────────────────────────────────────────────
 			match old_state {
 				Some(old) if old != new_state => {
 					// State changed - emit event
@@ -471,6 +579,15 @@ impl BabelState {
 						new_state,
 					});
 					self.window_states.insert(addr.clone(), new_state);
+
+					// Also emit ActivityPulse on state transitions
+					self.event_publisher.publish(BabelEvent::ActivityPulse {
+						kitty_id: addr.id,
+						session_id: window.session_id.clone(),
+						workspace: window.workspace,
+						intensity: 0.8, // State transitions are significant
+						trigger: crate::events::PulseTrigger::StateTransition,
+					});
 
 					// Auto-unread when Claude finishes working and awaits input
 					// This ensures users see the yellow dot when there's new content to review
@@ -490,10 +607,41 @@ impl BabelState {
 					// State unchanged
 				}
 			}
+
+			// ─── Activity Pulse Detection ───────────────────────────────────────────
+			// Track scrollback changes to emit fine-grained activity pulses
+			// for reactive UI animations (heartbeat blinks, etc.)
+			if !scrollback.is_empty() {
+				let activity = self.window_activity.entry(addr.clone()).or_default();
+				let (changed, _delta_bytes) = activity.update(&scrollback);
+
+				if changed {
+					let intensity = activity.compute_intensity();
+
+					// Determine trigger type based on current state
+					let trigger = match new_state {
+						scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,
+						scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,
+						_ => crate::events::PulseTrigger::TokenOutput,
+					};
+
+					// Only emit if intensity is meaningful (avoid noise)
+					if intensity > 0.05 {
+						self.event_publisher.publish(BabelEvent::ActivityPulse {
+							kitty_id: addr.id,
+							session_id: window.session_id.clone(),
+							workspace: window.workspace,
+							intensity,
+							trigger,
+						});
+					}
+				}
+			}
 		}
 
 		// Clean up states for removed windows
 		self.window_states.retain(|addr, _| new_windows.contains_key(addr));
+		self.window_activity.retain(|addr, _| new_windows.contains_key(addr));
 
 		self.windows = new_windows;
 		self.last_kitty_scan = Instant::now();

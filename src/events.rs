@@ -47,6 +47,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Pulse Trigger Types
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// What triggered an ActivityPulse event
+///
+/// Helps frontends differentiate between types of activity for
+/// different visual effects (e.g., quick blink for tokens vs
+/// sustained glow for tool execution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PulseTrigger {
+    /// New text appeared in scrollback (Claude output)
+    TokenOutput,
+    /// Tool execution began (detected via scrollback pattern)
+    ToolStart,
+    /// Tool execution completed
+    ToolComplete,
+    /// User sent input (prompt submitted)
+    UserInput,
+    /// ActivityState transition occurred
+    StateTransition,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Event Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -184,6 +208,36 @@ pub enum BabelEvent {
         old_state: scrollparse::claude::ActivityState,
         /// New state
         new_state: scrollparse::claude::ActivityState,
+    },
+
+    /// Fine-grained activity pulse for reactive UI animations
+    ///
+    /// Emitted when scrollback content changes (token output, tool execution, etc.).
+    /// Enables visual "heartbeat" effects in frontends like richspace-babel.
+    ///
+    /// Pulse detection compares scrollback hashes each poll cycle (~500ms).
+    /// Intensity is computed from the delta size relative to recent activity.
+    ///
+    /// ## Usage
+    ///
+    /// Frontends can use this for:
+    /// - Dot blink/pulse animations on token output
+    /// - Activity indicators during Claude thinking
+    /// - Visual feedback that work is happening
+    ActivityPulse {
+        /// Kitty window ID
+        kitty_id: u64,
+        /// Session ID if matched
+        session_id: Option<String>,
+        /// XFCE workspace number
+        workspace: Option<i32>,
+        /// Activity intensity 0.0-1.0 based on output rate
+        /// - 0.0-0.3: Low activity (few tokens)
+        /// - 0.3-0.7: Medium activity (steady output)
+        /// - 0.7-1.0: High activity (rapid output or tool execution)
+        intensity: f32,
+        /// What triggered this pulse
+        trigger: PulseTrigger,
     },
 
     /// Workspace ambient title updated via Haiku summarization
@@ -434,6 +488,7 @@ impl EventFilter {
             BabelEvent::SessionMatched { .. } => "session_matched",
             BabelEvent::SessionUpdated { .. } => "session_updated",
             BabelEvent::SessionStateChanged { .. } => "session_state_changed",
+            BabelEvent::ActivityPulse { .. } => "activity_pulse",
             BabelEvent::WorkspaceTitleUpdated { .. } => "workspace_title_updated",
             BabelEvent::DaemonShutdown => "daemon_shutdown",
             BabelEvent::WSetSaved { .. } => "wset_saved",
@@ -678,6 +733,13 @@ mod tests {
                 old_state: ActivityState::Idle,
                 new_state: ActivityState::Thinking,
             },
+            BabelEvent::ActivityPulse {
+                kitty_id: 6,
+                session_id: Some("uuid5".to_string()),
+                workspace: Some(2),
+                intensity: 0.75,
+                trigger: PulseTrigger::TokenOutput,
+            },
             BabelEvent::DaemonShutdown,
         ];
 
@@ -685,6 +747,53 @@ mod tests {
             let json = serde_json::to_string(&event);
             assert!(json.is_ok(), "Failed to serialize: {:?}", event);
         }
+    }
+
+    #[test]
+    fn test_activity_pulse_serialization() {
+        let event = BabelEvent::ActivityPulse {
+            kitty_id: 42,
+            session_id: Some("test-session".to_string()),
+            workspace: Some(1),
+            intensity: 0.85,
+            trigger: PulseTrigger::ToolStart,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("activity_pulse"));
+        assert!(json.contains("0.85"));
+        assert!(json.contains("tool_start"));
+
+        // Round-trip test
+        let deserialized: BabelEvent = serde_json::from_str(&json).unwrap();
+        if let BabelEvent::ActivityPulse { kitty_id, intensity, trigger, .. } = deserialized {
+            assert_eq!(kitty_id, 42);
+            assert!((intensity - 0.85).abs() < 0.001);
+            assert_eq!(trigger, PulseTrigger::ToolStart);
+        } else {
+            panic!("Deserialization produced wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_activity_pulse_filter() {
+        let filter = EventFilter::with_events(vec!["activity_pulse".to_string()]);
+
+        let pulse = BabelEvent::ActivityPulse {
+            kitty_id: 1,
+            session_id: None,
+            workspace: Some(1),
+            intensity: 0.5,
+            trigger: PulseTrigger::TokenOutput,
+        };
+        let window_added = BabelEvent::WindowAdded {
+            kitty_id: 1,
+            title: "".to_string(),
+            workspace: None,
+        };
+
+        assert!(filter.matches(&pulse));
+        assert!(!filter.matches(&window_added));
     }
 
     #[test]

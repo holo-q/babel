@@ -120,6 +120,22 @@ pub fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState 
     }
 }
 
+/// Get both activity state and scrollback content for a Claude session
+///
+/// Returns (state, scrollback_content) for use in both state detection
+/// and activity pulse tracking. Avoids double-fetching scrollback.
+///
+/// Returns (Unknown, empty string) on any error.
+pub fn get_window_activity_with_scrollback(id: u64) -> (scrollparse::claude::ActivityState, String) {
+    match get_recent_scrollback(id, 50) {
+        Ok(scrollback) => {
+            let state = scrollparse::claude::detect_activity_state(&scrollback);
+            (state, scrollback)
+        }
+        Err(_) => (scrollparse::claude::ActivityState::Unknown, String::new()),
+    }
+}
+
 /// Find all kitty windows that appear to be running Claude Code
 ///
 /// A window is considered a Claude session if any of these are true:
