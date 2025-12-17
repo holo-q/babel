@@ -166,7 +166,7 @@ impl Legend {
         ];
         for sym in socket_order {
             if self.symbols.contains(&sym) {
-                parts.push(format!("{}={}", sym.styled(), sym.description()));
+                parts.push(format!("{} {}", sym.styled(), sym.description()));
             }
         }
 
@@ -178,7 +178,7 @@ impl Legend {
         ];
         for sym in window_order {
             if self.symbols.contains(&sym) {
-                parts.push(format!("{}={}", sym.styled(), sym.description()));
+                parts.push(format!("{} {}", sym.styled(), sym.description()));
             }
         }
 
@@ -192,7 +192,7 @@ impl Legend {
         ];
         for sym in activity_order {
             if self.symbols.contains(&sym) {
-                parts.push(format!("{}={}", sym.styled(), sym.description()));
+                parts.push(format!("{} {}", sym.styled(), sym.description()));
             }
         }
 
