@@ -91,7 +91,7 @@ const RESET: &str = "\x1b[0m";
 
 /// Query commands (read-only, safe) - rendered italic in help
 const QUERY_COMMANDS: &[&str] = &[
-    "ls", "ls-terminals", "ls-panes", "get-window", "get-pane",
+    "ls", "ls-terminals", "ls-panes", "ls-sockets", "get-window", "get-pane",
     "get-scrollback", "history"
 ];
 
@@ -193,6 +193,14 @@ pub enum Commands {
     /// individual terminal views within a kitty window.
     #[command()]
     LsPanes,
+
+    /// List kitty sockets with status
+    ///
+    /// Shows all kitty instances (sockets) with their status, pane counts,
+    /// and which windows belong to each. Socket-first view for multi-instance
+    /// awareness.
+    #[command()]
+    LsSockets,
 
     /// Get status of a kitty window
     ///

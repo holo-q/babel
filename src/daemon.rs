@@ -1376,6 +1376,12 @@ mod handlers {
 		}
 	}
 
+	/// List kitty socket status (multi-instance awareness)
+	pub async fn list_sockets(state: &Arc<RwLock<BabelState>>) -> Response {
+		let s = state.read().await;
+		Response::Sockets { sockets: s.socket_status.clone() }
+	}
+
 	/// List windows with fingerprints (expensive - extracts from scrollback)
 	pub async fn list_with_fingerprints(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
@@ -1734,6 +1740,7 @@ async fn process_request(
 		Request::List => handlers::list(state).await,
 		Request::ListTerminals => handlers::list_terminals(state).await,
 		Request::ListPanes => handlers::list_panes().await,
+		Request::ListSockets => handlers::list_sockets(state).await,
 		Request::ListWithFingerprints => handlers::list_with_fingerprints(state).await,
 		Request::Status { window_id } => handlers::status(state, window_id).await,
 		Request::History { limit } => handlers::history(limit),

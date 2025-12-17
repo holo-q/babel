@@ -169,6 +169,29 @@ impl BabelCore {
         }
     }
 
+    /// Get kitty socket status (multi-instance awareness)
+    ///
+    /// Returns status for each known kitty socket including responsiveness,
+    /// pane count, and whether it's the current socket.
+    pub async fn sockets(&self) -> Result<std::collections::HashMap<String, crate::daemon::SocketStatus>> {
+        match &self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::ListSockets).await {
+                    Ok(Response::Sockets { sockets }) => Ok(sockets),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        warn!("daemon request failed: {}", e);
+                        bail!("daemon connection failed: {}", e)
+                    }
+                }
+            }
+            CoreMode::Local(state) => {
+                // Return socket status from local state
+                Ok(state.socket_status.clone())
+            }
+        }
+    }
+
     /// Get windows with fingerprints extracted from scrollback
     pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudeWindow>> {
         match &self.mode {

@@ -211,6 +211,128 @@ pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
 	Ok(())
 }
 
+/// List kitty sockets with status and windows
+///
+/// Socket-first view showing each kitty instance with its status,
+/// and the Claude windows running in that instance.
+pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
+	let sockets = core.sockets().await.context("Failed to list sockets")?;
+	let windows = core.windows().await.unwrap_or_default();
+
+	if json {
+		// Combine socket status with windows for JSON output
+		let output: Vec<_> = sockets.iter()
+			.map(|(socket, status)| {
+				let socket_windows: Vec<_> = windows.iter()
+					.filter(|w| w.socket() == socket)
+					.collect();
+				serde_json::json!({
+					"socket": socket,
+					"status": status,
+					"windows": socket_windows,
+				})
+			})
+			.collect();
+		println!("{}", serde_json::to_string_pretty(&output)?);
+		return Ok(());
+	}
+
+	if sockets.is_empty() {
+		println!("No kitty sockets found");
+		return Ok(());
+	}
+
+	let total_sockets = sockets.len();
+	let responsive = sockets.values().filter(|s| s.is_responsive).count();
+	let total_panes: usize = sockets.values().map(|s| s.pane_count).sum();
+	let total_claude: usize = windows.len();
+
+	println!("Kitty sockets ({} socket{}, {} responsive, {} panes, {} Claude windows):",
+		total_sockets,
+		if total_sockets == 1 { "" } else { "s" },
+		responsive,
+		total_panes,
+		total_claude);
+	println!();
+
+	// Sort sockets: current first, then by PID
+	let mut sorted: Vec<_> = sockets.iter().collect();
+	sorted.sort_by(|a, b| {
+		b.1.is_current.cmp(&a.1.is_current)
+			.then_with(|| a.0.cmp(b.0))
+	});
+
+	let dim = Style::new().dim();
+	let bold = Style::new().bold();
+	let yellow = Style::new().yellow();
+	let red = Style::new().red();
+
+	for (socket, status) in sorted {
+		// Socket header with status
+		let marker = if status.is_current {
+			style("●").green().to_string()
+		} else if status.is_responsive {
+			"○".to_string()
+		} else {
+			style("✗").red().to_string()
+		};
+
+		let socket_name = socket.rsplit('/').next().unwrap_or(socket);
+		let status_label = if status.is_current {
+			bold.apply_to("current").to_string()
+		} else if status.is_responsive {
+			"responsive".to_string()
+		} else {
+			red.apply_to("dead").to_string()
+		};
+
+		println!("{} {} ({})", marker, socket_name, status_label);
+		println!("    {} panes total", status.pane_count);
+
+		// Show error if any
+		if let Some(err) = &status.last_error {
+			println!("    {} {}", red.apply_to("error:"), err);
+		}
+
+		// List Claude windows in this socket
+		let socket_windows: Vec<_> = windows.iter()
+			.filter(|w| w.socket() == socket)
+			.collect();
+
+		if socket_windows.is_empty() {
+			println!("    {}", dim.apply_to("no Claude sessions"));
+		} else {
+			println!("    {} Claude session{}:",
+				socket_windows.len(),
+				if socket_windows.len() == 1 { "" } else { "s" });
+
+			for wnd in socket_windows {
+				let title = wnd.session_info
+					.as_ref()
+					.and_then(|s| s.summaries.first())
+					.map(|s| s.summary.as_str())
+					.unwrap_or(&wnd.title);
+				let title = title.strip_prefix("✳ ").unwrap_or(title);
+				let title_short: String = title.chars().take(40).collect();
+				let title_display = if title.len() > 40 {
+					format!("{}…", title_short)
+				} else {
+					title_short
+				};
+
+				let focus = if wnd.is_focused { "▸" } else { " " };
+				let id_str = format!("{:>3}", wnd.id());
+
+				print!("      {}{} ", focus, if wnd.is_focused { yellow.apply_to(&id_str) } else { dim.apply_to(&id_str) });
+				println!("{}", title_display);
+			}
+		}
+		println!();
+	}
+
+	Ok(())
+}
+
 /// Check status of a specific window or the focused window
 pub async fn cmd_check_window(core: &BabelCore, window_id: Option<u64>, json: bool) -> Result<()> {
 	let window = core.window(window_id).await?;
@@ -403,8 +525,9 @@ pub fn print_window(wnd: &ClaudeWindow) -> Result<()> {
 
 	// Show socket warning for non-current socket
 	if !is_current_socket {
-		let sock_short = wnd.socket().rsplit("kitty.sock-").next().unwrap_or("other");
-		print!(" {}", Style::new().red().apply_to(format!("⚠{}", sock_short)));
+		// Extract filename: "unix:/run/user/1000/kitty.sock-74830" → "kitty.sock-74830"
+		let sock_name = wnd.socket().rsplit('/').next().unwrap_or("other");
+		print!(" {}", Style::new().red().apply_to(format!("⚠{}", sock_name)));
 	}
 	println!();
 

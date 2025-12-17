@@ -100,6 +100,10 @@ async fn main() -> Result<()> {
             cli::query::cmd_ls_panes(&core, cli.json).await
         }
 
+        Commands::LsSockets => {
+            cli::query::cmd_ls_sockets(&core, cli.json).await
+        }
+
         Commands::GetWindow { window_id } => {
             cli::query::cmd_check_window(&core, window_id, cli.json).await
         }
