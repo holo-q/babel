@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use console::{style, Style};
 
-use claude_babel::utility::claude_storage::SessionInfo;
+use claude_babel::utility::claude_storage::{SessionInfo, get_session_path};
 use claude_babel::core::BabelCore;
 use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
 use claude_babel::kitty::discover_all_instances;
@@ -645,6 +645,14 @@ pub fn print_window_detailed(wnd: &ClaudeWindow) -> Result<()> {
 		                          .map(|p| format!("~/{}", p.display()))
 		                          .unwrap_or_else(|_| info.project.display().to_string());
 		println!("{}{} {}", indent, dim.apply_to("project"), project_display);
+
+		// JSONL path - direct link to conversation file
+		let jsonl_path = get_session_path(&info.project, &info.session_id);
+		let jsonl_display = jsonl_path
+			.strip_prefix(dirs::home_dir().unwrap_or_default())
+			.map(|p| format!("~/{}", p.display()))
+			.unwrap_or_else(|_| jsonl_path.display().to_string());
+		println!("{}{} {}", indent, dim.apply_to("jsonl"), cyan.apply_to(&jsonl_display));
 
 		// Slug (codename)
 		if let Some(ref slug) = info.slug {
