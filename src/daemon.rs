@@ -62,7 +62,7 @@ use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -354,6 +354,7 @@ impl BabelState {
 	/// used for activity state detection. Use this for quick structural refreshes
 	/// that don't need real-time activity states (cached values are used instead).
 	/// The periodic poll passes `false` to keep activity states current.
+	#[tracing::instrument(skip(self), fields(skip_activity = skip_activity_fetch))]
 	pub fn refresh_windows(&mut self, skip_activity_fetch: bool) -> Result<Vec<i32>> {
 		use crate::kitty::get_all_workspaces;
 
@@ -691,6 +692,7 @@ impl BabelState {
 	}
 
 	/// Match a window title to a session using the summary index
+	#[tracing::instrument(skip(self), fields(title = %title, index_size = self.summary_index.len()))]
 	fn match_title_to_session(&self, title: &str) -> Option<String> {
 		// Extract summary from title (strip "✳ " prefix)
 		let summary = title.strip_prefix("✳ ")?.trim();
@@ -703,15 +705,19 @@ impl BabelState {
 		    .map(|e| e.session_id.clone())
 	}
 
-	/// Get list of window addresses that need fingerprint matching
+	/// Get list of window addresses + CWDs that need fingerprint matching
+	///
+	/// Returns (addr, cwd) pairs. CWD comes from kitty pane info (reliable),
+	/// NOT from scrollback extraction (unreliable - Claude status bar format varies).
 	///
 	/// Called with read lock to identify windows that need matching.
 	/// Caller then releases lock and does expensive I/O.
-	pub fn get_windows_needing_fingerprints(&self) -> Vec<PaneAddr> {
+	#[tracing::instrument(skip(self), fields(window_count = self.windows.len()))]
+	pub fn get_windows_needing_fingerprints(&self) -> Vec<(PaneAddr, PathBuf)> {
 		self.windows
 		    .iter()
 		    .filter(|(_, w)| w.session_id.is_none())
-		    .map(|(addr, _)| addr.clone())
+		    .map(|(addr, w)| (addr.clone(), w.cwd.clone()))
 		    .collect()
 	}
 
@@ -719,6 +725,7 @@ impl BabelState {
 	///
 	/// This applies the results from `fingerprint_match_addr` back to state.
 	/// Called with write lock after I/O completes.
+	#[tracing::instrument(skip(self, fingerprint), fields(addr = %addr.short(), session_id = %session_id, confidence = ?confidence))]
 	pub fn apply_fingerprint_result(
 		&mut self,
 		addr: &PaneAddr,
@@ -831,13 +838,17 @@ impl BabelState {
 	/// Called outside any locks to avoid blocking readers.
 	///
 	/// Takes fingerprint_index as parameter to avoid needing &self.
+	/// Takes kitty_cwd from pane info (reliable) instead of extracting from scrollback
+	/// (unreliable - Claude's status bar format varies and may scroll off).
+	#[tracing::instrument(skip(fingerprint_index), fields(addr = %addr.short(), cwd = %kitty_cwd.display(), index_size = fingerprint_index.len()))]
 	pub fn fingerprint_match_addr(
 		addr: &PaneAddr,
+		kitty_cwd: &Path,
 		fingerprint_index: &HashMap<String, SessionFingerprint>,
 	) -> Option<(String, MatchConfidence, SessionFingerprint)> {
 		use crate::kitty::get_scrollback_on_socket;
 
-		trace!("fingerprint_match({}) - index has {} sessions", addr.short(), fingerprint_index.len());
+		trace!("fingerprint_match({}) - index has {} sessions, cwd={}", addr.short(), fingerprint_index.len(), kitty_cwd.display());
 
 		// Get scrollback using the pane's socket (EXPENSIVE I/O - done without lock)
 		let scrollback = match get_scrollback_on_socket(&addr.socket, addr.id) {
@@ -850,7 +861,11 @@ impl BabelState {
 
 		trace!("  scrollback: {} bytes, {} lines", scrollback.len(), scrollback.lines().count());
 
-		let window_fp = extract_from_scrollback(&scrollback);
+		// Extract fingerprint from scrollback, but use kitty's CWD (reliable)
+		// instead of trying to parse Claude's status bar (unreliable format)
+		let mut window_fp = extract_from_scrollback(&scrollback);
+		window_fp.cwd = Some(kitty_cwd.to_path_buf());
+
 		trace!("  extracted: first_prompt={:?}, prompts={}, tools={:?}, cwd={:?}",
             window_fp.first_prompt.as_ref().map(|s| &s[..s.len().min(40)]),
             window_fp.recent_prompts.len(),
@@ -906,6 +921,7 @@ impl BabelState {
 	}
 
 	/// Rebuild summary index from ~/.claude/projects
+	#[tracing::instrument(skip(self))]
 	pub fn rebuild_summary_index(&mut self) -> Result<()> {
 		let projects_dir = claude_base().join("projects");
 		if !projects_dir.exists() {
@@ -969,6 +985,7 @@ impl BabelState {
 	/// Rebuild fingerprint index from ~/.claude/projects
 	/// Scans most recent sessions by file modification time
 	/// Debounced to avoid excessive rebuilds when multiple JSONL files change rapidly
+	#[tracing::instrument(skip(self))]
 	pub fn rebuild_fingerprint_index(&mut self) -> Result<()> {
 		use crate::utility::claude_storage::{list_projects, list_sessions};
 
@@ -1026,6 +1043,7 @@ impl BabelState {
 	/// Cache a fingerprint for a window
 	///
 	/// Called after successful fingerprint matching to avoid re-extraction
+	#[tracing::instrument(skip(self, fingerprint), fields(addr = %addr.short(), cache_size = self.window_fingerprints.len()))]
 	fn cache_fingerprint(&mut self, addr: PaneAddr, fingerprint: SessionFingerprint) {
 		self.window_fingerprints.insert(addr, fingerprint);
 
@@ -1319,14 +1337,23 @@ pub async fn run_daemon() -> Result<()> {
                                 let s = state_clone.read().await;
                                 let needs = s.get_windows_needing_fingerprints();
                                 let index = s.fingerprint_index.clone();
+                                tracing::debug!(
+                                    needs_count = needs.len(),
+                                    index_size = index.len(),
+                                    "Phase 4: windows needing fingerprints"
+                                );
                                 (needs, index)
                             };
 
                             // Phase 5: Do fingerprint matching I/O (expensive)
+                            // Pass kitty CWD (reliable) instead of extracting from scrollback
+                            if !needs_matching.is_empty() {
+                                tracing::debug!("Phase 5: starting fingerprint matching for {} windows", needs_matching.len());
+                            }
                             let fingerprint_results: Vec<_> = tokio::task::spawn_blocking(move || {
                                 needs_matching.iter()
-                                    .filter_map(|addr| {
-                                        BabelState::fingerprint_match_addr(addr, &fingerprint_index)
+                                    .filter_map(|(addr, cwd)| {
+                                        BabelState::fingerprint_match_addr(addr, cwd, &fingerprint_index)
                                             .map(|(session_id, confidence, fingerprint)| {
                                                 (addr.clone(), session_id, confidence, fingerprint)
                                             })
@@ -1800,9 +1827,10 @@ mod handlers {
 		};
 
 		// Phase 3: Do expensive I/O without lock
-		for addr in needs_matching {
+		// Pass kitty CWD (reliable) instead of extracting from scrollback
+		for (addr, cwd) in needs_matching {
 			if let Some((session_id, confidence, fingerprint)) =
-				BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
+				BabelState::fingerprint_match_addr(&addr, &cwd, &fingerprint_index)
 			{
 				let mut s = state.write().await;
 				s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);

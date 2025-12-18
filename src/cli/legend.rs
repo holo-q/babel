@@ -51,6 +51,7 @@ pub enum LegendSymbol {
     ActivityThinking,
     ActivityToolUse,
     ActivityAwaitingInput,
+    ActivityBackgroundTask,
     ActivityIdle,
     ActivityUnknown,
 }
@@ -70,6 +71,7 @@ impl LegendSymbol {
             Self::ActivityThinking => "⚡",
             Self::ActivityToolUse => "⚙",
             Self::ActivityAwaitingInput => "◆",
+            Self::ActivityBackgroundTask => "◐",
             Self::ActivityIdle => "○",
             Self::ActivityUnknown => "●",
         }
@@ -88,6 +90,7 @@ impl LegendSymbol {
             Self::ActivityThinking => style("⚡").yellow().to_string(),
             Self::ActivityToolUse => style("⚙").cyan().to_string(),
             Self::ActivityAwaitingInput => style("◆").green().to_string(),
+            Self::ActivityBackgroundTask => style("◐").magenta().to_string(),
             Self::ActivityIdle => Style::new().dim().apply_to("○").to_string(),
             Self::ActivityUnknown => style("●").blue().to_string(),
         }
@@ -106,6 +109,7 @@ impl LegendSymbol {
             Self::ActivityThinking => "thinking",
             Self::ActivityToolUse => "tool use",
             Self::ActivityAwaitingInput => "awaiting input",
+            Self::ActivityBackgroundTask => "background task",
             Self::ActivityIdle => "idle",
             Self::ActivityUnknown => "unknown state",
         }
@@ -187,6 +191,7 @@ impl Legend {
             LegendSymbol::ActivityThinking,
             LegendSymbol::ActivityToolUse,
             LegendSymbol::ActivityAwaitingInput,
+            LegendSymbol::ActivityBackgroundTask,
             LegendSymbol::ActivityIdle,
             LegendSymbol::ActivityUnknown,
         ];
@@ -214,6 +219,7 @@ impl Legend {
             LegendSymbol::ActivityThinking,
             LegendSymbol::ActivityToolUse,
             LegendSymbol::ActivityAwaitingInput,
+            LegendSymbol::ActivityBackgroundTask,
             LegendSymbol::ActivityIdle,
             LegendSymbol::ActivityUnknown,
             LegendSymbol::SocketWarning,

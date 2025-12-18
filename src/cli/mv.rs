@@ -54,10 +54,10 @@ pub async fn cmd_mv(
 	if !conflicts.is_empty() {
 		display_conflicts(&conflicts, &source);
 
-		// Check for blocking active windows
+		// Check for blocking active windows (BackgroundTask counts as active - has work in progress)
 		let active_count = conflicts
 			.iter()
-			.filter(|c| matches!(c.state, ActivityState::Thinking | ActivityState::ToolUse))
+			.filter(|c| matches!(c.state, ActivityState::Thinking | ActivityState::ToolUse | ActivityState::BackgroundTask))
 			.count();
 
 		if active_count > 0 && !force {
@@ -92,12 +92,12 @@ pub async fn cmd_mv(
 
 		let migratable = conflicts
 			.iter()
-			.filter(|c| matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput))
+			.filter(|c| matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::Unknown))
 			.count();
 		if migratable > 0 {
 			println!("Step 2: Migrate {} idle terminal(s)", migratable);
 			for c in &conflicts {
-				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput) {
+				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::Unknown) {
 					let new_cwd = dest.join(&c.relative_path);
 					println!("  id:{} → cd {}", c.window.id(), new_cwd.display());
 				}
@@ -190,6 +190,7 @@ fn display_conflicts(conflicts: &[ConflictingWindow], source: &Path) {
 			ActivityState::AwaitingInput => "[AWAIT] ",
 			ActivityState::Thinking => "[ACTIVE: Thinking]",
 			ActivityState::ToolUse => "[ACTIVE: Tool Use]",
+			ActivityState::BackgroundTask => "[ACTIVE: Background]",
 			ActivityState::Unknown => "[UNKNOWN]",
 		};
 		let title = c.window.title.strip_prefix("✳ ").unwrap_or(&c.window.title);

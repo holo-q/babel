@@ -9,12 +9,17 @@
 //! - Normalize prompts for robust comparison (lowercase, trim, truncate)
 //! - Score matches using multiple signals (prompts, tools, cwd)
 //! - Return confidence level (None/Low/Medium/High/Exact) for filtering
+//!
+//! Tracing:
+//! - All public functions have #[instrument] for entry/exit logging
+//! - Use RUST_LOG=babel=debug for detailed fingerprint diagnostics
 
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context};
+use tracing::instrument;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -77,6 +82,7 @@ pub enum MatchConfidence {
 /// - `cwd: /path` in footer
 ///
 /// Scrollback is analyzed bottom-up for recency (recent prompts are at bottom).
+#[instrument(skip(scrollback), fields(scrollback_len = scrollback.len()))]
 pub fn extract_from_scrollback(scrollback: &str) -> SessionFingerprint {
     let line_count = scrollback.lines().count();
     tracing::debug!(scrollback_lines = line_count, "extracting fingerprint from scrollback");
@@ -145,6 +151,7 @@ pub fn extract_from_scrollback(scrollback: &str) -> SessionFingerprint {
 /// Filters out:
 /// - Slash commands (`/command`) - these get expanded before JSONL recording
 /// - Empty prompts
+#[instrument(level = "trace", skip(line), fields(line_len = line.len()))]
 fn extract_user_prompt(line: &str) -> Option<String> {
     // Pattern 1: > prompt (Claude Code's user message format)
     if let Some(prompt) = line.strip_prefix('>').map(|s| s.trim()) {
@@ -205,6 +212,7 @@ const KNOWN_TOOLS: &[&str] = &[
 ///
 /// Pattern: ● ToolName(args) or similar
 /// Only extracts known Claude Code tool names to avoid false positives.
+#[instrument(level = "trace", skip(line))]
 fn extract_tool_call(line: &str) -> Option<String> {
     // Pattern: ● ToolName(...) or • ToolName(...)
     if line.starts_with('●') || line.starts_with('•') {
@@ -232,6 +240,7 @@ fn extract_tool_call(line: &str) -> Option<String> {
 /// Claude's status bar may include other info after the path, separated by
 /// non-breaking spaces or special characters. We stop at the first invalid
 /// path character.
+#[instrument(level = "trace", skip(line))]
 fn extract_cwd(line: &str) -> Option<PathBuf> {
     // Pattern: cwd: /path
     if let Some(cwd_part) = line.strip_prefix("cwd:").map(|s| s.trim_start()) {
@@ -332,6 +341,7 @@ struct MessageEntry {
 ///
 /// Reads first 50 entries for performance (sessions can be thousands of lines).
 /// Extracts user prompts and tool calls in order.
+#[instrument(fields(path = %path.display()))]
 pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
     tracing::debug!(?path, "extracting fingerprint from JSONL");
 
@@ -466,6 +476,11 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
 /// - 2 points (1 prompt): Medium
 /// - 3 points (2+ signals): High
 /// - 4+ points (all signals): Exact
+#[instrument(skip(scrollback_fp, jsonl_fp), fields(
+    scrollback_first = ?scrollback_fp.first_prompt,
+    jsonl_first = ?jsonl_fp.first_prompt,
+    jsonl_session = ?jsonl_fp.session_id,
+))]
 pub fn match_fingerprints(
     scrollback_fp: &SessionFingerprint,
     jsonl_fp: &SessionFingerprint,
@@ -532,7 +547,7 @@ pub fn match_fingerprints(
             true
         }
         (Some(cwd1), Some(cwd2)) => {
-            tracing::debug!(?cwd1, ?cwd2, "cwds differ");
+            tracing::debug!("cwds differ: scrollback={:?} vs jsonl={:?}", cwd1, cwd2);
             false
         }
         _ => false,
@@ -572,6 +587,7 @@ pub fn match_fingerprints(
 /// - Convert to lowercase
 /// - Truncate to 100 characters
 /// - Remove common noise (multiple spaces, etc.)
+#[instrument(skip(prompt), fields(prompt_len = prompt.len()))]
 fn normalize_prompt(prompt: &str) -> String {
     let trimmed = prompt.trim();
     let lowercase = trimmed.to_lowercase();
@@ -596,6 +612,7 @@ fn normalize_prompt(prompt: &str) -> String {
 ///
 /// This measures set overlap regardless of order. For workflow matching,
 /// we care more about "did they use similar tools" than exact sequence.
+#[instrument(skip(a, b), fields(a_len = a.len(), b_len = b.len()))]
 fn tool_sequence_similarity(a: &[String], b: &[String]) -> f64 {
     if a.is_empty() && b.is_empty() {
         return 1.0; // Both empty = perfect match
