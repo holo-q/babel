@@ -55,8 +55,16 @@ pub enum Request {
     /// Get scrollback from window
     Scroll { window_id: u64 },
 
-    /// Send text to window
+    /// Send text to window (with Enter/CR at end)
     Send { window_id: u64, text: String },
+
+    /// Type text to window (without Enter/CR at end)
+    /// Useful for composing prompts incrementally
+    Type { window_id: u64, text: String },
+
+    /// Check if a window has pending (unsent) input in the textbox
+    /// Returns true if there's text typed but not yet submitted
+    HasPendingInput { window_id: u64 },
 
     /// Tag window with icon
     Tag { window_id: u64, icon: String },
@@ -145,6 +153,17 @@ pub enum Response {
 
     /// Simple success acknowledgment
     Ok { message: String },
+
+    /// Pending input status for a window
+    /// TODO: As scrollparse improves, this will include the actual pending text
+    /// and support for save/restore operations during broadcast
+    PendingInput {
+        window_id: u64,
+        has_pending: bool,
+        /// The pending text if detected (may be empty even if has_pending is true
+        /// due to detection limitations)
+        pending_text: Option<String>,
+    },
 
     /// Error response
     Error { message: String },

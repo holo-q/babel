@@ -302,7 +302,9 @@ impl BabelCore {
         }
     }
 
-    /// Send text to a window
+    /// Send text to a window (with Enter/CR at end)
+    ///
+    /// The text is appended with a carriage return to submit it to Claude.
     pub async fn send(&self, window_id: u64, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -314,7 +316,59 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(_) => {
+                // Append CR to submit
+                let text_with_cr = format!("{}\r", text);
+                kitty::send_text(window_id, &text_with_cr)
+            }
+        }
+    }
+
+    /// Type text to a window (without Enter/CR at end)
+    ///
+    /// Types the text into the input area without submitting. Useful for
+    /// composing prompts incrementally or staging input.
+    pub async fn type_text(&self, window_id: u64, text: &str) -> Result<()> {
+        match &self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::Type { window_id, text: text.to_string() }).await {
+                    Ok(Response::Ok { .. }) => Ok(()),
+                    Ok(Response::Error { message }) => bail!("{}", message),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => bail!("daemon connection failed: {}", e),
+                }
+            }
+            CoreMode::Local(_) => {
+                // No CR - just type the text as-is
                 kitty::send_text(window_id, text)
+            }
+        }
+    }
+
+    /// Check if a window has pending (unsent) input in the textbox
+    ///
+    /// Returns (has_pending, pending_text) where pending_text may be None
+    /// even if has_pending is true (due to detection limitations).
+    ///
+    /// TODO: As scrollparse improves, this will become more reliable and
+    /// will support extracting the actual pending text for save/restore
+    /// operations during broadcast.
+    pub async fn has_pending_input(&self, window_id: u64) -> Result<(bool, Option<String>)> {
+        match &self.mode {
+            CoreMode::Connected => {
+                match send_request(&Request::HasPendingInput { window_id }).await {
+                    Ok(Response::PendingInput { has_pending, pending_text, .. }) => {
+                        Ok((has_pending, pending_text))
+                    }
+                    Ok(Response::Error { message }) => bail!("{}", message),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => bail!("daemon connection failed: {}", e),
+                }
+            }
+            CoreMode::Local(_) => {
+                // Get scrollback and detect pending input
+                let scrollback = kitty::get_scrollback(window_id)?;
+                let (has_pending, pending_text) = detect_pending_input(&scrollback);
+                Ok((has_pending, pending_text))
             }
         }
     }
@@ -989,6 +1043,78 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pending Input Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Detect if there's pending (unsent) input in a Claude Code terminal
+///
+/// Analyzes the last line of scrollback to detect text after the prompt.
+/// Returns (has_pending, pending_text) where pending_text is the actual text
+/// if it can be extracted.
+///
+/// # Detection Strategy
+///
+/// Claude Code's prompt is typically `> ` at the start of a line. If there's
+/// text after `> ` on the last non-empty line, that's pending input.
+///
+/// # Current Limitations
+///
+/// - Only detects simple `> text` patterns
+/// - May miss multiline input or complex prompt states
+/// - Cannot distinguish between prompt and shell output in some edge cases
+///
+/// TODO: Integrate with scrollparse for more robust detection:
+/// - Detect multiline input (continuation prompts)
+/// - Handle plan mode input (`y/n`, selection UI)
+/// - Support save/restore of pending input during broadcast
+/// - Detect input in different prompt modes (shell, edit, etc.)
+fn detect_pending_input(scrollback: &str) -> (bool, Option<String>) {
+    // Get the last non-empty lines
+    let lines: Vec<&str> = scrollback
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .collect();
+
+    if lines.is_empty() {
+        return (false, None);
+    }
+
+    let last_line = lines[0].trim();
+
+    // Check for Claude Code prompt with content: `> something`
+    // The prompt is `> ` followed by user input
+    if let Some(content) = last_line.strip_prefix("> ") {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return (true, Some(trimmed.to_string()));
+        }
+        // Just `> ` with no content - no pending input
+        return (false, None);
+    }
+
+    // Check for bare prompt endings that might have content
+    // These are edge cases where the prompt indicator is at the end
+    if last_line.ends_with('>') && !last_line.ends_with("->") {
+        // Might be a prompt line without visible cursor content
+        // Can't extract the pending text reliably here
+        // TODO: scrollparse integration needed for accurate detection
+        return (false, None);
+    }
+
+    // Check if we're in a state where input is being typed but the line
+    // doesn't start with `> ` (possible continuation or shell state)
+    //
+    // TODO: scrollparse can help here by:
+    // - Detecting SessionState (is it at a prompt? in plan mode?)
+    // - Parsing the visible UI elements to understand context
+    // - Handling continuation lines in multiline input
+
+    (false, None)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

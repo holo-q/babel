@@ -72,71 +72,103 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
 // Window Focus
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Focus a Claude window - by ID or interactive rofi picker
-pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>) -> Result<()> {
+/// Focus a Claude window - by ID or interactive scrollparse-pager picker
+///
+/// With --content flag, enables searching window scrollback content.
+/// Without it, searches window titles only (faster).
+pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: bool) -> Result<()> {
     // Direct focus if ID provided
     if let Some(id) = window_id {
         return focus_by_id(core, id).await;
     }
 
-    // Interactive picker via rofi
+    // Get all Claude windows
     let windows = core.windows().await?;
     if windows.is_empty() {
-        println!("No Claude sessions found");
+        println!("No Claude windows found");
         return Ok(());
     }
 
-    // Sort by workspace for consistent ordering
-    let mut windows = windows;
-    windows.sort_by(|a, b| {
-        let ws_a = a.workspace.unwrap_or(999);
-        let ws_b = b.workspace.unwrap_or(999);
-        ws_a.cmp(&ws_b)
-            .then(a.os_window_id.cmp(&b.os_window_id))
-            .then(a.id().cmp(&b.id()))
-    });
+    // Format windows for pager consumption
+    let input = format_windows_for_pager(&windows, content_mode)?;
 
-    // Format entries for rofi: "[ws] title │ ~/path"
-    let entries: Vec<(u64, String)> = windows.iter().map(|win| {
-        let ws = match win.workspace {
-            Some(-1) => "S".to_string(),  // Sticky
-            Some(n) => format!("{}", n + 1),
-            None => "?".to_string(),
-        };
-
-        // Strip ✳ prefix from active sessions
-        let title = win.title.strip_prefix("✳ ").unwrap_or(&win.title);
-        let title_short: String = title.chars().take(40).collect();
-        let title_display = if title.len() > 40 {
-            format!("{}…", title_short)
+    // Launch scrollparse-pager in window selection mode
+    let mut child = std::process::Command::new("scrollparse-pager")
+        .args(["--window-select"])
+        .args(if content_mode {
+            vec!["--content-mode"]
         } else {
-            title_short
-        };
+            vec![]
+        })
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to launch scrollparse-pager")?;
 
-        // Compact cwd
-        let cwd = win.cwd
-            .strip_prefix(dirs::home_dir().unwrap_or_default())
-            .map(|p| format!("~/{}", p.display()))
-            .unwrap_or_else(|_| win.cwd.display().to_string());
-
-        let label = format!("[{}] {} │ {}", ws, title_display, cwd);
-        (win.id(), label)
-    }).collect();
-
-    // Launch rofi
-    let labels: Vec<&str> = entries.iter().map(|(_, l)| l.as_str()).collect();
-
-    match rofi::Rofi::new(&labels).prompt("Claude").run() {
-        Ok(choice) => {
-            if let Some((id, _)) = entries.iter().find(|(_, l)| l == &choice) {
-                focus_by_id(core, *id).await?;
-            }
-        }
-        Err(rofi::Error::Interrupted) => {} // User cancelled (Esc)
-        Err(e) => anyhow::bail!("Rofi error: {}", e),
+    // Write window data to pager stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(input.as_bytes())
+            .context("Failed to write to pager stdin")?;
     }
 
-    Ok(())
+    // Wait for pager to complete and read selected ID
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for pager")?;
+
+    if !output.status.success() {
+        // User cancelled (Esc) or pager error
+        return Ok(());
+    }
+
+    let selected_id: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .context("Failed to parse selected window ID")?;
+
+    focus_by_id(core, selected_id).await
+}
+
+/// Format ClaudeWindow list for scrollparse-pager consumption
+///
+/// Output format is JSONL with __window__ wrapper:
+/// {"__window__": {"id": 42, "title": "...", "ws": 1, "cwd": "...", "focused": false}}
+///
+/// If include_content=true, also fetches scrollback for each window (slow).
+fn format_windows_for_pager(
+    windows: &[claude_babel::utility::claude_discovery::ClaudeWindow],
+    include_content: bool,
+) -> Result<String> {
+    use serde_json::json;
+
+    let mut lines = Vec::new();
+
+    for win in windows {
+        let mut obj = json!({
+            "__window__": {
+                "id": win.addr.id,
+                "title": win.title,
+                "ws": win.workspace,
+                "cwd": win.cwd.display().to_string(),
+                "focused": win.is_focused,
+            }
+        });
+
+        // Include scrollback content if content mode (enables search)
+        // NOTE: This fetches scrollback for EVERY window, making it slower.
+        // Trade-off: slower startup vs. ability to search content.
+        if include_content {
+            if let Ok(scrollback) = win.scrollback() {
+                obj["__window__"]["content"] = json!(scrollback);
+            }
+        }
+
+        lines.push(serde_json::to_string(&obj)?);
+    }
+
+    Ok(lines.join("\n"))
 }
 
 /// Focus a window by its kitty ID (via BabelCore)
@@ -160,11 +192,19 @@ pub async fn cmd_get_scrollback(core: &BabelCore, window_id: u64, lines: Option<
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Send Text
+// Send / Type / Broadcast Text
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Send text to window(s) (via BabelCore)
-pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str) -> Result<()> {
+/// Send text to window(s) with Enter (via BabelCore)
+///
+/// If any targeted window has pending (unsent) input, the operation is aborted
+/// unless force=true. This prevents accidentally overwriting user's typed text.
+///
+/// TODO: When scrollparse improves, support save/restore of pending input:
+/// - Save pending text before sending
+/// - After send completes, restore the pending text
+/// - This enables broadcast without losing in-progress inputs
+pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
@@ -172,12 +212,158 @@ pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str) -> Result<(
         return Ok(());
     }
 
+    // Check for pending input unless --force
+    if !force {
+        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        if !windows_with_pending.is_empty() {
+            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            for (id, text) in &windows_with_pending {
+                if let Some(t) = text {
+                    println!("  Window {}: \"{}\"", id, truncate(t, 40));
+                } else {
+                    println!("  Window {}: (pending input detected)", id);
+                }
+            }
+            println!("\nUse --force to send anyway (will overwrite pending input)");
+            // TODO: Add --save-restore flag once scrollparse supports reliable input extraction
+            // This would save pending text, send the new text, then restore the pending text
+            return Ok(());
+        }
+    }
+
     for window_id in window_ids {
         core.send(window_id, text).await
             .with_context(|| format!("Failed to send text to window {}", window_id))?;
-        println!("Sent text to window {}", window_id);
+        println!("Sent to window {}", window_id);
     }
     Ok(())
+}
+
+/// Type text to window(s) without Enter (via BabelCore)
+///
+/// Types text into the input area without submitting. If any targeted window
+/// has pending input, the operation is aborted unless force=true.
+pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
+    let window_ids = resolve_target(core, target).await?;
+
+    if window_ids.is_empty() {
+        println!("No Claude windows found");
+        return Ok(());
+    }
+
+    // Check for pending input unless --force
+    if !force {
+        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        if !windows_with_pending.is_empty() {
+            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            for (id, text) in &windows_with_pending {
+                if let Some(t) = text {
+                    println!("  Window {}: \"{}\"", id, truncate(t, 40));
+                } else {
+                    println!("  Window {}: (pending input detected)", id);
+                }
+            }
+            println!("\nUse --force to type anyway (will append to pending input)");
+            return Ok(());
+        }
+    }
+
+    for window_id in window_ids {
+        core.type_text(window_id, text).await
+            .with_context(|| format!("Failed to type text to window {}", window_id))?;
+        println!("Typed to window {}", window_id);
+    }
+    Ok(())
+}
+
+/// Broadcast text to all Claude windows with Enter
+///
+/// This is a convenience wrapper around send with target=*.
+/// If any window has pending input, the broadcast is aborted unless force=true.
+///
+/// TODO: Future enhancement with scrollparse integration:
+/// - Capture pending input from all windows before broadcast
+/// - Send the broadcast text
+/// - Restore pending input to each window
+/// - This enables safe broadcast without losing work-in-progress
+pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<()> {
+    let windows = core.windows().await?;
+
+    if windows.is_empty() {
+        println!("No Claude windows found");
+        return Ok(());
+    }
+
+    let window_ids: Vec<u64> = windows.iter().map(|w| w.id()).collect();
+    println!("Broadcasting to {} window(s)...", window_ids.len());
+
+    // Check for pending input unless --force
+    if !force {
+        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        if !windows_with_pending.is_empty() {
+            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            for (id, pending_text) in &windows_with_pending {
+                let title = windows.iter()
+                    .find(|w| w.id() == *id)
+                    .map(|w| w.title.as_str())
+                    .unwrap_or("Unknown");
+                if let Some(t) = pending_text {
+                    println!("  {} ({}): \"{}\"", id, truncate(title, 20), truncate(t, 30));
+                } else {
+                    println!("  {} ({}): (pending input detected)", id, truncate(title, 20));
+                }
+            }
+            println!("\nUse --force to broadcast anyway (will overwrite pending input)");
+            return Ok(());
+        }
+    }
+
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    for window_id in window_ids {
+        match core.send(window_id, text).await {
+            Ok(()) => {
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  Failed window {}: {}", window_id, e);
+                fail_count += 1;
+            }
+        }
+    }
+
+    println!("Broadcast complete: {} succeeded, {} failed", success_count, fail_count);
+    Ok(())
+}
+
+/// Check which windows have pending input
+///
+/// Returns a list of (window_id, pending_text) for windows with unsent input.
+async fn check_pending_inputs(core: &BabelCore, window_ids: &[u64]) -> Result<Vec<(u64, Option<String>)>> {
+    let mut pending = Vec::new();
+
+    for &window_id in window_ids {
+        match core.has_pending_input(window_id).await {
+            Ok((true, text)) => pending.push((window_id, text)),
+            Ok((false, _)) => {}
+            Err(e) => {
+                // Log but don't fail - we'll allow the operation if we can't check
+                tracing::debug!(window_id, error = %e, "Failed to check pending input");
+            }
+        }
+    }
+
+    Ok(pending)
+}
+
+/// Truncate a string for display
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len.saturating_sub(1)])
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

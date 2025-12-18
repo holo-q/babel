@@ -55,9 +55,9 @@ async fn main() -> Result<()> {
 
     // Initialize logging via spaceship-std (centralized config + SIGHUP hot-reload)
     // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
-    // "babel" = config key and journald identifier, "claude_babel" = Rust crate for filtering
+    // "babel" = config key and journald identifier
     // --debug flag forces debug level regardless of config
-    spaceship_std::logging::init("babel", "claude_babel", &cli.logging);
+    spaceship_std::init_logging!("babel", &cli.logging);
 
     if cli.logging.debug {
         tracing::debug!("debug logging enabled via --debug flag");
@@ -117,16 +117,24 @@ async fn main() -> Result<()> {
         }
 
         // ─── Action Commands (state-changing) ────────────────────────────────────
-        Commands::Focus { window_id } => {
-            cli::action::cmd_focus(&core, window_id).await
+        Commands::Focus { window_id, content } => {
+            cli::action::cmd_focus(&core, window_id, content).await
         }
 
         Commands::GetScrollback { window_id, lines } => {
             cli::action::cmd_get_scrollback(&core, window_id, lines).await
         }
 
-        Commands::Send { target, text } => {
-            cli::action::cmd_send(&core, &target, &text).await
+        Commands::Send { target, text, force } => {
+            cli::action::cmd_send(&core, &target, &text, force).await
+        }
+
+        Commands::Type { target, text, force } => {
+            cli::action::cmd_type(&core, &target, &text, force).await
+        }
+
+        Commands::Broadcast { text, force } => {
+            cli::action::cmd_broadcast(&core, &text, force).await
         }
 
         Commands::SetIcon { target, icon } => {

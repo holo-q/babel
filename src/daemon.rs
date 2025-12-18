@@ -20,11 +20,11 @@
 mod config {
     use std::time::Duration;
 
-    /// Interval between kitty window polls (500ms = 2 Hz)
+    /// Interval between kitty window polls (200ms = 5 Hz)
     ///
-    /// Balance between responsiveness and CPU usage. Lower values catch
-    /// window changes faster but increase polling overhead.
-    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    /// Lower = more responsive workspace change detection, higher CPU.
+    /// 200ms feels near-instant for UI while being reasonable on resources.
+    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
     /// Debounce interval for file watcher events
     ///
@@ -558,6 +558,29 @@ impl BabelState {
 			}
 		}
 
+		// Check for workspace changes (windows that moved between workspaces)
+		// Used by richspace-babel to update per-workspace dot display
+		for addr in old_addrs.intersection(&new_addrs) {
+			let old_ws = self.windows.get(addr).and_then(|w| w.workspace);
+			let new_ws = new_windows.get(addr).and_then(|w| w.workspace);
+
+			if old_ws != new_ws {
+				self.event_publisher.publish(BabelEvent::WindowWorkspaceChanged {
+					kitty_id: addr.id,
+					old_workspace: old_ws,
+					new_workspace: new_ws,
+				});
+				// Track both workspaces for re-summarization
+				if let Some(ws) = old_ws {
+					changed_workspaces.insert(ws);
+				}
+				if let Some(ws) = new_ws {
+					changed_workspaces.insert(ws);
+				}
+				trace!("Window {} moved: workspace {:?} -> {:?}", addr.short(), old_ws, new_ws);
+			}
+		}
+
 		// Detect session state changes and emit events
 		// This enables richspace-babel to track Claude activity per-workspace
 		// Also track scrollback changes for ActivityPulse events
@@ -959,6 +982,8 @@ enum DaemonEvent {
 	KittyPoll,
 	/// File system change in ~/.claude
 	FileChange(PathBuf),
+	/// Window workspace changed (from wnck signal) - triggers immediate poll
+	WorkspaceChange { platform_window_id: u64 },
 	/// Shutdown signal
 	Shutdown,
 }
@@ -1084,6 +1109,14 @@ pub async fn run_daemon() -> Result<()> {
 		let _ = signal_tx.send(DaemonEvent::Shutdown).await;
 	});
 
+	// Spawn wnck workspace change watcher (instant detection, no polling)
+	// Runs GLib main loop in separate thread, sends events on workspace changes
+	let wnck_tx = event_tx.clone();
+	let rt = tokio::runtime::Handle::current();
+	std::thread::spawn(move || {
+		spawn_wnck_watcher(wnck_tx, rt);
+	});
+
 	// ─── IPC Socket ──────────────────────────────────────────────────────────────
 	let listener = create_listener().await?;
 	let socket_path = crate::utility::ipc::socket_path();
@@ -1161,6 +1194,24 @@ pub async fn run_daemon() -> Result<()> {
                         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                             let mut s = state.write().await;
                             let _ = s.rebuild_fingerprint_index();
+                        }
+                    }
+                    DaemonEvent::WorkspaceChange { platform_window_id } => {
+                        // Instant workspace change from wnck - trigger immediate poll
+                        tracing::debug!(platform_window_id, "WNCK workspace change detected");
+                        let changed_workspaces = {
+                            let mut s = state.write().await;
+                            (*s).poll_once().unwrap_or_default()
+                        };
+                        // Trigger summarization for affected workspaces
+                        if !changed_workspaces.is_empty() {
+                            let summarizer = Arc::clone(&summarizer);
+                            let state = Arc::clone(&state);
+                            tokio::spawn(async move {
+                                for ws in changed_workspaces {
+                                    summarize_workspace(ws, &state, &summarizer).await;
+                                }
+                            });
                         }
                     }
                     DaemonEvent::Shutdown => {
@@ -1461,9 +1512,11 @@ mod handlers {
 		}
 	}
 
-	/// Send text to a window
+	/// Send text to a window (with Enter/CR)
 	pub fn send(window_id: u64, text: &str) -> Response {
-		match send_text_any(window_id, text) {
+		// Append CR to submit the text
+		let text_with_cr = format!("{}\r", text);
+		match send_text_any(window_id, &text_with_cr) {
 			Ok(result) => {
 				let message = if result.is_non_current {
 					format!("⚠ Sent to window {} on non-current socket: {}", window_id, result.addr.short())
@@ -1473,6 +1526,48 @@ mod handlers {
 				Response::Ok { message }
 			}
 			Err(e) => Response::Error { message: format!("Send failed: {}", e) },
+		}
+	}
+
+	/// Type text to a window without pressing Enter
+	///
+	/// Unlike `send`, this doesn't append a carriage return, so the text
+	/// is typed into the input area but not submitted.
+	pub fn type_text(window_id: u64, text: &str) -> Response {
+		// No CR - just type the text as-is
+		match send_text_any(window_id, text) {
+			Ok(result) => {
+				let message = if result.is_non_current {
+					format!("⚠ Typed to window {} on non-current socket: {}", window_id, result.addr.short())
+				} else {
+					format!("Typed to window {}", window_id)
+				};
+				Response::Ok { message }
+			}
+			Err(e) => Response::Error { message: format!("Type failed: {}", e) },
+		}
+	}
+
+	/// Check if a window has pending (unsent) input
+	///
+	/// Retrieves the scrollback and analyzes the last line to detect
+	/// text typed but not yet submitted.
+	///
+	/// TODO: Integrate with scrollparse for more robust detection:
+	/// - Detect multiline input
+	/// - Handle plan mode selection UI
+	/// - Support save/restore of pending input during broadcast
+	pub fn has_pending_input(window_id: u64) -> Response {
+		match get_scrollback_any(window_id) {
+			Ok(result) => {
+				let (has_pending, pending_text) = detect_pending_input_from_scrollback(&result.result);
+				Response::PendingInput {
+					window_id,
+					has_pending,
+					pending_text,
+				}
+			}
+			Err(e) => Response::Error { message: format!("Failed to check pending input: {}", e) },
 		}
 	}
 
@@ -1752,6 +1847,8 @@ async fn process_request(
 		Request::Focus { window_id } => handlers::focus(window_id),
 		Request::Scroll { window_id } => handlers::scroll(window_id),
 		Request::Send { window_id, text } => handlers::send(window_id, &text),
+		Request::Type { window_id, text } => handlers::type_text(window_id, &text),
+		Request::HasPendingInput { window_id } => handlers::has_pending_input(window_id),
 
 		// ─── State Handlers ─────────────────────────────────────────────────────
 		Request::Tag { window_id, icon } => handlers::tag(state, window_id, &icon).await,
@@ -1776,4 +1873,164 @@ async fn process_request(
 			message: "Subscribe requests must be handled via handle_client".to_string(),
 		}
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pending Input Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Detect if there's pending (unsent) input in a Claude Code terminal scrollback
+///
+/// Analyzes the last line of scrollback to detect text after the prompt.
+/// Returns (has_pending, pending_text) where pending_text is the actual text
+/// if it can be extracted.
+///
+/// # Detection Strategy
+///
+/// Claude Code's prompt is typically `> ` at the start of a line. If there's
+/// text after `> ` on the last non-empty line, that's pending input.
+///
+/// # Current Limitations
+///
+/// - Only detects simple `> text` patterns
+/// - May miss multiline input or complex prompt states
+/// - Cannot distinguish between prompt and shell output in some edge cases
+///
+/// TODO: Integrate with scrollparse for more robust detection:
+/// - Detect multiline input (continuation prompts)
+/// - Handle plan mode input (`y/n`, selection UI)
+/// - Support save/restore of pending input during broadcast
+/// - Detect input in different prompt modes (shell, edit, etc.)
+fn detect_pending_input_from_scrollback(scrollback: &str) -> (bool, Option<String>) {
+    // Get the last non-empty lines
+    let lines: Vec<&str> = scrollback
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .collect();
+
+    if lines.is_empty() {
+        return (false, None);
+    }
+
+    let last_line = lines[0].trim();
+
+    // Check for Claude Code prompt with content: `> something`
+    // The prompt is `> ` followed by user input
+    if let Some(content) = last_line.strip_prefix("> ") {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return (true, Some(trimmed.to_string()));
+        }
+        // Just `> ` with no content - no pending input
+        return (false, None);
+    }
+
+    // Check for bare prompt endings that might have content
+    // These are edge cases where the prompt indicator is at the end
+    if last_line.ends_with('>') && !last_line.ends_with("->") {
+        // Might be a prompt line without visible cursor content
+        // Can't extract the pending text reliably here
+        // TODO: scrollparse integration needed for accurate detection
+        return (false, None);
+    }
+
+    // Check if we're in a state where input is being typed but the line
+    // doesn't start with `> ` (possible continuation or shell state)
+    //
+    // TODO: scrollparse can help here by:
+    // - Detecting SessionState (is it at a prompt? in plan mode?)
+    // - Parsing the visible UI elements to understand context
+    // - Handling continuation lines in multiline input
+
+    (false, None)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WNCK Workspace Change Watcher
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Spawn wnck watcher for instant workspace change detection
+///
+/// Runs a GLib main loop in the current thread, watching for window workspace
+/// changes via libwnck signals. Much faster than polling - events fire instantly
+/// when windows move between workspaces.
+///
+/// # Architecture
+///
+/// - Connects to wnck Screen's "window-opened" signal
+/// - For each window, connects to "workspace-changed" signal
+/// - Sends DaemonEvent::WorkspaceChange through the tokio channel
+/// - Runs GLib main loop (blocking) to process signals
+fn spawn_wnck_watcher(tx: mpsc::Sender<DaemonEvent>, rt: tokio::runtime::Handle) {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    // Initialize GTK (required for wnck)
+    if gtk::init().is_err() {
+        tracing::error!("Failed to initialize GTK for wnck watcher");
+        return;
+    }
+
+    // Set client type before getting screen
+    wnck_rs::set_client_type(wnck_rs::ClientType::Pager);
+
+    let screen = match wnck_rs::Screen::get_default() {
+        Some(s) => s,
+        None => {
+            tracing::error!("Failed to get wnck screen");
+            return;
+        }
+    };
+
+    // Force initial update to get current windows
+    screen.force_update();
+
+    // Track windows we've connected signals to (avoid duplicates)
+    let connected_windows: Rc<RefCell<HashSet<u64>>> = Rc::new(RefCell::new(HashSet::new()));
+
+    // Helper to connect workspace-changed signal to a window
+    let connect_window = {
+        let tx = tx.clone();
+        let rt = rt.clone();
+        let connected = Rc::clone(&connected_windows);
+
+        move |window: wnck_rs::Window| {
+            let xid = window.xid();
+
+            // Skip if already connected
+            if !connected.borrow_mut().insert(xid) {
+                return;
+            }
+
+            let tx = tx.clone();
+            let rt = rt.clone();
+
+            window.connect_workspace_changed(move || {
+                tracing::trace!(xid, "WNCK: workspace-changed signal");
+                let event = DaemonEvent::WorkspaceChange { platform_window_id: xid };
+                let _ = rt.block_on(tx.send(event));
+            });
+        }
+    };
+
+    // Connect to existing windows
+    for window in screen.get_windows() {
+        connect_window(window);
+    }
+
+    // Connect to new windows as they open
+    let connect_fn = connect_window.clone();
+    screen.connect_window_opened(move |window| {
+        tracing::trace!(xid = window.xid(), "WNCK: window-opened");
+        connect_fn(window);
+    });
+
+    tracing::info!("WNCK workspace watcher ready (instant detection enabled)");
+
+    // Run GLib main loop (blocks forever, processing signals)
+    let main_loop = glib::MainLoop::new(None, false);
+    main_loop.run();
 }

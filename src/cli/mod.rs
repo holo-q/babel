@@ -98,7 +98,7 @@ const QUERY_COMMANDS: &[&str] = &[
 
 /// Mutation commands (state-changing) - rendered underlined in help
 const MUTATION_COMMANDS: &[&str] = &[
-    "focus", "send", "set-icon", "set-read", "set-title", "mv", "fire"
+    "focus", "send", "type", "broadcast", "set-icon", "set-read", "set-title", "mv", "fire"
 ];
 
 /// Style command names in help output based on their semantic category
@@ -257,23 +257,83 @@ pub enum Commands {
 
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
 
-    /// Focus a Claude window (rofi picker if no ID given)
+    /// Focus a Claude window (interactive picker if no ID given)
     #[command()]
     Focus {
-        /// Kitty window ID to focus (omit for interactive rofi picker)
+        /// Kitty window ID to focus (omit for interactive picker)
         window_id: Option<u64>,
+
+        /// Search by scrollback content instead of title
+        #[arg(long, short)]
+        content: bool,
     },
 
-    /// Send text to Claude window(s)
+    /// Send text to Claude window(s) and press Enter
+    ///
+    /// Sends text followed by Enter (carriage return) to submit to Claude.
+    /// If any targeted window has unsent text in the input area, the operation
+    /// is aborted and those windows are listed.
     ///
     /// Target can be a window ID or "*" for all windows.
+    ///
+    /// Examples:
+    ///   babel send 42 "fix the bug"        # Send to window 42
+    ///   babel send '*' "run tests"         # Send to all windows
     #[command()]
     Send {
         /// Target: window ID or "*" for all
         target: Target,
 
-        /// Text to send
+        /// Text to send (will be followed by Enter)
         text: String,
+
+        /// Force send even if there's pending input in the textbox
+        #[arg(long, short)]
+        force: bool,
+    },
+
+    /// Type text into Claude window(s) without pressing Enter
+    ///
+    /// Types text into the input area without submitting. Useful for composing
+    /// prompts incrementally or when you want manual control over when to send.
+    /// If any targeted window has unsent text, the operation is aborted.
+    ///
+    /// Target can be a window ID or "*" for all windows.
+    ///
+    /// Examples:
+    ///   babel type 42 "partial prompt..."   # Type without sending
+    #[command()]
+    Type {
+        /// Target: window ID or "*" for all
+        target: Target,
+
+        /// Text to type (no Enter at end)
+        text: String,
+
+        /// Force type even if there's pending input in the textbox
+        #[arg(long, short)]
+        force: bool,
+    },
+
+    /// Broadcast a prompt to all Claude windows
+    ///
+    /// Sends the same text to every Claude window and presses Enter. Equivalent
+    /// to `babel send '*' "text"` but more explicit about intent.
+    ///
+    /// If any window has unsent text in the input area, the broadcast is aborted
+    /// and those windows are listed. Use --force to override.
+    ///
+    /// Examples:
+    ///   babel broadcast "run lint"          # Send to all windows
+    ///   babel broadcast --force "restart"   # Force even with pending input
+    #[command()]
+    Broadcast {
+        /// Text to broadcast (will be followed by Enter)
+        text: String,
+
+        /// Force broadcast even if some windows have pending input
+        #[arg(long, short)]
+        force: bool,
     },
 
     /// Set a custom icon for window(s)

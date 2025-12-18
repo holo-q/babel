@@ -48,3 +48,8 @@ anstyle = "1.0.13"
 # TUI - Debug console for IPC traffic inspection and daemon state
 ratatui = "0.29"
 crossterm = "0.29"
+
+# WNCK - Event-based window/workspace tracking (instant, no polling)
+wnck-rs = { path = "../../Lib/wnck-rs" }
+glib = "0.18"
+gtk = "0.18"

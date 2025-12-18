@@ -124,6 +124,19 @@ pub enum BabelEvent {
         session_id: Option<String>,
     },
 
+    /// Window moved to different workspace
+    ///
+    /// Emitted when a Claude window's XFCE workspace changes.
+    /// Used by richspace-babel to track per-workspace dot state.
+    WindowWorkspaceChanged {
+        /// Kitty window ID that moved
+        kitty_id: u64,
+        /// Previous workspace (None if was on unknown workspace)
+        old_workspace: Option<i32>,
+        /// New workspace (None if now on unknown workspace)
+        new_workspace: Option<i32>,
+    },
+
     // ─── Terminal Events (all kitty windows, not just Claude) ───────────────────
 
     /// Any kitty terminal opened
@@ -482,6 +495,7 @@ impl EventFilter {
             BabelEvent::WindowRemoved { .. } => "window_removed",
             BabelEvent::WindowFocused { .. } => "window_focused",
             BabelEvent::WindowUnfocused { .. } => "window_unfocused",
+            BabelEvent::WindowWorkspaceChanged { .. } => "window_workspace_changed",
             BabelEvent::TerminalOpened { .. } => "terminal_opened",
             BabelEvent::TerminalClosed { .. } => "terminal_closed",
             BabelEvent::TerminalBecameClaude { .. } => "terminal_became_claude",
