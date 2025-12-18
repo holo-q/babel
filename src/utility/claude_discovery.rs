@@ -434,7 +434,9 @@ pub fn load_session_by_id(
 /// Spawn a claude session in a new kitty window
 ///
 /// Uses `kitty-claude` script for consistent window setup with random backgrounds.
-/// Returns the new kitty window ID after a brief delay for the window to appear.
+/// Always spawns on the MAIN kitty socket (lowest PID) to consolidate windows
+/// after multi-instance accidents. Returns the new kitty window ID after a brief
+/// delay for the window to appear.
 pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Result<Option<u64>> {
     use std::process::{Command, Stdio};
     use tokio::time::{sleep, Duration};
@@ -461,15 +463,28 @@ pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Re
         return Ok(None);
     }
 
+    // Get the main socket (lowest PID) - consolidates to primary kitty instance
+    // This ensures wset load always restores to the "real" kitty, not orphan instances
+    let main_socket = crate::kitty::main_socket();
+
     // Spawn kitty-claude with the session
     // kitty-claude handles random background selection and consistent styling
-    let _child = Command::new("kitty-claude")
-        .args(["-d", &cwd.to_string_lossy()])
+    // KITTY_LISTEN_ON forces targeting the main socket, not whatever socket
+    // the daemon happens to be running from
+    let mut cmd = Command::new("kitty-claude");
+    cmd.args(["-d", &cwd.to_string_lossy()])
         .args(["-e", "claude", "-r", session_id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+
+    // Target main socket explicitly - critical for multi-instance consolidation
+    if let Some(socket) = &main_socket {
+        cmd.env("KITTY_LISTEN_ON", socket);
+        tracing::debug!(socket, session_id, "Spawning session on main socket");
+    }
+
+    let _child = cmd.spawn()
         .context("Failed to spawn kitty-claude")?;
 
     // Wait for window to appear
