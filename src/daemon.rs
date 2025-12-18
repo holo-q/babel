@@ -1847,7 +1847,23 @@ async fn process_request(
 		Request::Enrich { window_id } => handlers::enrich(state, window_id).await,
 		Request::Focus { window_id } => handlers::focus(window_id),
 		Request::Scroll { window_id } => handlers::scroll(window_id),
-		Request::Send { window_id, text } => handlers::send(window_id, &text),
+		Request::Send { window_id, text } => {
+			let response = handlers::send(window_id, &text);
+			// Trigger workspace re-summarization on user prompt
+			// User just sent new instructions to Claude, context is changing
+			if matches!(response, Response::Ok { .. }) {
+				let workspace = {
+					let s = state.read().await;
+					s.windows.values()
+						.find(|w| w.id() == window_id)
+						.and_then(|w| w.workspace)
+				};
+				if let Some(ws) = workspace {
+					summarize_workspace(ws, state, summarizer).await;
+				}
+			}
+			response
+		}
 		Request::Type { window_id, text } => handlers::type_text(window_id, &text),
 		Request::HasPendingInput { window_id } => handlers::has_pending_input(window_id),
 

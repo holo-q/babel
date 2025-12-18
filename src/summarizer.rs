@@ -95,7 +95,10 @@ impl WorkspaceSummarizer {
         // Fallback if API key not configured
         let api_key = match &self.api_key {
             Some(k) => k,
-            None => return Ok(self.fallback_title(&sessions)),
+            None => {
+                tracing::debug!(workspace, "Summarization skipped: ANTHROPIC_API_KEY not set");
+                return Ok(self.fallback_title(&sessions));
+            }
         };
 
         // Compute input hash to detect changes
