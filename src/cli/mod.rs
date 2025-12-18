@@ -516,7 +516,7 @@ pub enum Commands {
     ///
     /// Workspace sets capture all Claude windows and their positions across workspaces.
     /// Use `babel wset save` and `babel wset load` to manage layouts.
-    #[command()]
+    #[command(name = "wset")]
     WSet {
         #[command(subcommand)]
         command: WSetCommands,
