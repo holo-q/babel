@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::env;
 use std::os::unix::fs::FileTypeExt;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context, bail};
 
@@ -270,6 +271,102 @@ pub struct KittyInstance {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// XFWM4 Focus Stealing Prevention Bypass
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// XFWM4 has focus stealing prevention enabled by default. This blocks programmatic
+// focus requests from `kitten @ focus-window`. To work around this, we temporarily
+// disable prevention, focus the window, wait for the WM to process, then restore.
+//
+// This matches the behavior of `focus-steal wrap` from Lib/focus-steal but
+// implemented in pure Rust for daemon compatibility (no nushell dependency).
+
+const XFWM4_CHANNEL: &str = "xfwm4";
+const PREVENT_STEALING_PROP: &str = "/general/prevent_focus_stealing";
+const ACTIVATE_ACTION_PROP: &str = "/general/activate_action";
+/// Delay after focus to let WM process before restoring prevention
+const FOCUS_SETTLE_MS: u64 = 100;
+
+/// Get an xfconf property value
+fn xfconf_get(property: &str) -> Option<String> {
+    let output = Command::new("xfconf-query")
+        .args(["-c", XFWM4_CHANNEL, "-p", property])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Set an xfconf property value
+fn xfconf_set(property: &str, value: &str) -> Result<()> {
+    let output = Command::new("xfconf-query")
+        .args(["-c", XFWM4_CHANNEL, "-p", property, "-s", value])
+        .output()
+        .context("Failed to execute xfconf-query")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("xfconf-query set failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// State of XFWM4 focus stealing prevention
+struct FocusStealingState {
+    prevent: Option<String>,
+    action: Option<String>,
+}
+
+impl FocusStealingState {
+    /// Save current state
+    fn save() -> Self {
+        Self {
+            prevent: xfconf_get(PREVENT_STEALING_PROP),
+            action: xfconf_get(ACTIVATE_ACTION_PROP),
+        }
+    }
+
+    /// Restore saved state
+    fn restore(self) {
+        if let Some(prevent) = self.prevent {
+            let _ = xfconf_set(PREVENT_STEALING_PROP, &prevent);
+        }
+        if let Some(action) = self.action {
+            let _ = xfconf_set(ACTIVATE_ACTION_PROP, &action);
+        }
+    }
+}
+
+/// Temporarily disable focus stealing prevention
+///
+/// Returns a guard that restores the original state on drop.
+fn disable_focus_prevention() -> Option<FocusStealingState> {
+    let state = FocusStealingState::save();
+
+    // Only proceed if we successfully saved state (xfconf available)
+    if state.prevent.is_none() && state.action.is_none() {
+        tracing::debug!("xfconf not available, skipping focus prevention bypass");
+        return None;
+    }
+
+    // Disable prevention and set action to "bring"
+    if let Err(e) = xfconf_set(PREVENT_STEALING_PROP, "false") {
+        tracing::debug!("Failed to disable focus prevention: {}", e);
+        return None;
+    }
+    if let Err(e) = xfconf_set(ACTIVATE_ACTION_PROP, "bring") {
+        tracing::debug!("Failed to set activate action: {}", e);
+    }
+
+    Some(state)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Internal: Socket-targeted primitives
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -322,10 +419,24 @@ fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
 }
 
 pub(crate) fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
+    // Temporarily disable XFWM4 focus stealing prevention
+    // This is necessary because XFWM4 blocks programmatic focus requests by default
+    let saved_state = disable_focus_prevention();
+
     let output = Command::new("kitten")
         .args(["@", "--to", socket, "focus-window", "--match", &format!("id:{}", id)])
         .output()
         .context("Failed to execute 'kitten @ focus-window'")?;
+
+    // Wait for WM to process the focus request before restoring prevention
+    if saved_state.is_some() {
+        std::thread::sleep(Duration::from_millis(FOCUS_SETTLE_MS));
+    }
+
+    // Restore original focus prevention state
+    if let Some(state) = saved_state {
+        state.restore();
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
