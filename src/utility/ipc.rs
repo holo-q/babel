@@ -258,8 +258,14 @@ pub async fn send_request(request: &Request) -> Result<Response> {
 }
 
 /// Check if daemon is running
+///
+/// Fast check: just verifies socket exists and is connectable.
+/// Doesn't send a message - saves one IPC round-trip (~5ms).
 pub async fn is_daemon_running() -> bool {
-    send_request(&Request::Ping).await.is_ok()
+    let sock_path = socket_path();
+    // Quick check: can we connect to the socket?
+    // This is faster than sending a ping and waiting for response
+    UnixStream::connect(&sock_path).await.is_ok()
 }
 
 /// Synchronous wrapper for send_request (for non-async CLI)
