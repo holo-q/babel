@@ -117,6 +117,207 @@ fn runtime_dir_path() -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Kitty Config Parsing
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Babel requires kitty to be configured with remote control enabled.
+// We parse kitty.conf to validate this and determine the socket base path.
+//
+// Kitty's socket naming: config says `listen_on unix:$XDG_RUNTIME_DIR/kitty.sock`
+// but kitty auto-appends `-$PID` when loaded from config (see kitty/main.py:402).
+// This means multiple instances = multiple sockets, always.
+//
+// Our strategy:
+// - Parse config to get the BASE socket path (without PID)
+// - "Main" socket = lowest PID (oldest instance, likely the intentional one)
+// - Orphan sockets = higher PIDs (accidental spawns without -1 flag)
+
+/// Kitty configuration relevant to babel
+#[derive(Debug, Clone)]
+pub struct KittyConfig {
+    /// Whether remote control is enabled (required for babel)
+    pub allow_remote_control: bool,
+    /// Base socket path from config (without -$PID suffix)
+    /// e.g., "unix:/run/user/1000/kitty.sock"
+    pub listen_on_base: Option<String>,
+    /// Path to the config file that was parsed
+    pub config_path: PathBuf,
+}
+
+/// Errors when parsing/validating kitty config
+#[derive(Debug, Clone)]
+pub enum KittyConfigError {
+    /// Config file not found
+    NotFound(PathBuf),
+    /// Remote control not enabled
+    RemoteControlDisabled,
+    /// No listen_on configured
+    NoListenOn,
+    /// listen_on doesn't use unix socket
+    NotUnixSocket(String),
+}
+
+impl std::fmt::Display for KittyConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(path) => write!(f, "kitty.conf not found at {}", path.display()),
+            Self::RemoteControlDisabled => write!(f,
+                "kitty remote control not enabled. Add to kitty.conf:\n  allow_remote_control yes"),
+            Self::NoListenOn => write!(f,
+                "kitty listen_on not configured. Add to kitty.conf:\n  listen_on unix:$XDG_RUNTIME_DIR/kitty.sock"),
+            Self::NotUnixSocket(val) => write!(f,
+                "kitty listen_on must be unix socket, got: {}", val),
+        }
+    }
+}
+
+impl std::error::Error for KittyConfigError {}
+
+/// Parse kitty.conf to extract remote control settings
+///
+/// Looks for:
+/// - `allow_remote_control yes|true|password|socket|socket-only` (any truthy value)
+/// - `listen_on unix:...` (the socket path, without -$PID suffix)
+pub fn parse_kitty_config() -> std::result::Result<KittyConfig, KittyConfigError> {
+    let config_path = kitty_config_path();
+
+    if !config_path.exists() {
+        return Err(KittyConfigError::NotFound(config_path));
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|_| KittyConfigError::NotFound(config_path.clone()))?;
+
+    let mut allow_remote_control = false;
+    let mut listen_on_base = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse key-value pairs (kitty uses space/tab separator)
+        let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let key = parts[0].trim();
+        let value = parts[1].trim();
+
+        match key {
+            "allow_remote_control" => {
+                // Truthy values: yes, true, password, socket, socket-only
+                // Falsy: no, false
+                allow_remote_control = !matches!(value.to_lowercase().as_str(), "no" | "false" | "");
+            }
+            "listen_on" => {
+                // Expand $XDG_RUNTIME_DIR and ~ but NOT {kitty_pid}
+                let expanded = expand_kitty_path(value);
+                listen_on_base = Some(expanded);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(KittyConfig {
+        allow_remote_control,
+        listen_on_base,
+        config_path,
+    })
+}
+
+/// Validate kitty config for babel compatibility
+///
+/// Returns Ok(KittyConfig) if valid, Err with specific problem if not.
+pub fn validate_kitty_config() -> std::result::Result<KittyConfig, KittyConfigError> {
+    let config = parse_kitty_config()?;
+
+    if !config.allow_remote_control {
+        return Err(KittyConfigError::RemoteControlDisabled);
+    }
+
+    match &config.listen_on_base {
+        None => return Err(KittyConfigError::NoListenOn),
+        Some(path) if !path.starts_with("unix:") => {
+            return Err(KittyConfigError::NotUnixSocket(path.clone()));
+        }
+        _ => {}
+    }
+
+    Ok(config)
+}
+
+/// Get the "main" kitty socket - the oldest instance (lowest PID)
+///
+/// In a healthy system, there's one kitty started intentionally (main).
+/// Orphan sockets are accidental spawns that didn't use -1/--single-instance.
+/// We identify main by lowest PID (oldest = likely the intentional one).
+pub fn main_socket() -> Option<String> {
+    let sockets = find_all_sockets();
+
+    // Sort by PID (lowest first)
+    let mut with_pids: Vec<_> = sockets.iter()
+        .filter_map(|s| socket_pid(s).map(|pid| (pid, s.clone())))
+        .collect();
+
+    with_pids.sort_by_key(|(pid, _)| *pid);
+
+    with_pids.first().map(|(_, s)| s.clone())
+}
+
+/// Check if a socket is the "main" one (lowest PID)
+pub fn is_main_socket(socket: &str) -> bool {
+    main_socket().as_deref() == Some(socket)
+}
+
+/// List orphan sockets (not the main one)
+pub fn orphan_sockets() -> Vec<String> {
+    let main = main_socket();
+    find_all_sockets().into_iter()
+        .filter(|s| main.as_ref() != Some(s))
+        .collect()
+}
+
+/// Get default kitty config path
+fn kitty_config_path() -> PathBuf {
+    if let Ok(config_home) = env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(config_home).join("kitty/kitty.conf")
+    } else if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home).join(".config/kitty/kitty.conf")
+    } else {
+        PathBuf::from("/etc/xdg/kitty/kitty.conf")
+    }
+}
+
+/// Expand environment variables in kitty config paths
+/// Handles $VAR syntax, plus ~
+fn expand_kitty_path(path: &str) -> String {
+    let mut result = path.to_string();
+
+    // Expand ~ to HOME
+    if result.starts_with('~') {
+        if let Ok(home) = env::var("HOME") {
+            result = result.replacen('~', &home, 1);
+        }
+    }
+
+    // Expand common env vars used in kitty configs
+    // Simple approach: just handle the known ones kitty uses
+    for var in ["XDG_RUNTIME_DIR", "HOME", "TMPDIR", "XDG_CONFIG_HOME"] {
+        if let Ok(val) = env::var(var) {
+            result = result.replace(&format!("${}", var), &val);
+            result = result.replace(&format!("${{{}}}", var), &val);
+        }
+    }
+
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Data Structures
 // ═══════════════════════════════════════════════════════════════════════════════
 

@@ -1006,6 +1006,35 @@ pub async fn run_daemon() -> Result<()> {
 	// ─── Startup Banner ─────────────────────────────────────────────────────────
 	tracing::info!("babel v{}", env!("CARGO_PKG_VERSION"));
 
+	// ─── Kitty Config Validation ────────────────────────────────────────────────
+	// Babel requires kitty with remote control enabled. Validate config on startup
+	// and abort with helpful error message if misconfigured.
+	let kitty_config = crate::kitty::validate_kitty_config()
+		.map_err(|e| anyhow::anyhow!("Kitty config validation failed:\n{}", e))?;
+
+	tracing::info!(
+		config = %kitty_config.config_path.display(),
+		socket_base = ?kitty_config.listen_on_base,
+		"Kitty config validated"
+	);
+
+	// Log socket topology - helps diagnose multi-instance issues
+	let sockets = crate::kitty::find_all_sockets();
+	let main_socket = crate::kitty::main_socket();
+	let orphan_count = sockets.len().saturating_sub(1);
+
+	if orphan_count > 0 {
+		tracing::warn!(
+			main = ?main_socket,
+			orphans = orphan_count,
+			"Multiple kitty instances detected. Main socket = lowest PID."
+		);
+	} else if let Some(ref main) = main_socket {
+		tracing::info!(socket = %main, "Single kitty instance (healthy)");
+	} else {
+		tracing::warn!("No kitty sockets found - is kitty running?");
+	}
+
 	// Initialize state
 	let state = Arc::new(RwLock::new(BabelState::new()));
 
