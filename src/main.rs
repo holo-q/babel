@@ -116,6 +116,10 @@ async fn main() -> Result<()> {
             cli::query::cmd_history(&core, sessions, limit, all, cli.json).await
         }
 
+        Commands::Target => {
+            cli::action::cmd_target(cli.json).await
+        }
+
         // ─── Action Commands (state-changing) ────────────────────────────────────
         Commands::Focus { window_id, content } => {
             cli::action::cmd_focus(&core, window_id, content).await

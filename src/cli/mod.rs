@@ -93,7 +93,7 @@ const RESET: &str = "\x1b[0m";
 /// Query commands (read-only, safe) - rendered italic in help
 const QUERY_COMMANDS: &[&str] = &[
     "ls", "ls-terminals", "ls-panes", "ls-sockets", "get-window", "get-pane",
-    "get-scrollback", "history"
+    "get-scrollback", "history", "target"
 ];
 
 /// Mutation commands (state-changing) - rendered underlined in help
@@ -254,6 +254,20 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+
+    /// Point-and-click window selection via slop
+    ///
+    /// Click any kitty window to get the pane IDs contained within it.
+    /// Useful for getting target IDs for send/broadcast commands.
+    ///
+    /// Uses `slop` for X11 window selection - click the kitty window you want
+    /// to target. Returns all pane IDs within that window (multiple if split).
+    ///
+    /// Examples:
+    ///   babel target                    # Click window, get pane IDs
+    ///   babel send $(babel target) msg  # Send to clicked window
+    #[command(name = "target")]
+    Target,
 
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
 

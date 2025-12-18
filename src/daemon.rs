@@ -20,11 +20,12 @@
 mod config {
     use std::time::Duration;
 
-    /// Interval between kitty window polls (200ms = 5 Hz)
+    /// Interval between kitty window polls (500ms = 2 Hz)
     ///
-    /// Lower = more responsive workspace change detection, higher CPU.
-    /// 200ms feels near-instant for UI while being reasonable on resources.
-    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+    /// Used for: new windows, session state changes, scrollback activity.
+    /// Workspace changes are instant via wnck signals (not polling).
+    /// 500ms is fine since most changes are caught by wnck.
+    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
     /// Debounce interval for file watcher events
     ///
@@ -1201,7 +1202,7 @@ pub async fn run_daemon() -> Result<()> {
                         tracing::debug!(platform_window_id, "WNCK workspace change detected");
                         let changed_workspaces = {
                             let mut s = state.write().await;
-                            (*s).poll_once().unwrap_or_default()
+                            s.refresh_windows().unwrap_or_default()
                         };
                         // Trigger summarization for affected workspaces
                         if !changed_workspaces.is_empty() {

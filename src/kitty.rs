@@ -615,6 +615,18 @@ pub fn get_pane_all(id: u64) -> Result<Option<KittyPane>> {
     Ok(panes.into_iter().find(|p| p.id == id))
 }
 
+/// Get all panes in a kitty OS window by its X11/Wayland platform window ID
+///
+/// When the user clicks a kitty window via slop, this maps the X11 window ID
+/// to the kitty panes within that window. A single kitty OS window can contain
+/// multiple panes (splits) across multiple tabs.
+///
+/// Returns empty Vec if the platform_window_id doesn't match any kitty instance.
+pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane>> {
+    let panes = list_all_panes()?;
+    Ok(panes.into_iter().filter(|p| p.platform_window_id == platform_window_id).collect())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public API: Instance Discovery
 // ═══════════════════════════════════════════════════════════════════════════════

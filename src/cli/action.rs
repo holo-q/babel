@@ -558,3 +558,81 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Interactive Window Selection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Point-and-click window selection via slop
+///
+/// Uses `slop` to let the user click any X11 window, then maps the X11 window ID
+/// to kitty pane IDs. Works locally (no daemon needed) since slop requires X11 display.
+///
+/// Output:
+/// - Plain: space-separated pane IDs (for shell command substitution)
+/// - JSON: array of {id, title, socket} objects
+pub async fn cmd_target(json: bool) -> Result<()> {
+    use std::process::Command;
+    use claude_babel::kitty::get_panes_by_platform_id;
+
+    // Run slop to get X11 window ID from user click
+    // -t 999999: force window selection (not region), disable drag tolerance
+    // -f '%i': output only the window ID
+    eprintln!("Click a kitty window to select...");
+
+    let output = Command::new("slop")
+        .args(["-t", "999999", "-f", "%i"])
+        .output()
+        .context("Failed to run slop. Is it installed? (pacman -S slop)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("cancelled") || output.status.code() == Some(1) {
+            eprintln!("Selection cancelled");
+            return Ok(());
+        }
+        anyhow::bail!("slop failed: {}", stderr);
+    }
+
+    let x11_window_id: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .context("Failed to parse X11 window ID from slop")?;
+
+    // Map X11 window ID to kitty panes
+    let panes = get_panes_by_platform_id(x11_window_id)?;
+
+    if panes.is_empty() {
+        eprintln!("No kitty panes found in window {}", x11_window_id);
+        eprintln!("(The clicked window may not be a kitty terminal)");
+        return Ok(());
+    }
+
+    if json {
+        // JSON output: array of pane info
+        let output: Vec<_> = panes.iter().map(|p| serde_json::json!({
+            "id": p.id,
+            "title": p.title,
+            "socket": p.socket,
+            "cwd": p.cwd,
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        // Plain output: space-separated IDs for command substitution
+        // Example: `babel send $(babel target) "hello"`
+        let ids: Vec<String> = panes.iter().map(|p| p.id.to_string()).collect();
+        println!("{}", ids.join(" "));
+
+        // Info on stderr so it doesn't interfere with command substitution
+        if panes.len() == 1 {
+            eprintln!("Selected pane {} ({})", panes[0].id, truncate(&panes[0].title, 40));
+        } else {
+            eprintln!("Selected {} panes:", panes.len());
+            for p in &panes {
+                eprintln!("  {} - {}", p.id, truncate(&p.title, 40));
+            }
+        }
+    }
+
+    Ok(())
+}
