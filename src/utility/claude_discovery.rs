@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use crate::utility::claude_storage::{find_session_by_summary, SessionInfo};
 use crate::fingerprint::{SessionFingerprint, MatchConfidence};
-use crate::kitty::{list_panes, set_user_var, get_recent_scrollback, close_window, get_pane, move_window_to_workspace, KittyPane, PaneAddr};
+use crate::kitty::{list_panes, set_user_var, get_recent_scrollback, close_window, get_pane, move_window_to_workspace, set_window_geometry, KittyPane, PaneAddr};
 use crate::wset::WSet;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -559,9 +559,10 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
         for window_config in &wspace.windows {
             match spawn_claude_session(&window_config.session_id, &window_config.cwd).await {
                 Ok(Some(kitty_id)) => {
-                    // Move to correct workspace
+                    // Move to correct workspace and restore geometry
                     // Need to get platform_window_id first
                     if let Ok(Some(win)) = get_pane(kitty_id) {
+                        // Step 1: Move to correct workspace
                         if let Err(e) = move_window_to_workspace(win.platform_window_id, wspace.index) {
                             tracing::warn!(
                                 kitty_id,
@@ -569,6 +570,31 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
                                 error = %e,
                                 "Failed to move window to workspace"
                             );
+                        }
+
+                        // Step 2: Restore precise geometry if available
+                        // This enables multi-monitor restoration
+                        if let Some(ref geom) = window_config.geometry {
+                            // Brief pause for workspace move to complete
+                            sleep(Duration::from_millis(50)).await;
+
+                            if let Err(e) = set_window_geometry(win.platform_window_id, geom) {
+                                tracing::warn!(
+                                    kitty_id,
+                                    x = geom.x, y = geom.y,
+                                    w = geom.width, h = geom.height,
+                                    error = %e,
+                                    "Failed to restore window geometry"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    kitty_id,
+                                    x = geom.x, y = geom.y,
+                                    w = geom.width, h = geom.height,
+                                    monitor = ?geom.monitor,
+                                    "Restored window geometry"
+                                );
+                            }
                         }
                     }
                 }

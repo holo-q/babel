@@ -1126,6 +1126,156 @@ pub fn move_window_to_workspace(platform_window_id: u64, workspace: i32) -> Resu
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Window Geometry (for multi-monitor precise restoration)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::wset::WindowGeometry;
+
+/// Get window geometry using xdotool
+///
+/// Returns (x, y, width, height) for precise multi-monitor restoration.
+/// Uses xdotool which handles frame/decoration offsets consistently.
+pub fn get_window_geometry(platform_window_id: u64) -> Result<WindowGeometry> {
+    let hex_id = format!("0x{:x}", platform_window_id);
+
+    // Get geometry with xdotool
+    let output = Command::new("xdotool")
+        .args(["getwindowgeometry", "--shell", &hex_id])
+        .output()
+        .context("Failed to execute 'xdotool'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("xdotool getwindowgeometry failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse shell format output:
+    // WINDOW=123456
+    // X=100
+    // Y=200
+    // WIDTH=800
+    // HEIGHT=600
+    // SCREEN=0
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut width = 0u32;
+    let mut height = 0u32;
+
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "X" => x = value.parse().unwrap_or(0),
+                "Y" => y = value.parse().unwrap_or(0),
+                "WIDTH" => width = value.parse().unwrap_or(0),
+                "HEIGHT" => height = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+
+    // Get monitor name for this position
+    let monitor = get_monitor_at_position(x, y);
+
+    Ok(WindowGeometry {
+        x,
+        y,
+        width,
+        height,
+        monitor,
+    })
+}
+
+/// Set window geometry using wmctrl
+///
+/// Moves and resizes window to exact position. The gravity parameter (first value)
+/// is 0 to use default positioning.
+pub fn set_window_geometry(platform_window_id: u64, geom: &WindowGeometry) -> Result<()> {
+    let hex_id = format!("0x{:08x}", platform_window_id);
+
+    // wmctrl -i -r <id> -e <gravity>,<x>,<y>,<width>,<height>
+    // gravity 0 = use default, -1 = don't change position, etc.
+    let geom_str = format!("0,{},{},{},{}", geom.x, geom.y, geom.width, geom.height);
+
+    let output = Command::new("wmctrl")
+        .args(["-i", "-r", &hex_id, "-e", &geom_str])
+        .output()
+        .context("Failed to execute 'wmctrl'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("wmctrl geometry set failed: {}", stderr);
+    }
+
+    tracing::debug!(
+        window = hex_id,
+        x = geom.x, y = geom.y,
+        w = geom.width, h = geom.height,
+        "Set window geometry"
+    );
+
+    Ok(())
+}
+
+/// Get monitor name at a given position using xrandr
+///
+/// Parses xrandr output to find which monitor contains the given coordinates.
+/// Returns None if position is outside all monitors or xrandr fails.
+fn get_monitor_at_position(x: i32, y: i32) -> Option<String> {
+    let output = Command::new("xrandr")
+        .args(["--query"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse xrandr output for connected monitors with geometry
+    // Format: "HDMI-1 connected 1920x1080+0+0 ..."
+    for line in stdout.lines() {
+        if !line.contains(" connected") {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let monitor_name = parts[0];
+
+        // Find geometry pattern: WxH+X+Y
+        for part in &parts[2..] {
+            if let Some((dims, pos)) = part.split_once('+') {
+                if let Some((w, h)) = dims.split_once('x') {
+                    let mon_w: i32 = w.parse().ok()?;
+                    let mon_h: i32 = h.parse().ok()?;
+
+                    // Parse +X+Y or +X-Y etc.
+                    let coords: Vec<&str> = pos.split(|c| c == '+' || c == '-').collect();
+                    if coords.len() >= 2 {
+                        let mon_x: i32 = coords[0].parse().ok()?;
+                        let mon_y: i32 = coords[1].parse().ok()?;
+
+                        // Check if point is within this monitor
+                        if x >= mon_x && x < mon_x + mon_w &&
+                           y >= mon_y && y < mon_y + mon_h {
+                            return Some(monitor_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Raw JSON Structures (for parsing kitten @ ls output)
 // ═══════════════════════════════════════════════════════════════════════════════
 

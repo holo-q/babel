@@ -67,6 +67,28 @@ pub struct WindowConfig {
     /// Window title (for display, not restoration)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Window geometry for precise multi-monitor restoration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<WindowGeometry>,
+}
+
+/// Window geometry for precise restoration
+///
+/// Captures position and size so windows can be restored to exact locations,
+/// critical for multi-monitor setups where workspace index alone isn't enough.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    /// X position (absolute, from left edge of combined display)
+    pub x: i32,
+    /// Y position (absolute, from top edge of combined display)
+    pub y: i32,
+    /// Window width
+    pub width: u32,
+    /// Window height
+    pub height: u32,
+    /// Monitor name (e.g., "HDMI-1", "DP-2") for validation on restore
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<String>,
 }
 
 /// Summary info for listing wsets
@@ -163,8 +185,11 @@ impl WSet {
 
     /// Build a WSet from current babel state
     ///
-    /// Groups windows by workspace and captures their session IDs
+    /// Groups windows by workspace and captures their session IDs and geometry.
+    /// Geometry capture enables precise multi-monitor restoration.
     pub fn from_babel_state(name: &str, state: &BabelState) -> Self {
+        use crate::kitty::get_window_geometry;
+
         let now = Utc::now();
 
         // Group windows by workspace
@@ -179,10 +204,16 @@ impl WSet {
 
             let workspace = window.workspace.unwrap_or(0);
 
+            // Capture window geometry for precise restoration
+            let geometry = get_window_geometry(window.platform_window_id)
+                .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
+                .ok();
+
             let config = WindowConfig {
                 session_id,
                 cwd: window.cwd.clone(),
                 title: Some(window.title.clone()),
+                geometry,
             };
 
             wspaces_map.entry(workspace).or_default().push(config);
@@ -213,7 +244,11 @@ impl WSet {
     }
 
     /// Build a WSet from a list of ClaudeWindows (for direct mode without daemon)
+    ///
+    /// Captures geometry for precise multi-monitor restoration.
     pub fn from_windows(name: &str, windows: &[ClaudeWindow], workspace_titles: &HashMap<i32, String>) -> Self {
+        use crate::kitty::get_window_geometry;
+
         let now = Utc::now();
 
         let mut wspaces_map: HashMap<i32, Vec<WindowConfig>> = HashMap::new();
@@ -226,10 +261,16 @@ impl WSet {
 
             let workspace = window.workspace.unwrap_or(0);
 
+            // Capture window geometry for precise restoration
+            let geometry = get_window_geometry(window.platform_window_id)
+                .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
+                .ok();
+
             let config = WindowConfig {
                 session_id,
                 cwd: window.cwd.clone(),
                 title: Some(window.title.clone()),
+                geometry,
             };
 
             wspaces_map.entry(workspace).or_default().push(config);
