@@ -70,8 +70,8 @@ impl BabelCore {
             debug!("daemon not available, initializing local state");
             let mut state = BabelState::new();
 
-            // Initialize same way daemon does
-            if let Err(e) = state.refresh_windows() {
+            // Initialize same way daemon does (full refresh with activity states)
+            if let Err(e) = state.refresh_windows(false) {
                 warn!("failed to refresh windows: {}", e);
             }
             if let Err(e) = state.rebuild_summary_index() {
@@ -522,8 +522,8 @@ impl BabelCore {
                 // Use the impl function from claude_discovery
                 let skipped = crate::utility::claude_discovery::load_wset(&wset).await?;
 
-                // Refresh state after loading
-                if let Err(e) = state.refresh_windows() {
+                // Refresh state after loading (quick, activity via periodic poll)
+                if let Err(e) = state.refresh_windows(true) {
                     warn!("failed to refresh windows after wset load: {}", e);
                 }
 
@@ -694,8 +694,8 @@ impl BabelCore {
                     session_id, cwd
                 ).await?;
 
-                // Refresh state to pick up new window
-                if let Err(e) = state.refresh_windows() {
+                // Refresh state to pick up new window (quick, activity via periodic poll)
+                if let Err(e) = state.refresh_windows(true) {
                     warn!("failed to refresh windows after spawn: {}", e);
                 }
 
@@ -914,8 +914,8 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(state) => {
-                // Re-initialize state same as connect()
-                if let Err(e) = state.refresh_windows() {
+                // Re-initialize state same as connect() (full refresh)
+                if let Err(e) = state.refresh_windows(false) {
                     warn!("failed to refresh windows: {}", e);
                 }
                 if let Err(e) = state.rebuild_summary_index() {

@@ -81,7 +81,7 @@ use crate::utility::ipc::{create_listener, Request, Response};
 use crate::kitty::{
     get_scrollback,  // used in fingerprint_match_addr
     focus_window_any, get_scrollback_any, send_text_any,
-    list_all_panes, discover_all_instances, default_socket,
+    discover_all_instances, default_socket,
 };
 use crate::utility::claude_discovery::{get_window_activity_with_scrollback, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
@@ -348,11 +348,18 @@ impl BabelState {
 	///
 	/// Multi-socket support: polls all discovered kitty instances (not just default).
 	/// This enables graceful degradation when multiple instances exist.
-	pub fn refresh_windows(&mut self) -> Result<Vec<i32>> {
+	///
+	/// # Performance
+	/// When `skip_activity_fetch` is true, skips the expensive scrollback fetches
+	/// used for activity state detection. Use this for quick structural refreshes
+	/// that don't need real-time activity states (cached values are used instead).
+	/// The periodic poll passes `false` to keep activity states current.
+	pub fn refresh_windows(&mut self, skip_activity_fetch: bool) -> Result<Vec<i32>> {
 		use crate::kitty::get_all_workspaces;
 
 		// ─── Multi-Socket Discovery ─────────────────────────────────────────────────
 		// Query all kitty instances, update socket_status
+		// IMPORTANT: We extract panes from instances to avoid a second round of kitten @ ls calls
 		let instances = discover_all_instances();
 		let current_socket = default_socket();
 
@@ -365,8 +372,11 @@ impl BabelState {
 			}))
 			.collect();
 
-		// Get ALL kitty panes from ALL sockets
-		let all_panes = list_all_panes()?;
+		// Extract all panes from discovered instances (already fetched above)
+		// This avoids the duplicate kitten @ ls calls that list_all_panes() would do
+		let all_panes: Vec<_> = instances.into_iter()
+			.flat_map(|i| i.panes)
+			.collect();
 
 		// Filter to just Claude windows for the main tracking
 		let kitty_windows: Vec<_> = all_panes.iter()
@@ -585,6 +595,11 @@ impl BabelState {
 		// Detect session state changes and emit events
 		// This enables richspace-babel to track Claude activity per-workspace
 		// Also track scrollback changes for ActivityPulse events
+		//
+		// PERFORMANCE: This loop is expensive (~100ms per window via kitten subprocess).
+		// Skip when skip_activity_fetch=true for fast structural refreshes.
+		// Cached activity states from previous polls are still available.
+		if !skip_activity_fetch {
 		for (addr, window) in &new_windows {
 			// Get both state and scrollback in one fetch to avoid double I/O
 			let (new_state, scrollback) = get_window_activity_with_scrollback(addr.id);
@@ -662,6 +677,7 @@ impl BabelState {
 				}
 			}
 		}
+		} // end skip_activity_fetch check
 
 		// Clean up states for removed windows
 		self.window_states.retain(|addr, _| new_windows.contains_key(addr));
@@ -721,6 +737,91 @@ impl BabelState {
 			window.session_id = Some(session_id);
 			window.match_confidence = Some(confidence);
 			window.fingerprint = Some(fingerprint);
+		}
+	}
+
+	/// Apply activity state update for a window
+	///
+	/// This processes activity state and scrollback changes, emitting events as needed.
+	/// Called with write lock after the expensive I/O (scrollback fetch) completes.
+	/// Designed to be quick - just state updates and event emission.
+	pub fn apply_activity_update(
+		&mut self,
+		addr: &PaneAddr,
+		new_state: scrollparse::claude::ActivityState,
+		scrollback: String,
+	) {
+		let old_state = self.window_states.get(addr).copied();
+		let window = match self.windows.get(addr) {
+			Some(w) => w,
+			None => return, // Window no longer exists
+		};
+
+		// ─── State Change Detection ─────────────────────────────────────────────
+		match old_state {
+			Some(old) if old != new_state => {
+				// State changed - emit event
+				trace!("Window {} state change: {:?} -> {:?}", addr.short(), old, new_state);
+				self.event_publisher.publish(BabelEvent::SessionStateChanged {
+					kitty_id: addr.id,
+					session_id: window.session_id.clone(),
+					workspace: window.workspace,
+					old_state: old,
+					new_state,
+				});
+				self.window_states.insert(addr.clone(), new_state);
+
+				// Also emit ActivityPulse on state transitions
+				self.event_publisher.publish(BabelEvent::ActivityPulse {
+					kitty_id: addr.id,
+					session_id: window.session_id.clone(),
+					workspace: window.workspace,
+					intensity: 0.8, // State transitions are significant
+					trigger: crate::events::PulseTrigger::StateTransition,
+				});
+
+				// Auto-unread when Claude finishes working and awaits input
+				if new_state == scrollparse::claude::ActivityState::AwaitingInput {
+					if let Some(ref session_id) = window.session_id {
+						if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
+							tracing::warn!(session_id, error = %e, "Failed to auto-unread session");
+						}
+					}
+				}
+			}
+			None => {
+				// New window - initialize state (no event)
+				self.window_states.insert(addr.clone(), new_state);
+			}
+			_ => {
+				// State unchanged
+			}
+		}
+
+		// ─── Activity Pulse Detection ───────────────────────────────────────────
+		if !scrollback.is_empty() {
+			let activity = self.window_activity.entry(addr.clone()).or_default();
+			let (changed, _delta_bytes) = activity.update(&scrollback);
+
+			if changed {
+				let intensity = activity.compute_intensity();
+				let trigger = match new_state {
+					scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,
+					scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,
+					_ => crate::events::PulseTrigger::TokenOutput,
+				};
+
+				// Only emit if intensity is meaningful
+				if intensity > 0.05 {
+					self.event_publisher.publish(BabelEvent::ActivityPulse {
+						kitty_id: addr.id,
+						session_id: window.session_id.clone(),
+						workspace: window.workspace,
+						intensity,
+						trigger,
+					});
+				}
+			}
 		}
 	}
 
@@ -1046,7 +1147,7 @@ pub async fn run_daemon() -> Result<()> {
 		let mut s = state.write().await;
 		s.rebuild_summary_index().context("Failed to build summary index")?;
 		s.rebuild_fingerprint_index().context("Failed to build fingerprint index")?;
-		let _ = s.refresh_windows().context("Failed initial window scan")?;
+		let _ = s.refresh_windows(false).context("Failed initial window scan")?;
 
 		// Compute meaningful stats
 		let sessions_with_fingerprints = s.fingerprint_index.len();
@@ -1173,50 +1274,80 @@ pub async fn run_daemon() -> Result<()> {
             Some(event) = event_rx.recv() => {
                 match event {
                     DaemonEvent::KittyPoll => {
-                        // Phase 1: Quick refresh with lock (no I/O)
-                        let changed_workspaces = {
+                        // Phase 1: Quick structural refresh with lock (skip activity I/O)
+                        // This returns IMMEDIATELY so IPC requests aren't blocked
+                        let (changed_workspaces, window_addrs) = {
                             let mut s = state.write().await;
-                            match s.refresh_windows() {
+                            let ws = match s.refresh_windows(true) { // Skip activity fetch!
                                 Ok(ws) => ws,
                                 Err(e) => {
                                     tracing::warn!(error = ?e, "Window refresh failed");
                                     vec![]
                                 }
-                            }
-                        }; // Lock released here
+                            };
+                            let addrs: Vec<_> = s.windows.keys().cloned().collect();
+                            (ws, addrs)
+                        }; // Lock released - main loop continues immediately!
 
-                        // Phase 2: Get windows needing fingerprints + copy of fingerprint index
-                        // Both are quick read operations
-                        let (needs_matching, fingerprint_index) = {
-                            let s = state.read().await;
-                            let needs = s.get_windows_needing_fingerprints();
-                            let index = s.fingerprint_index.clone();
-                            (needs, index)
-                        }; // Lock released here
+                        // Spawn background task for slow I/O operations
+                        // This keeps the main select! loop responsive to IPC
+                        let state_clone = Arc::clone(&state);
+                        let summarizer_clone = Arc::clone(&summarizer);
+                        tokio::spawn(async move {
+                            // Phase 2: Fetch activity states (expensive, ~100ms/window)
+                            // Using spawn_blocking for CPU-bound subprocess handling
+                            let activity_results: Vec<_> = tokio::task::spawn_blocking(move || {
+                                window_addrs.iter()
+                                    .map(|addr| {
+                                        let (activity_state, scrollback) = get_window_activity_with_scrollback(addr.id);
+                                        (addr.clone(), activity_state, scrollback)
+                                    })
+                                    .collect()
+                            }).await.unwrap_or_default();
 
-                        // Phase 3: Do expensive I/O (get_scrollback) WITHOUT ANY LOCK
-                        // This allows concurrent readers to proceed unblocked
-                        for addr in needs_matching {
-                            if let Some((session_id, confidence, fingerprint)) =
-                                BabelState::fingerprint_match_addr(&addr, &fingerprint_index)
+                            // Phase 3: Apply activity updates with quick write lock
                             {
-                                // Phase 4: Apply result with write lock (quick operation)
-                                let mut s = state.write().await;
-                                s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
-                            }
-                        }
-
-                        // Spawn summarization for changed workspaces
-                        // Always run - summarizer falls back to project names when API key isn't set
-                        if !changed_workspaces.is_empty() {
-                            let summarizer = Arc::clone(&summarizer);
-                            let state = Arc::clone(&state);
-                            tokio::spawn(async move {
-                                for ws in changed_workspaces {
-                                    summarize_workspace(ws, &state, &summarizer).await;
+                                let mut s = state_clone.write().await;
+                                for (addr, new_state, scrollback) in activity_results {
+                                    s.apply_activity_update(&addr, new_state, scrollback);
                                 }
-                            });
-                        }
+                            }
+
+                            // Phase 4: Get windows needing fingerprints + copy index
+                            let (needs_matching, fingerprint_index) = {
+                                let s = state_clone.read().await;
+                                let needs = s.get_windows_needing_fingerprints();
+                                let index = s.fingerprint_index.clone();
+                                (needs, index)
+                            };
+
+                            // Phase 5: Do fingerprint matching I/O (expensive)
+                            let fingerprint_results: Vec<_> = tokio::task::spawn_blocking(move || {
+                                needs_matching.iter()
+                                    .filter_map(|addr| {
+                                        BabelState::fingerprint_match_addr(addr, &fingerprint_index)
+                                            .map(|(session_id, confidence, fingerprint)| {
+                                                (addr.clone(), session_id, confidence, fingerprint)
+                                            })
+                                    })
+                                    .collect()
+                            }).await.unwrap_or_default();
+
+                            // Phase 6: Apply fingerprint results with quick write lock
+                            if !fingerprint_results.is_empty() {
+                                let mut s = state_clone.write().await;
+                                for (addr, session_id, confidence, fingerprint) in fingerprint_results {
+                                    s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
+                                }
+                            }
+
+                            // Phase 7: Summarization for changed workspaces
+                            if !changed_workspaces.is_empty() {
+                                for ws in changed_workspaces {
+                                    summarize_workspace(ws, &state_clone, &summarizer_clone).await;
+                                }
+                            }
+                        });
                     }
                     DaemonEvent::FileChange(path) => {
                         // Rebuild fingerprint index on JSONL changes
@@ -1228,10 +1359,11 @@ pub async fn run_daemon() -> Result<()> {
                     }
                     DaemonEvent::WorkspaceChange { platform_window_id } => {
                         // Instant workspace change from wnck - trigger immediate poll
+                        // Use skip_activity_fetch=true for fast response (activity updates via periodic poll)
                         tracing::debug!(platform_window_id, "WNCK workspace change detected");
                         let changed_workspaces = {
                             let mut s = state.write().await;
-                            s.refresh_windows().unwrap_or_default()
+                            s.refresh_windows(true).unwrap_or_default()
                         };
                         // Trigger summarization for affected workspaces
                         if !changed_workspaces.is_empty() {
@@ -1651,10 +1783,10 @@ mod handlers {
 
 	/// Refresh windows and run fingerprint matching
 	pub async fn refresh(state: &Arc<RwLock<BabelState>>) -> Response {
-		// Phase 1: Refresh windows (quick, no I/O)
+		// Phase 1: Refresh windows with full activity fetch (explicit refresh request)
 		let window_count = {
 			let mut s = state.write().await;
-			match s.refresh_windows() {
+			match s.refresh_windows(false) { // Full refresh with activity states
 				Ok(_) => s.windows.len(),
 				Err(e) => return Response::Error { message: format!("Refresh failed: {}", e) }
 			}
@@ -1797,7 +1929,7 @@ mod handlers {
 
 		{
 			let mut s = state.write().await;
-			let _ = s.refresh_windows();
+			let _ = s.refresh_windows(true); // Quick refresh, activity via periodic poll
 		}
 
 		Response::WSetLoaded { name: wset_name, wspaces, windows, skipped, dry_run: false }
