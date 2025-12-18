@@ -125,8 +125,8 @@ async fn main() -> Result<()> {
             cli::action::cmd_focus(&core, window_id, content).await
         }
 
-        Commands::GetScrollback { window_id, lines } => {
-            cli::action::cmd_get_scrollback(&core, window_id, lines).await
+        Commands::GetScrollback { target, lines } => {
+            cli::action::cmd_get_scrollback(&core, &target, lines).await
         }
 
         Commands::Send { target, text, force } => {

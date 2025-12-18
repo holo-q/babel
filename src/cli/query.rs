@@ -24,6 +24,7 @@ use crate::cli::legend::Legend;
 ///
 /// Always scans all kitty sockets on the system. Windows from non-current
 /// sockets are displayed but fenced from operations that require the current socket.
+#[tracing::instrument(level = "debug", skip(core))]
 pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 	let mut windows = if details {
 		// Use core method which properly handles daemon/local mode and multi-socket

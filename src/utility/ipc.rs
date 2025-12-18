@@ -234,6 +234,7 @@ pub fn socket_path() -> PathBuf {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Send a request to the daemon and get a response
+#[tracing::instrument(level = "debug", skip(request), fields(cmd = ?request))]
 pub async fn send_request(request: &Request) -> Result<Response> {
     let sock_path = socket_path();
 

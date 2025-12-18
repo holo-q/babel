@@ -103,6 +103,7 @@ impl BabelCore {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Get all Claude windows with enriched session data
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn windows(&self) -> Result<Vec<ClaudeWindow>> {
         match &self.mode {
             CoreMode::Connected => {

@@ -25,24 +25,28 @@ pub mod legend;
 /// Supports:
 /// - Specific window ID: "42"
 /// - All windows: "*"
+/// - Current window: "." (uses KITTY_WINDOW_ID env var)
 #[derive(Debug, Clone)]
 pub enum Target {
     /// Target a specific window by ID
     Window(u64),
     /// Target all Claude windows
     All,
+    /// Target the current window (from KITTY_WINDOW_ID env var)
+    /// This allows Claude to introspect its own pane
+    Current,
 }
 
 impl std::str::FromStr for Target {
     type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s == "*" {
-            Ok(Target::All)
-        } else {
-            s.parse::<u64>()
+        match s {
+            "*" => Ok(Target::All),
+            "." => Ok(Target::Current),
+            _ => s.parse::<u64>()
                 .map(Target::Window)
-                .map_err(|_| format!("Invalid target '{}': expected window ID or '*'", s))
+                .map_err(|_| format!("Invalid target '{}': expected window ID, '*', or '.'", s))
         }
     }
 }
@@ -50,7 +54,9 @@ impl std::str::FromStr for Target {
 /// Resolve a target to a list of window IDs
 ///
 /// This is a helper that converts Target enum to concrete window IDs.
-/// For Target::All, uses BabelCore to discover all Claude windows and returns their IDs.
+/// - Target::Window(id) → [id]
+/// - Target::All → all Claude windows from daemon
+/// - Target::Current → current window from KITTY_WINDOW_ID env var
 pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result<Vec<u64>> {
     match target {
         Target::Window(id) => Ok(vec![*id]),
@@ -58,7 +64,41 @@ pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result
             let windows = core.windows().await?;
             Ok(windows.iter().map(|w| w.id()).collect())
         }
+        Target::Current => {
+            let (id, _socket) = current_pane_info()?;
+            Ok(vec![id])
+        }
     }
+}
+
+/// Get current pane info from kitty env vars
+///
+/// Returns (window_id, socket) for the current kitty pane.
+/// Kitty sets these env vars in every shell it spawns:
+/// - KITTY_WINDOW_ID: The pane's window ID
+/// - KITTY_LISTEN_ON: The socket path (e.g., "unix:/run/user/1000/kitty.sock-3497")
+///
+/// This enables Claude to introspect its own pane with full address precision.
+pub fn current_pane_info() -> anyhow::Result<(u64, String)> {
+    let id_str = std::env::var("KITTY_WINDOW_ID")
+        .map_err(|_| anyhow::anyhow!("KITTY_WINDOW_ID not set (not running in kitty?)"))?;
+
+    let id = id_str.parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Invalid KITTY_WINDOW_ID: {}", id_str))?;
+
+    let socket = std::env::var("KITTY_LISTEN_ON")
+        .unwrap_or_else(|_| claude_babel::kitty::default_socket());
+
+    Ok((id, socket))
+}
+
+/// Get full PaneAddr for the current pane
+///
+/// Combines KITTY_WINDOW_ID and KITTY_LISTEN_ON into a PaneAddr for
+/// precise addressing. Useful for operations that need socket-specific targeting.
+pub fn current_pane_addr() -> anyhow::Result<claude_babel::kitty::PaneAddr> {
+    let (id, socket) = current_pane_info()?;
+    Ok(claude_babel::kitty::PaneAddr::new(socket, id))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -227,10 +267,12 @@ pub enum Commands {
     ///
     /// Retrieves the full scrollback buffer from a kitty window. Useful for
     /// debugging or piping to other tools.
+    ///
+    /// Target can be a window ID or "." for current window.
     #[command()]
     GetScrollback {
-        /// Kitty window ID
-        window_id: u64,
+        /// Target: window ID or "." for current window
+        target: Target,
         /// Maximum number of lines to retrieve
         #[arg(short, long)]
         lines: Option<usize>,
@@ -288,14 +330,15 @@ pub enum Commands {
     /// If any targeted window has unsent text in the input area, the operation
     /// is aborted and those windows are listed.
     ///
-    /// Target can be a window ID or "*" for all windows.
+    /// Target can be a window ID, "*" for all windows, or "." for current window.
     ///
     /// Examples:
     ///   babel send 42 "fix the bug"        # Send to window 42
     ///   babel send '*' "run tests"         # Send to all windows
+    ///   babel send . "introspect self"     # Send to current window (Claude self-reference)
     #[command()]
     Send {
-        /// Target: window ID or "*" for all
+        /// Target: window ID, "*" for all, or "." for current
         target: Target,
 
         /// Text to send (will be followed by Enter)
@@ -312,13 +355,14 @@ pub enum Commands {
     /// prompts incrementally or when you want manual control over when to send.
     /// If any targeted window has unsent text, the operation is aborted.
     ///
-    /// Target can be a window ID or "*" for all windows.
+    /// Target can be a window ID, "*" for all windows, or "." for current window.
     ///
     /// Examples:
     ///   babel type 42 "partial prompt..."   # Type without sending
+    ///   babel type . "introspect myself"    # Type in current window (Claude self-reference)
     #[command()]
     Type {
-        /// Target: window ID or "*" for all
+        /// Target: window ID, "*" for all, or "." for current
         target: Target,
 
         /// Text to type (no Enter at end)
@@ -356,10 +400,10 @@ pub enum Commands {
     /// appears in `babel ls` output and can be used to visually mark
     /// important sessions.
     ///
-    /// Target can be a window ID or "*" for all windows.
+    /// Target can be a window ID, "*" for all, or "." for current window.
     #[command()]
     SetIcon {
-        /// Target: window ID or "*" for all
+        /// Target: window ID, "*" for all, or "." for current
         target: Target,
 
         /// Icon/emoji to display (e.g., "🔥", "⭐", "🚧")
@@ -368,10 +412,10 @@ pub enum Commands {
 
     /// Mark window(s) as read
     ///
-    /// Target can be a window ID or "*" for all windows.
+    /// Target can be a window ID, "*" for all, or "." for current window.
     #[command()]
     SetRead {
-        /// Target: window ID or "*" for all
+        /// Target: window ID, "*" for all, or "." for current
         target: Target,
     },
 
@@ -383,15 +427,16 @@ pub enum Commands {
     /// Without a title argument, auto-determines the title from the session
     /// (equivalent to the old update-titles behavior).
     ///
-    /// Target can be a window ID or "*" for all windows.
+    /// Target can be a window ID, "*" for all, or "." for current window.
     ///
     /// Examples:
     ///   babel set-title 42 "My Custom Title"   # Set specific title
     ///   babel set-title 42                     # Auto-title from session
     ///   babel set-title *                      # Auto-title all windows
+    ///   babel set-title . "Working on X"       # Set title for current window
     #[command()]
     SetTitle {
-        /// Target: window ID or "*" for all
+        /// Target: window ID, "*" for all, or "." for current
         target: Target,
 
         /// Custom title (omit to auto-determine from session)

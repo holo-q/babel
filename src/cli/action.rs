@@ -184,7 +184,21 @@ async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Get scrollback from a window (via BabelCore)
-pub async fn cmd_get_scrollback(core: &BabelCore, window_id: u64, lines: Option<usize>) -> Result<()> {
+///
+/// Target can be a window ID or "." for current window.
+/// "*" (all) is not supported - use a specific target.
+pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option<usize>) -> Result<()> {
+    let window_id = match target {
+        Target::Window(id) => *id,
+        Target::Current => {
+            let (id, _socket) = super::current_pane_info()?;
+            id
+        }
+        Target::All => {
+            anyhow::bail!("Cannot get scrollback from all windows. Use a specific window ID or '.' for current.");
+        }
+    };
+
     let scrollback = core.scrollback(window_id, lines).await
         .context("Failed to get scrollback")?;
     print!("{}", scrollback);
