@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use console::{style, Style};
+use tracing::instrument;
 
 use claude_babel::utility::claude_storage::{SessionInfo, get_session_path};
 use claude_babel::core::BabelCore;
@@ -89,6 +90,7 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool) -> Result<()> {
 /// List all kitty terminals (not just Claude sessions)
 ///
 /// Scans ALL kitty sockets on the system, showing terminals from all instances.
+#[instrument(level = "debug", skip(_core))]
 pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
 	let instances = discover_all_instances();
 
@@ -159,6 +161,7 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
 /// List all kitty panes grouped by socket and OS window
 ///
 /// Now queries all responsive kitty sockets via the core (daemon or local mode).
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
 	let panes = core.panes().await.context("Failed to list kitty panes")?;
 
@@ -227,6 +230,7 @@ pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
 ///
 /// Socket-first view showing each kitty instance with its status,
 /// and the Claude windows running in that instance.
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 	let sockets = core.sockets().await.context("Failed to list sockets")?;
 	let windows = core.windows().await.unwrap_or_default();
@@ -349,6 +353,7 @@ pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 }
 
 /// Check status of a specific window or the focused window
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_check_window(core: &BabelCore, window_id: Option<u64>, json: bool) -> Result<()> {
 	let window = core.window(window_id).await?;
 
@@ -375,6 +380,7 @@ pub async fn cmd_check_window(core: &BabelCore, window_id: Option<u64>, json: bo
 }
 
 /// Check status of a specific richspace pane
+#[instrument(level = "debug", skip(_core))]
 pub async fn cmd_check_pane(_core: &BabelCore, pane_name: Option<String>, _json: bool) -> Result<()> {
 	// TODO: Implement once richspace-babel pane querying is available
 	match pane_name {
@@ -391,6 +397,7 @@ pub async fn cmd_check_pane(_core: &BabelCore, pane_name: Option<String>, _json:
 }
 
 /// Show conversation history
+#[instrument(level = "debug", skip(core, sessions))]
 pub async fn cmd_history(core: &BabelCore, sessions: Vec<String>, limit: usize, all: bool, json: bool) -> Result<()> {
 	// Determine effective limit
 	let effective_limit = if all { usize::MAX } else { limit };
@@ -441,6 +448,7 @@ pub async fn cmd_history(core: &BabelCore, sessions: Vec<String>, limit: usize, 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Show available Claude windows for user selection
+#[instrument(level = "debug", skip(core))]
 async fn show_available_windows(core: &BabelCore) -> Result<()> {
 	let windows = core.windows().await?;
 

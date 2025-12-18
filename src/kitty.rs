@@ -32,6 +32,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context, bail};
+use tracing::instrument;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Socket Discovery
@@ -767,6 +768,7 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// List panes from the default kitty instance
+#[instrument(level = "debug")]
 pub fn list_panes() -> Result<Vec<KittyPane>> {
     list_panes_on_socket(&default_socket())
 }
@@ -774,6 +776,7 @@ pub fn list_panes() -> Result<Vec<KittyPane>> {
 /// List panes from ALL kitty instances
 ///
 /// Queries every socket in XDG_RUNTIME_DIR. Unresponsive instances are skipped.
+#[instrument(level = "debug")]
 pub fn list_all_panes() -> Result<Vec<KittyPane>> {
     let sockets = find_all_sockets();
     let mut all_panes = Vec::new();
@@ -835,6 +838,7 @@ pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane
 /// Discover all kitty instances on the system
 ///
 /// Returns information about each instance including whether it's responsive.
+#[instrument(level = "debug")]
 pub fn discover_all_instances() -> Vec<KittyInstance> {
     let current_socket = default_socket();
     let all_sockets = find_all_sockets();
@@ -883,11 +887,13 @@ pub fn discover_all_instances() -> Vec<KittyInstance> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Focus a pane by ID (default instance)
+#[instrument(level = "debug")]
 pub fn focus_window(id: u64) -> Result<()> {
     focus_pane_on_socket(&default_socket(), id)
 }
 
 /// Send text to a pane by ID (default instance)
+#[instrument(level = "debug", skip(text))]
 pub fn send_text(id: u64, text: &str) -> Result<()> {
     send_text_on_socket(&default_socket(), id, text)
 }
@@ -903,6 +909,7 @@ pub fn set_window_title(id: u64, title: &str) -> Result<()> {
 }
 
 /// Get full scrollback from a pane by ID (default instance)
+#[instrument(level = "debug")]
 pub fn get_scrollback(id: u64) -> Result<String> {
     get_scrollback_on_socket(&default_socket(), id)
 }
@@ -962,6 +969,7 @@ impl<T> MultiSocketResult<T> {
 /// Focus a pane by ID, searching all sockets
 ///
 /// Returns the pane address and whether it was on a non-current socket.
+#[instrument(level = "debug")]
 pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
     match get_pane_all(id)? {
@@ -976,6 +984,7 @@ pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
 }
 
 /// Send text to a pane by ID, searching all sockets
+#[instrument(level = "debug", skip(text))]
 pub fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
     match get_pane_all(id)? {
@@ -990,6 +999,7 @@ pub fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
 }
 
 /// Get scrollback from a pane by ID, searching all sockets
+#[instrument(level = "debug")]
 pub fn get_scrollback_any(id: u64) -> Result<MultiSocketResult<String>> {
     let current = default_socket();
     match get_pane_all(id)? {

@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use tracing::instrument;
 
 use claude_babel::core::BabelCore;
 use claude_babel::utility::claude_discovery::enrich_window;
@@ -21,6 +22,7 @@ use super::{Target, resolve_target};
 /// With a title argument, sets that exact title on the target window(s).
 /// Without a title argument, auto-determines the title from the session summary
 /// (the "✳ Summary" format that Claude Code uses).
+#[instrument(level = "debug", skip(core, title))]
 pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str>) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
@@ -76,6 +78,7 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
 ///
 /// With --content flag, enables searching window scrollback content.
 /// Without it, searches window titles only (faster).
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: bool) -> Result<()> {
     // Direct focus if ID provided
     if let Some(id) = window_id {
@@ -172,6 +175,7 @@ fn format_windows_for_pager(
 }
 
 /// Focus a window by its kitty ID (via BabelCore)
+#[instrument(level = "debug", skip(core))]
 async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
     core.focus(window_id).await
         .context("Failed to focus window")?;
@@ -187,6 +191,7 @@ async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
 ///
 /// Target can be a window ID or "." for current window.
 /// "*" (all) is not supported - use a specific target.
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option<usize>) -> Result<()> {
     let window_id = match target {
         Target::Window(id) => *id,
@@ -218,6 +223,7 @@ pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option
 /// - Save pending text before sending
 /// - After send completes, restore the pending text
 /// - This enables broadcast without losing in-progress inputs
+#[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
@@ -257,6 +263,7 @@ pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool
 ///
 /// Types text into the input area without submitting. If any targeted window
 /// has pending input, the operation is aborted unless force=true.
+#[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
@@ -300,6 +307,7 @@ pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool
 /// - Send the broadcast text
 /// - Restore pending input to each window
 /// - This enables safe broadcast without losing work-in-progress
+#[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<()> {
     let windows = core.windows().await?;
 
@@ -354,6 +362,7 @@ pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<
 /// Check which windows have pending input
 ///
 /// Returns a list of (window_id, pending_text) for windows with unsent input.
+#[instrument(level = "debug", skip(core))]
 async fn check_pending_inputs(core: &BabelCore, window_ids: &[u64]) -> Result<Vec<(u64, Option<String>)>> {
     let mut pending = Vec::new();
 
@@ -385,6 +394,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Set icon (emoji tag) for window(s) (via BabelCore)
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
@@ -402,6 +412,7 @@ pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Resu
 }
 
 /// Mark window(s) as read (via BabelCore)
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
@@ -423,6 +434,7 @@ pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Fire a prompt to Claude in a detached background session
+#[instrument(level = "debug", skip(core, prompt))]
 pub async fn cmd_fire(
     core: &mut BabelCore,
     prompt: &str,
@@ -444,6 +456,7 @@ pub async fn cmd_fire(
 }
 
 /// List running fire-and-forget tasks
+#[instrument(level = "debug")]
 pub fn cmd_fire_ls(json: bool) -> Result<()> {
     let tasks = BabelCore::fired_tasks()
         .context("Failed to list fired tasks")?;
@@ -475,6 +488,7 @@ pub fn cmd_fire_ls(json: bool) -> Result<()> {
 }
 
 /// Clean up finished fire tasks
+#[instrument(level = "debug")]
 pub fn cmd_fire_clean() -> Result<()> {
     let cleaned = BabelCore::cleanup_fired()
         .context("Failed to clean up fired tasks")?;
@@ -496,6 +510,7 @@ pub fn cmd_fire_clean() -> Result<()> {
 ///
 /// Subscribes to daemon events and prints each one as a JSON line.
 /// Connection stays open until Ctrl+C or daemon shutdown.
+#[instrument(level = "debug", skip(filter))]
 pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -585,6 +600,7 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
 /// Output:
 /// - Plain: space-separated pane IDs (for shell command substitution)
 /// - JSON: array of {id, title, socket} objects
+#[instrument(level = "debug")]
 pub async fn cmd_target(json: bool) -> Result<()> {
     use std::process::Command;
     use claude_babel::kitty::get_panes_by_platform_id;

@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, Context};
-use tracing::{debug, warn, info};
+use tracing::{debug, warn, info, instrument};
 
 use crate::daemon::{BabelState, TerminalInfo};
 use crate::utility::claude_discovery::ClaudeWindow;
@@ -62,6 +62,7 @@ impl BabelCore {
     /// - refresh_windows() to discover kitty windows
     /// - rebuild_summary_index() for title matching
     /// - rebuild_fingerprint_index() for scrollback matching
+    #[instrument(level = "debug")]
     pub async fn connect() -> Self {
         if is_daemon_running().await {
             debug!("connected to babeld");
@@ -127,6 +128,7 @@ impl BabelCore {
     ///
     /// Returns all kitty terminals for visibility into the full terminal flow.
     /// Useful for watching terminals transition to Claude sessions.
+    #[instrument(level = "debug", skip(self))]
     pub async fn terminals(&self) -> Result<Vec<TerminalInfo>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -151,6 +153,7 @@ impl BabelCore {
     ///
     /// Returns raw KittyPane data without babel enrichment. Queries all
     /// responsive kitty instances directly. Useful for low-level kitty inspection.
+    #[instrument(level = "debug", skip(self))]
     pub async fn panes(&self) -> Result<Vec<kitty::KittyPane>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -174,6 +177,7 @@ impl BabelCore {
     ///
     /// Returns status for each known kitty socket including responsiveness,
     /// pane count, and whether it's the current socket.
+    #[instrument(level = "debug", skip(self))]
     pub async fn sockets(&self) -> Result<std::collections::HashMap<String, crate::daemon::SocketStatus>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -194,6 +198,7 @@ impl BabelCore {
     }
 
     /// Get windows with fingerprints extracted from scrollback
+    #[instrument(level = "debug", skip(self))]
     pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudeWindow>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -214,6 +219,7 @@ impl BabelCore {
     }
 
     /// Get a specific window by ID, or focused window if None
+    #[instrument(level = "debug", skip(self))]
     pub async fn window(&self, window_id: Option<u64>) -> Result<Option<ClaudeWindow>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -236,6 +242,7 @@ impl BabelCore {
     }
 
     /// Get session history
+    #[instrument(level = "debug", skip(self))]
     pub async fn history(&self, limit: usize) -> Result<Vec<SessionInfo>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -256,6 +263,7 @@ impl BabelCore {
     }
 
     /// Get scrollback text from a window
+    #[instrument(level = "debug", skip(self))]
     pub async fn scrollback(&self, window_id: u64, lines: Option<usize>) -> Result<String> {
         let text = match &self.mode {
             CoreMode::Connected => {
@@ -287,6 +295,7 @@ impl BabelCore {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Focus a window
+    #[instrument(level = "debug", skip(self))]
     pub async fn focus(&self, window_id: u64) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -306,6 +315,7 @@ impl BabelCore {
     /// Send text to a window (with Enter/CR at end)
     ///
     /// The text is appended with a carriage return to submit it to Claude.
+    #[instrument(level = "debug", skip(self, text))]
     pub async fn send(&self, window_id: u64, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -328,6 +338,7 @@ impl BabelCore {
     ///
     /// Types the text into the input area without submitting. Useful for
     /// composing prompts incrementally or staging input.
+    #[instrument(level = "debug", skip(self, text))]
     pub async fn type_text(&self, window_id: u64, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -353,6 +364,7 @@ impl BabelCore {
     /// TODO: As scrollparse improves, this will become more reliable and
     /// will support extracting the actual pending text for save/restore
     /// operations during broadcast.
+    #[instrument(level = "debug", skip(self))]
     pub async fn has_pending_input(&self, window_id: u64) -> Result<(bool, Option<String>)> {
         match &self.mode {
             CoreMode::Connected => {
@@ -375,6 +387,7 @@ impl BabelCore {
     }
 
     /// Set icon/tag for a window
+    #[instrument(level = "debug", skip(self))]
     pub async fn set_icon(&self, window_id: u64, icon: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -401,6 +414,7 @@ impl BabelCore {
     }
 
     /// Mark session as read
+    #[instrument(level = "debug", skip(self))]
     pub async fn mark_read(&self, window_id: u64) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
@@ -424,6 +438,7 @@ impl BabelCore {
     }
 
     /// Set window title
+    #[instrument(level = "debug", skip(self))]
     pub async fn set_title(&self, window_id: u64, title: &str) -> Result<()> {
         kitty::set_window_title(window_id, title)
     }
@@ -433,6 +448,7 @@ impl BabelCore {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Save current workspace layout
+    #[instrument(level = "debug", skip(self))]
     pub async fn wset_save(&self, name: Option<String>) -> Result<crate::wset::WSet> {
         match &self.mode {
             CoreMode::Connected => {
@@ -454,6 +470,7 @@ impl BabelCore {
     }
 
     /// List saved workspace sets
+    #[instrument(level = "debug", skip(self))]
     pub async fn wset_list(&self) -> Result<Vec<crate::wset::WSetSummary>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -470,6 +487,7 @@ impl BabelCore {
     }
 
     /// Get current wset name
+    #[instrument(level = "debug", skip(self))]
     pub async fn wset_current(&self) -> Result<Option<String>> {
         match &self.mode {
             CoreMode::Connected => {
@@ -489,6 +507,7 @@ impl BabelCore {
     ///
     /// This closes all existing Claude windows and spawns new ones from the WSet.
     /// Returns information about what was loaded and any sessions that couldn't be restored.
+    #[instrument(level = "debug", skip(self))]
     pub async fn wset_load(&mut self, name: Option<String>, dry_run: bool) -> Result<WSetLoadResult> {
         match &mut self.mode {
             CoreMode::Connected => {
@@ -621,6 +640,7 @@ impl BabelCore {
     /// * `prompt` - The prompt to send to Claude
     /// * `workdir` - Optional working directory (resolved automatically if None)
     /// * `ambient_sound` - Optional ambient sound name to associate with task
+    #[instrument(level = "debug", skip(self, prompt))]
     pub async fn fire(
         &mut self,
         prompt: &str,
@@ -677,6 +697,7 @@ impl BabelCore {
     ///
     /// In connected mode, delegates to daemon. In local mode, spawns directly
     /// and refreshes state.
+    #[instrument(level = "debug", skip(self))]
     pub async fn spawn_session(
         &mut self,
         session_id: &str,
@@ -716,6 +737,7 @@ impl BabelCore {
     /// Get the current state of a Claude session (idle, thinking, tool use, etc.)
     ///
     /// Analyzes the window's scrollback to determine what Claude is currently doing.
+    #[instrument(level = "debug", skip(self))]
     pub async fn get_window_state(&self, window_id: u64) -> Result<ActivityState> {
         let scrollback = self.scrollback(window_id, Some(50)).await?;
         Ok(detect_activity_state(&scrollback))
@@ -725,6 +747,7 @@ impl BabelCore {
     ///
     /// Returns windows along with their current state and relative path from source.
     /// Used by migration to detect affected terminals.
+    #[instrument(level = "debug", skip(self))]
     pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingWindow>> {
         // Canonicalize source path for accurate comparison
         let source = source.canonicalize()
@@ -762,6 +785,7 @@ impl BabelCore {
     ///
     /// Sends: Ctrl-C (ensure clean prompt) → cd <new_path> → claude -r <session_id>
     /// This allows the terminal to continue working after a directory move.
+    #[instrument(level = "debug", skip(self))]
     pub async fn migrate_terminal(&self, window_id: u64, new_cwd: &Path, session_id: Option<&str>) -> Result<()> {
         use std::time::Duration;
         use tokio::time::sleep;
@@ -797,6 +821,7 @@ impl BabelCore {
     /// 4. Refreshes internal state to reflect changes
     ///
     /// Returns the migration result and list of windows that were migrated.
+    #[instrument(level = "debug", skip(self))]
     pub async fn migrate_project(
         &mut self,
         old_path: &Path,
@@ -904,6 +929,7 @@ impl BabelCore {
     /// Force refresh of internal state
     ///
     /// In connected mode, tells daemon to refresh. In local mode, re-initializes state.
+    #[instrument(level = "debug", skip(self))]
     pub async fn refresh(&mut self) -> Result<()> {
         match &mut self.mode {
             CoreMode::Connected => {

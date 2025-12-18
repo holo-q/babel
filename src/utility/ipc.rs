@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::instrument;
 
 use crate::utility::claude_storage::SessionInfo;
 use crate::utility::claude_discovery::ClaudeWindow;
@@ -262,6 +263,7 @@ pub async fn send_request(request: &Request) -> Result<Response> {
 ///
 /// Fast check: just verifies socket exists and is connectable.
 /// Doesn't send a message - saves one IPC round-trip (~5ms).
+#[instrument(level = "debug")]
 pub async fn is_daemon_running() -> bool {
     let sock_path = socket_path();
     // Quick check: can we connect to the socket?
@@ -270,6 +272,7 @@ pub async fn is_daemon_running() -> bool {
 }
 
 /// Synchronous wrapper for send_request (for non-async CLI)
+#[instrument(level = "debug", skip(request), fields(cmd = ?request))]
 pub fn send_request_sync(request: &Request) -> Result<Response> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -282,6 +285,7 @@ pub fn send_request_sync(request: &Request) -> Result<Response> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Create and bind the daemon socket
+#[instrument(level = "debug")]
 pub async fn create_listener() -> Result<UnixListener> {
     let sock_path = socket_path();
 
@@ -305,6 +309,7 @@ pub async fn create_listener() -> Result<UnixListener> {
 }
 
 /// Read a request from a client connection
+#[instrument(level = "debug", skip(stream))]
 pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
     let mut line = String::new();
     let bytes_read = stream.read_line(&mut line).await?;
@@ -320,6 +325,7 @@ pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<R
 }
 
 /// Send a response to a client
+#[instrument(level = "debug", skip(stream, response))]
 pub async fn send_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
     let mut response_json = serde_json::to_string(response)?;
     response_json.push('\n');
