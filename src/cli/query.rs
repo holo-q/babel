@@ -9,13 +9,14 @@ use anyhow::{Context, Result};
 use console::{style, Style};
 use tracing::instrument;
 
-use claude_babel::utility::claude_storage::{SessionInfo, get_session_path};
+use claude_babel::utility::claude_storage::{SessionInfo, get_session_path, get_session_display_name};
 use claude_babel::core::BabelCore;
 use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
 use claude_babel::kitty::discover_all_instances;
 use claude_babel::babel_storage::{get_metadata, init_db};
 use claude_babel::ActivityState;
 use crate::cli::legend::Legend;
+use super::Target;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Core Query Commands
@@ -723,4 +724,81 @@ pub fn print_session(session: &SessionInfo) -> Result<()> {
 	println!("  {}{}  {}", summary, dim.apply_to(&slug), dim.apply_to(&project_display));
 
 	Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Title Query
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Get the title/name of a Claude session
+///
+/// Returns the conversation name from Claude's history (set via /rename),
+/// falling back to the session summary, window title, or first prompt.
+///
+/// Title resolution order:
+/// 1. Display name from history.jsonl (set via /rename in Claude Code)
+/// 2. Session summary (from session JSONL)
+/// 3. Window title (strip ✳ prefix if present)
+/// 4. First prompt from conversation
+#[instrument(level = "debug", skip(core))]
+pub async fn cmd_get_title(core: &BabelCore, target: &Target, json: bool) -> Result<()> {
+	// Resolve target to window ID
+	let window_id = match target {
+		Target::Window(id) => *id,
+		Target::Current => {
+			let (id, _socket) = super::current_pane_info()?;
+			id
+		}
+		Target::All => {
+			anyhow::bail!("Cannot get title for all windows. Use a specific window ID or '.' for current.");
+		}
+	};
+
+	// Get window info
+	let windows = core.windows().await?;
+	let window = windows.iter()
+		.find(|w| w.id() == window_id)
+		.ok_or_else(|| anyhow::anyhow!("Window {} not found or is not a Claude session", window_id))?;
+
+	// Try to get the display name from history.jsonl (set via /rename)
+	// Requires session_id to be matched via fingerprinting
+	let display_name = window.session_id.as_ref()
+		.and_then(|id| get_session_display_name(id));
+
+	// Resolve title with fallback chain
+	let title = if let Some(name) = display_name {
+		// 1. Display name from history.jsonl (highest priority)
+		name
+	} else if let Some(ref info) = window.session_info {
+		// 2. Session summary or first prompt
+		info.summaries.first()
+			.map(|s| s.summary.clone())
+			.or_else(|| info.first_prompt.clone())
+			.unwrap_or_else(|| extract_title_from_window(&window.title))
+	} else {
+		// 3. Extract from window title (strip ✳ prefix)
+		extract_title_from_window(&window.title)
+	};
+
+	if json {
+		let output = serde_json::json!({
+			"window_id": window_id,
+			"session_id": window.session_id,
+			"title": title,
+		});
+		println!("{}", serde_json::to_string_pretty(&output)?);
+	} else {
+		println!("{}", title);
+	}
+
+	Ok(())
+}
+
+/// Extract title from window title, stripping Claude's ✳ prefix
+fn extract_title_from_window(window_title: &str) -> String {
+	window_title
+		.trim()
+		.trim_start_matches("✳ ")
+		.trim()
+		.to_string()
 }

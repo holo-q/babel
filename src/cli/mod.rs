@@ -278,6 +278,20 @@ pub enum Commands {
         lines: Option<usize>,
     },
 
+    /// Get the title/name of a Claude session
+    ///
+    /// Returns the conversation name from Claude's history. This is the name
+    /// shown in Claude Code's history panel and can be set via `/rename <name>`.
+    ///
+    /// Falls back to the session summary if no custom name is set.
+    ///
+    /// Target can be a window ID or "." for current window.
+    #[command()]
+    GetTitle {
+        /// Target: window ID or "." for current window
+        target: Target,
+    },
+
     /// Show conversation history from ~/.claude
     ///
     /// Without arguments, shows recent conversations. Pass session IDs as

@@ -83,7 +83,7 @@ use crate::kitty::{
     focus_window_any, get_scrollback_any, send_text_any,
     discover_all_instances, default_socket,
 };
-use crate::utility::claude_discovery::{get_window_activity_with_scrollback, detect_claude_signals};
+use crate::utility::claude_discovery::{get_window_activity_with_scrollback, get_activity_with_scrollback_on_socket, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
 use crate::wset::{WSet, get_current_wset_name, set_current_wset_name, list_wsets};
 
@@ -1299,7 +1299,8 @@ pub async fn run_daemon() -> Result<()> {
                             let activity_results: Vec<_> = tokio::task::spawn_blocking(move || {
                                 window_addrs.iter()
                                     .map(|addr| {
-                                        let (activity_state, scrollback) = get_window_activity_with_scrollback(addr.id);
+                                        // Use socket-aware function to handle multi-instance kitty
+                                        let (activity_state, scrollback) = get_activity_with_scrollback_on_socket(addr);
                                         (addr.clone(), activity_state, scrollback)
                                     })
                                     .collect()

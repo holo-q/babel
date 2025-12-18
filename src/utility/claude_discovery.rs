@@ -126,8 +126,29 @@ pub fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState 
 /// and activity pulse tracking. Avoids double-fetching scrollback.
 ///
 /// Returns (Unknown, empty string) on any error.
+///
+/// NOTE: This uses the default socket. For windows on other sockets, use
+/// `get_activity_with_scrollback_on_socket` instead.
 pub fn get_window_activity_with_scrollback(id: u64) -> (scrollparse::claude::ActivityState, String) {
     match get_recent_scrollback(id, 50) {
+        Ok(scrollback) => {
+            let state = scrollparse::claude::detect_activity_state(&scrollback);
+            (state, scrollback)
+        }
+        Err(_) => (scrollparse::claude::ActivityState::Unknown, String::new()),
+    }
+}
+
+/// Get activity state and scrollback for a pane on a specific socket
+///
+/// Socket-aware variant that works with windows on non-default kitty instances.
+/// Takes a PaneAddr to correctly route the query to the right socket.
+///
+/// Returns (Unknown, empty string) on any error.
+pub fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> (scrollparse::claude::ActivityState, String) {
+    use crate::kitty::get_recent_scrollback_on_socket;
+
+    match get_recent_scrollback_on_socket(&addr.socket, addr.id, 50) {
         Ok(scrollback) => {
             let state = scrollparse::claude::detect_activity_state(&scrollback);
             (state, scrollback)

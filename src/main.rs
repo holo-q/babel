@@ -129,6 +129,10 @@ async fn main() -> Result<()> {
             cli::action::cmd_get_scrollback(&core, &target, lines).await
         }
 
+        Commands::GetTitle { target } => {
+            cli::query::cmd_get_title(&core, &target, cli.json).await
+        }
+
         Commands::Send { target, text, force } => {
             cli::action::cmd_send(&core, &target, &text, force).await
         }

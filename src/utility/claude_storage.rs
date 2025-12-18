@@ -397,6 +397,47 @@ pub fn get_recent_sessions(limit: usize) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// Get the display name for a session from history.jsonl
+///
+/// This is the name shown in Claude Code's history panel, which can be set
+/// via `/rename <name>` in the Claude Code CLI. Returns None if the session
+/// isn't found in history or has no custom name.
+pub fn get_session_display_name(session_id: &str) -> Option<String> {
+    let history_path = claude_base().join("history.jsonl");
+
+    if !history_path.exists() {
+        return None;
+    }
+
+    let file = match File::open(&history_path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    let reader = BufReader::new(file);
+
+    // Find the most recent entry for this session (history.jsonl can have duplicates)
+    let mut best_match: Option<(i64, String)> = None;
+
+    for line in reader.lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<HistoryEntry>(&line) {
+            if entry.session_id.as_deref() == Some(session_id) {
+                // Keep the most recent entry (highest timestamp)
+                match &best_match {
+                    Some((ts, _)) if entry.timestamp <= *ts => {}
+                    _ => best_match = Some((entry.timestamp, entry.display.clone())),
+                }
+            }
+        }
+    }
+
+    best_match.map(|(_, display)| display)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Utilities
 // ═══════════════════════════════════════════════════════════════════════════
