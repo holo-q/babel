@@ -61,7 +61,7 @@ mod config {
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -721,6 +721,16 @@ impl BabelState {
 		    .collect()
 	}
 
+	/// Get session IDs already claimed by existing windows
+	///
+	/// Used to exclude these from "unique CWD" matching - if a session is already
+	/// assigned to another window, it shouldn't count when checking if a CWD is unique.
+	pub fn get_claimed_sessions(&self) -> HashSet<String> {
+		self.windows.values()
+			.filter_map(|w| w.session_id.clone())
+			.collect()
+	}
+
 	/// Apply fingerprint matching results to a window
 	///
 	/// This applies the results from `fingerprint_match_addr` back to state.
@@ -840,11 +850,14 @@ impl BabelState {
 	/// Takes fingerprint_index as parameter to avoid needing &self.
 	/// Takes kitty_cwd from pane info (reliable) instead of extracting from scrollback
 	/// (unreliable - Claude's status bar format varies and may scroll off).
-	#[tracing::instrument(skip(fingerprint_index), fields(addr = %addr.short(), cwd = %kitty_cwd.display(), index_size = fingerprint_index.len()))]
+	/// Takes claimed_sessions to exclude from "unique CWD" matching - prevents
+	/// double-matching when multiple windows are processed in parallel.
+	#[tracing::instrument(skip(fingerprint_index, claimed_sessions), fields(addr = %addr.short(), cwd = %kitty_cwd.display(), index_size = fingerprint_index.len()))]
 	pub fn fingerprint_match_addr(
 		addr: &PaneAddr,
 		kitty_cwd: &Path,
 		fingerprint_index: &HashMap<String, SessionFingerprint>,
+		claimed_sessions: &HashSet<String>,
 	) -> Option<(String, MatchConfidence, SessionFingerprint)> {
 		use crate::kitty::get_scrollback_on_socket;
 
@@ -904,6 +917,33 @@ impl BabelState {
 			}
 		} else {
 			trace!("  no matches above None confidence");
+		}
+
+		// If no Medium+ match found, check for unique CWD match among UNCLAIMED sessions
+		// When only ONE unclaimed session has the same CWD as the window,
+		// that's a strong enough signal to accept as a match
+		if best_match.is_none() && window_fp.cwd.is_some() {
+			let window_cwd = window_fp.cwd.as_ref().unwrap();
+			// Count unclaimed sessions with matching CWD (exclude sessions already assigned to other windows)
+			let cwd_matches: Vec<_> = fingerprint_index.iter()
+				.filter(|(sid, fp)| {
+					fp.cwd.as_ref() == Some(window_cwd) && !claimed_sessions.contains(*sid)
+				})
+				.map(|(sid, _)| sid.clone())
+				.collect();
+
+			if cwd_matches.len() == 1 {
+				tracing::info!(
+					"Unique CWD match: window CWD {:?} matches only unclaimed session {} (excluding {} claimed)",
+					window_cwd, cwd_matches[0], claimed_sessions.len()
+				);
+				best_match = Some((cwd_matches[0].clone(), MatchConfidence::Medium));
+			} else if cwd_matches.len() > 1 {
+				tracing::debug!(
+					"Multiple unclaimed sessions ({}) with matching CWD {:?}, need more signals",
+					cwd_matches.len(), window_cwd
+				);
+			}
 		}
 
 		if let Some((session_id, confidence)) = best_match {
@@ -1025,14 +1065,24 @@ impl BabelState {
 
 		// Build index
 		let mut index = HashMap::new();
+		let mut sessions_with_cwd = 0;
 		for (path, _) in session_files {
 			if let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) {
 				if let Ok(mut fp) = extract_from_jsonl(&path) {
 					fp.session_id = Some(session_id.to_string());
+					if fp.cwd.is_some() {
+						sessions_with_cwd += 1;
+						if let Some(cwd) = &fp.cwd {
+							if cwd.to_string_lossy().contains("claude-babel") {
+								tracing::debug!("Index adding session {} with CWD {:?}", session_id, cwd);
+							}
+						}
+					}
 					index.insert(session_id.to_string(), fp);
 				}
 			}
 		}
+		tracing::debug!("Index built: {} sessions, {} with CWD", index.len(), sessions_with_cwd);
 
 		self.fingerprint_index = index;
 		self.last_fingerprint_rebuild = Instant::now();
@@ -1332,28 +1382,31 @@ pub async fn run_daemon() -> Result<()> {
                                 }
                             }
 
-                            // Phase 4: Get windows needing fingerprints + copy index
-                            let (needs_matching, fingerprint_index) = {
+                            // Phase 4: Get windows needing fingerprints + copy index + claimed sessions
+                            let (needs_matching, fingerprint_index, claimed_sessions) = {
                                 let s = state_clone.read().await;
                                 let needs = s.get_windows_needing_fingerprints();
                                 let index = s.fingerprint_index.clone();
+                                let claimed = s.get_claimed_sessions();
                                 tracing::debug!(
                                     needs_count = needs.len(),
                                     index_size = index.len(),
+                                    claimed_count = claimed.len(),
                                     "Phase 4: windows needing fingerprints"
                                 );
-                                (needs, index)
+                                (needs, index, claimed)
                             };
 
                             // Phase 5: Do fingerprint matching I/O (expensive)
                             // Pass kitty CWD (reliable) instead of extracting from scrollback
+                            // Pass claimed_sessions to exclude from "unique CWD" matching
                             if !needs_matching.is_empty() {
                                 tracing::debug!("Phase 5: starting fingerprint matching for {} windows", needs_matching.len());
                             }
                             let fingerprint_results: Vec<_> = tokio::task::spawn_blocking(move || {
                                 needs_matching.iter()
                                     .filter_map(|(addr, cwd)| {
-                                        BabelState::fingerprint_match_addr(addr, cwd, &fingerprint_index)
+                                        BabelState::fingerprint_match_addr(addr, cwd, &fingerprint_index, &claimed_sessions)
                                             .map(|(session_id, confidence, fingerprint)| {
                                                 (addr.clone(), session_id, confidence, fingerprint)
                                             })
@@ -1820,18 +1873,21 @@ mod handlers {
 			}
 		};
 
-		// Phase 2: Get windows needing fingerprints + index
-		let (needs_matching, fingerprint_index) = {
+		// Phase 2: Get windows needing fingerprints + index + claimed sessions
+		let (needs_matching, fingerprint_index, mut claimed_sessions) = {
 			let s = state.read().await;
-			(s.get_windows_needing_fingerprints(), s.fingerprint_index.clone())
+			(s.get_windows_needing_fingerprints(), s.fingerprint_index.clone(), s.get_claimed_sessions())
 		};
 
 		// Phase 3: Do expensive I/O without lock
 		// Pass kitty CWD (reliable) instead of extracting from scrollback
+		// Sequential processing: update claimed_sessions as we go to avoid double-matching
 		for (addr, cwd) in needs_matching {
 			if let Some((session_id, confidence, fingerprint)) =
-				BabelState::fingerprint_match_addr(&addr, &cwd, &fingerprint_index)
+				BabelState::fingerprint_match_addr(&addr, &cwd, &fingerprint_index, &claimed_sessions)
 			{
+				// Mark this session as claimed before processing next window
+				claimed_sessions.insert(session_id.clone());
 				let mut s = state.write().await;
 				s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
 			}

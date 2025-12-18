@@ -381,7 +381,7 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
 
         // Update metadata
         if fingerprint.cwd.is_none() && entry.cwd.is_some() {
-            tracing::debug!(line_num, cwd = ?entry.cwd, "found cwd in JSONL");
+            tracing::debug!("found cwd in JSONL at line {}: {:?}", line_num, entry.cwd);
             fingerprint.cwd = entry.cwd;
         }
         if fingerprint.timestamp.is_none() && entry.timestamp.is_some() {
@@ -409,17 +409,23 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
             }
             "assistant" => {
                 if let Some(msg_value) = entry.message {
-                    if let Ok(asst_msg) = serde_json::from_value::<AssistantMessage>(msg_value) {
-                        if let Some(content_items) = asst_msg.content {
-                            for item in content_items {
-                                if item.content_type == "tool_use" {
-                                    if let Ok(tool_use) = serde_json::from_value::<ToolUse>(item.data) {
-                                        tracing::trace!(line_num, tool = %tool_use.name, "extracted tool from JSONL");
-                                        tools.push(tool_use.name);
+                    match serde_json::from_value::<AssistantMessage>(msg_value.clone()) {
+                        Ok(asst_msg) => {
+                            if let Some(content_items) = asst_msg.content {
+                                for item in content_items {
+                                    if item.content_type == "tool_use" {
+                                        match serde_json::from_value::<ToolUse>(item.data.clone()) {
+                                            Ok(tool_use) => {
+                                                tracing::trace!("extracted tool from JSONL: {}", tool_use.name);
+                                                tools.push(tool_use.name);
+                                            }
+                                            Err(e) => tracing::trace!("failed to parse tool_use: {}", e),
+                                        }
                                     }
                                 }
                             }
                         }
+                        Err(e) => tracing::trace!("failed to parse AssistantMessage: {}", e),
                     }
                 }
             }
@@ -444,15 +450,8 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
     fingerprint.tool_sequence = tools;
 
     tracing::debug!(
-        ?path,
-        lines_parsed,
-        lines_skipped,
-        ?fingerprint.first_prompt,
-        prompts_count = fingerprint.recent_prompts.len(),
-        tools_count = fingerprint.tool_sequence.len(),
-        ?fingerprint.cwd,
-        ?fingerprint.session_id,
-        "JSONL extraction complete"
+        "JSONL extraction complete: path={:?}, lines={}/{} (parsed/skipped), first_prompt={:?}, cwd={:?}, session={:?}",
+        path, lines_parsed, lines_skipped, fingerprint.first_prompt, fingerprint.cwd, fingerprint.session_id
     );
 
     Ok(fingerprint)
@@ -532,16 +531,14 @@ pub fn match_fingerprints(
         score_reasons.push("tools(+1)");
     }
     tracing::debug!(
-        tool_similarity = tool_sim,
-        tool_match,
-        scrollback_tools = ?scrollback_fp.tool_sequence,
-        jsonl_tools = ?jsonl_fp.tool_sequence,
-        "tool sequence comparison"
+        "tool sequence: similarity={:.3}, match={}, scrollback_len={}, jsonl_len={}",
+        tool_sim, tool_match, scrollback_fp.tool_sequence.len(), jsonl_fp.tool_sequence.len()
     );
 
     // Check CWD match (only if both have cwd)
     let cwd_match = match (&scrollback_fp.cwd, &jsonl_fp.cwd) {
         (Some(cwd1), Some(cwd2)) if cwd1 == cwd2 => {
+            tracing::debug!("cwds MATCH: {:?}", cwd1);
             score += 1;
             score_reasons.push("cwd(+1)");
             true
@@ -563,6 +560,11 @@ pub fn match_fingerprints(
     };
 
     tracing::debug!(
+        "match result: score={}, confidence={:?}, first_prompt={}, recent_prompt={}, tool={}, cwd={}, reasons={:?}",
+        score, confidence, first_prompt_match, recent_prompt_match, tool_match, cwd_match, score_reasons
+    );
+    // Keep original logging as trace for extra details
+    tracing::trace!(
         score,
         ?confidence,
         first_prompt_match,
