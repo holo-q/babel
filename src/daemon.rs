@@ -842,6 +842,34 @@ impl BabelState {
 						trigger,
 					});
 				}
+
+				// ─── File Index Update ───────────────────────────────────────────────
+				// Extract file operations from scrollback and record them
+				// Only process if we have a session_id (we need it to track touches)
+				if let Some(ref session_id) = window.session_id {
+					let file_ops = crate::file_index::extract_file_operations(&scrollback);
+					if !file_ops.is_empty() {
+						// Record touches to database (best effort - don't fail on DB errors)
+						if let Ok(storage) = crate::babel_storage::BabelStorage::open() {
+							for op in &file_ops {
+								if let Err(e) = storage.record_file_touch(session_id, &op.path, &op.operation) {
+									tracing::warn!(
+										session_id,
+										path = %op.path,
+										operation = %op.operation,
+										error = %e,
+										"Failed to record file touch"
+									);
+								}
+							}
+							trace!(
+								session_id,
+								count = file_ops.len(),
+								"Recorded file touches from scrollback"
+							);
+						}
+					}
+				}
 			}
 		}
 	}
