@@ -102,23 +102,23 @@ pub enum BabelEvent {
         kitty_id: u64,
     },
 
-    /// Window gained focus
+    /// Pane gained focus
     ///
-    /// Emitted when a Claude window becomes the focused kitty window.
-    /// Includes session_id if the window has been matched to a session.
-    WindowFocused {
-        /// Kitty window ID now focused
+    /// Emitted when a Claude pane becomes the focused kitty pane.
+    /// Includes session_id if the pane has been matched to a session.
+    PaneFocused {
+        /// Kitty pane ID now focused
         kitty_id: u64,
         /// Session ID if matched, None if still unmatched
         session_id: Option<String>,
     },
 
-    /// Window lost focus
+    /// Pane lost focus
     ///
-    /// Emitted when a Claude window loses focus (another window gained it).
-    /// Paired with WindowFocused for complete focus tracking.
-    WindowUnfocused {
-        /// Kitty window ID that lost focus
+    /// Emitted when a Claude pane loses focus (another pane gained it).
+    /// Paired with PaneFocused for complete focus tracking.
+    PaneUnfocused {
+        /// Kitty pane ID that lost focus
         kitty_id: u64,
         /// Session ID if matched, None if still unmatched
         session_id: Option<String>,
@@ -451,7 +451,7 @@ impl Default for EventPublisher {
 /// let filter = EventFilter::with_events(vec![
 ///     "window_added".to_string(),
 ///     "window_removed".to_string(),
-///     "window_focused".to_string(),
+///     "pane_focused".to_string(),
 /// ]);
 ///
 /// while let Ok(msg) = rx.recv().await {
@@ -464,7 +464,7 @@ impl Default for EventPublisher {
 pub struct EventFilter {
     /// Event types to include (empty = all events)
     ///
-    /// Valid values: "window_added", "window_removed", "window_focused",
+    /// Valid values: "window_added", "window_removed", "pane_focused",
     /// "session_matched", "session_updated", "daemon_shutdown"
     pub include: Vec<String>,
 }
@@ -493,8 +493,8 @@ impl EventFilter {
         let event_name = match event {
             BabelEvent::WindowAdded { .. } => "window_added",
             BabelEvent::WindowRemoved { .. } => "window_removed",
-            BabelEvent::WindowFocused { .. } => "window_focused",
-            BabelEvent::WindowUnfocused { .. } => "window_unfocused",
+            BabelEvent::PaneFocused { .. } => "pane_focused",
+            BabelEvent::PaneUnfocused { .. } => "pane_unfocused",
             BabelEvent::WindowWorkspaceChanged { .. } => "window_workspace_changed",
             BabelEvent::TerminalOpened { .. } => "terminal_opened",
             BabelEvent::TerminalClosed { .. } => "terminal_closed",
@@ -617,7 +617,7 @@ mod tests {
             workspace: None,
         };
         let removed = BabelEvent::WindowRemoved { kitty_id: 1 };
-        let focused = BabelEvent::WindowFocused {
+        let focused = BabelEvent::PaneFocused {
             kitty_id: 1,
             session_id: None,
         };
@@ -727,7 +727,7 @@ mod tests {
                 workspace: None,
             },
             BabelEvent::WindowRemoved { kitty_id: 2 },
-            BabelEvent::WindowFocused {
+            BabelEvent::PaneFocused {
                 kitty_id: 3,
                 session_id: Some("uuid".to_string()),
             },

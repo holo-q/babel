@@ -243,7 +243,7 @@ The daemon publishes events for real-time UI updates:
 pub enum BabelEvent {
     WindowCreated { id: u64, title: String },
     WindowClosed { id: u64 },
-    WindowFocused { id: u64 },
+    PaneFocused { id: u64 },
     SessionMatched { window_id: u64, session_id: String },
     SessionActivity { session_id: String, state: ActivityState },
     // ...

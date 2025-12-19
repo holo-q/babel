@@ -21,7 +21,7 @@ The `events.rs` module has been successfully created and provides a complete pub
 1. **BabelEvent** - Enum of all daemon events:
    - `WindowAdded` - New Claude window discovered
    - `WindowRemoved` - Claude window closed
-   - `WindowFocused` - Window gained focus
+   - `PaneFocused` - Window gained focus
    - `SessionMatched` - Session matched to window via fingerprint
    - `SessionUpdated` - Session JSONL file changed
    - `DaemonShutdown` - Daemon terminating
@@ -83,7 +83,7 @@ let stream = connect_to_daemon().await?;
 send_request(&stream, Request::Subscribe {
     filter: Some(EventFilter::with_events(vec![
         "window_added".to_string(),
-        "window_focused".to_string(),
+        "pane_focused".to_string(),
         "session_updated".to_string(),
     ]))
 }).await?;
@@ -130,7 +130,7 @@ Emitted when a previously tracked window disappears from kitty ls.
 
 **Cleanup**: Subscribers should remove window from UI and release resources
 
-### WindowFocused
+### PaneFocused
 Emitted when a Claude window becomes the focused kitty window.
 
 **Guarantees**:
@@ -177,7 +177,7 @@ Final event before daemon terminates.
 ### Event Throughput
 Typical rates:
 - WindowAdded/Removed: <1/sec (only during window creation/destruction)
-- WindowFocused: ~1-5/sec (depends on user window switching)
+- PaneFocused: ~1-5/sec (depends on user window switching)
 - SessionMatched: <1/sec (only after new window detected)
 - SessionUpdated: 1-10/sec (during active Claude conversation)
 
@@ -200,7 +200,7 @@ Peak worst case: ~20 events/sec during heavy multi-window usage
 - [ ] Add `EventPublisher` to `DaemonState`
 - [ ] Emit `WindowAdded` in window polling loop
 - [ ] Emit `WindowRemoved` when windows disappear
-- [ ] Emit `WindowFocused` when focus changes
+- [ ] Emit `PaneFocused` when focus changes
 - [ ] Emit `SessionMatched` after fingerprint matching succeeds
 - [ ] Emit `SessionUpdated` in inotify handler
 - [ ] Emit `DaemonShutdown` in signal handler
@@ -219,7 +219,7 @@ Peak worst case: ~20 events/sec during heavy multi-window usage
 ### Phase 5: Treasure-Panel Integration
 - [ ] Connect to daemon event stream on startup
 - [ ] Update window list on WindowAdded/Removed
-- [ ] Switch to focused session on WindowFocused
+- [ ] Switch to focused session on PaneFocused
 - [ ] Refresh session data on SessionUpdated
 - [ ] Reconnect on DaemonShutdown
 
