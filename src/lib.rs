@@ -70,6 +70,7 @@ pub mod summarizer;
 pub mod wset;
 pub mod core;
 pub mod tui;
+pub mod file_index;
 
 // Re-export activity state from scrollparse for convenience
 pub use scrollparse::claude::ActivityState;

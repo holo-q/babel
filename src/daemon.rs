@@ -132,6 +132,9 @@ pub struct TerminalInfo {
 	pub is_claude: bool,
 	/// Whether this is the focused window
 	pub is_focused: bool,
+	/// X11/Wayland window ID for geometry lookup
+	/// Used for screen-position sorting (left→right ordering for connectors)
+	pub platform_window_id: u64,
 }
 
 impl TerminalInfo {
@@ -405,6 +408,7 @@ impl BabelState {
 				workspace,
 				is_claude,
 				is_focused: pane.is_focused,
+				platform_window_id: pane.platform_window_id,
 			});
 		}
 
@@ -1638,24 +1642,80 @@ async fn handle_client(
 
 mod handlers {
 	use super::*;
+	use crate::kitty::get_window_geometry;
+
+	// ═══════════════════════════════════════════════════════════════════════════════
+	// Screen Position Sorting
+	// ═══════════════════════════════════════════════════════════════════════════════
+	//
+	// Connectors (panel plugins, richmon, etc.) expect windows ordered by their
+	// on-screen position: left→right, then top→bottom. This matches the visual
+	// layout users see and enables position-based UI (e.g., workspace indicators).
+
+	/// Sort items by screen position (left→right, then top→bottom)
+	///
+	/// Uses xdotool to get geometry for each unique platform_window_id, then sorts
+	/// by x coordinate (primary) and y coordinate (secondary). Items in the same
+	/// OS window maintain their relative order.
+	///
+	/// Performance: O(n) xdotool calls where n = unique platform_window_ids.
+	/// For typical workloads (5-10 windows), this adds ~50-100ms to list calls.
+	fn sort_by_screen_position<T, F>(items: &mut [T], get_platform_id: F)
+	where
+		F: Fn(&T) -> u64,
+	{
+		use std::collections::HashMap;
+
+		// Collect unique platform_window_ids and their geometries
+		let mut geometry_cache: HashMap<u64, (i32, i32)> = HashMap::new();
+		for item in items.iter() {
+			let pid = get_platform_id(item);
+			geometry_cache.entry(pid).or_insert_with(|| {
+				// Default to (i32::MAX, i32::MAX) if geometry lookup fails
+				// This puts windows with unknown geometry at the end
+				get_window_geometry(pid)
+					.map(|g| (g.x, g.y))
+					.unwrap_or((i32::MAX, i32::MAX))
+			});
+		}
+
+		// Sort by x (left→right), then by y (top→bottom)
+		items.sort_by(|a, b| {
+			let (ax, ay) = geometry_cache.get(&get_platform_id(a)).copied().unwrap_or((i32::MAX, i32::MAX));
+			let (bx, by) = geometry_cache.get(&get_platform_id(b)).copied().unwrap_or((i32::MAX, i32::MAX));
+			(ax, ay).cmp(&(bx, by))
+		});
+	}
 
 	/// List all Claude windows with activity states
+	///
+	/// Windows are sorted by screen position (left→right, then top→bottom)
+	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
-		let windows: Vec<ClaudeWindow> = s.windows.values()
+		let mut windows: Vec<ClaudeWindow> = s.windows.values()
 			.map(|w| {
 				let mut win = w.clone();
 				win.activity_state = s.get_activity_state(w.id());
 				win
 			})
 			.collect();
+		drop(s); // Release lock before geometry lookups
+
+		sort_by_screen_position(&mut windows, |w| w.platform_window_id);
 		Response::Windows { windows }
 	}
 
 	/// List all terminals (Claude and non-Claude)
+	///
+	/// Terminals are sorted by screen position (left→right, then top→bottom)
+	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list_terminals(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
-		let terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
+		let mut terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
+		drop(s); // Release lock before geometry lookups
+
+		sort_by_screen_position(&mut terminals, |t| t.platform_window_id);
 		Response::Terminals { terminals }
 	}
 
@@ -1663,9 +1723,15 @@ mod handlers {
 	///
 	/// Unlike list_terminals, this returns raw KittyPane data directly from kitty,
 	/// without any babel enrichment. Queries all responsive kitty instances.
+	///
+	/// Panes are sorted by screen position (left→right, then top→bottom)
+	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list_panes() -> Response {
 		match crate::kitty::list_all_panes() {
-			Ok(panes) => Response::Panes { panes },
+			Ok(mut panes) => {
+				sort_by_screen_position(&mut panes, |p| p.platform_window_id);
+				Response::Panes { panes }
+			}
 			Err(e) => Response::Error { message: format!("Failed to list panes: {}", e) },
 		}
 	}
@@ -1677,6 +1743,9 @@ mod handlers {
 	}
 
 	/// List windows with fingerprints (expensive - extracts from scrollback)
+	///
+	/// Windows are sorted by screen position (left→right, then top→bottom)
+	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list_with_fingerprints(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
 		let mut windows: Vec<ClaudeWindow> = s.windows.values()
@@ -1700,6 +1769,8 @@ mod handlers {
 			}
 		}
 
+		// Sort after fingerprinting (geometry lookup is cheap compared to scrollback)
+		sort_by_screen_position(&mut windows, |w| w.platform_window_id);
 		Response::Windows { windows }
 	}
 

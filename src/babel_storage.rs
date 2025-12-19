@@ -103,6 +103,48 @@ impl BabelStorage {
             [],
         ).context("Failed to create session_metadata table")?;
 
+        // File touches: tracks which files each session has interacted with
+        // Built from scrollback parsing - tool calls like Read, Write, Edit
+        // Enables queries like "which sessions touched this file?" or
+        // "what files has this session modified?"
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_touches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                touch_count INTEGER DEFAULT 1,
+                UNIQUE(session_id, file_path, operation)
+            )",
+            [],
+        ).context("Failed to create file_touches table")?;
+
+        // Index for fast lookup by file path (most common query)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_touches_path ON file_touches(file_path)",
+            [],
+        ).context("Failed to create file_touches path index")?;
+
+        // Index for session queries
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_touches_session ON file_touches(session_id)",
+            [],
+        ).context("Failed to create file_touches session index")?;
+
+        // Scrollback cursor: tracks incremental reading position per window
+        // Uses kitty's logical offset system (monotonic, never resets)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS scrollback_cursors (
+                pane_addr TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                session_id TEXT,
+                last_updated INTEGER NOT NULL
+            )",
+            [],
+        ).context("Failed to create scrollback_cursors table")?;
+
         Ok(())
     }
 
@@ -230,6 +272,144 @@ impl BabelStorage {
         ).context("Failed to set notes")?;
         Ok(())
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // File Touches API
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Record a file operation (read, write, edit) for a session
+    ///
+    /// Uses upsert semantics: increments touch_count if already exists.
+    /// Timestamps are Unix epoch seconds.
+    pub fn record_file_touch(
+        &self,
+        session_id: &str,
+        file_path: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO file_touches (session_id, file_path, operation, first_seen_at, last_seen_at, touch_count)
+             VALUES (?1, ?2, ?3, ?4, ?4, 1)
+             ON CONFLICT(session_id, file_path, operation)
+             DO UPDATE SET last_seen_at = ?4, touch_count = touch_count + 1",
+            params![session_id, file_path, operation, now],
+        ).context("Failed to record file touch")?;
+        Ok(())
+    }
+
+    /// Get all sessions that touched a specific file
+    ///
+    /// Returns (session_id, operation, touch_count, last_seen_at) tuples
+    /// ordered by last_seen_at descending (most recent first).
+    pub fn get_sessions_for_file(&self, file_path: &str) -> Result<Vec<(String, String, i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, operation, touch_count, last_seen_at
+             FROM file_touches
+             WHERE file_path = ?1
+             ORDER BY last_seen_at DESC"
+        )?;
+
+        let rows = stmt.query_map(params![file_path], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect file touch rows")
+    }
+
+    /// Get all files touched by a specific session
+    ///
+    /// Returns (file_path, operation, touch_count, last_seen_at) tuples
+    /// ordered by last_seen_at descending (most recent first).
+    pub fn get_files_for_session(&self, session_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path, operation, touch_count, last_seen_at
+             FROM file_touches
+             WHERE session_id = ?1
+             ORDER BY last_seen_at DESC"
+        )?;
+
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect file touch rows")
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Scrollback Cursor API
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Get the scrollback cursor for a pane (for incremental reading)
+    ///
+    /// Returns (cursor, session_id) or None if not tracked yet.
+    pub fn get_scrollback_cursor(&self, pane_addr: &str) -> Result<Option<(u64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT cursor, session_id FROM scrollback_cursors WHERE pane_addr = ?1"
+        )?;
+
+        let mut rows = stmt.query(params![pane_addr])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, Option<String>>(1)?,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update the scrollback cursor for a pane
+    pub fn set_scrollback_cursor(
+        &self,
+        pane_addr: &str,
+        cursor: u64,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO scrollback_cursors (pane_addr, cursor, session_id, last_updated)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(pane_addr)
+             DO UPDATE SET cursor = ?2, session_id = ?3, last_updated = ?4",
+            params![pane_addr, cursor as i64, session_id, now],
+        ).context("Failed to set scrollback cursor")?;
+        Ok(())
+    }
+
+    /// Remove scrollback cursor for a closed pane
+    pub fn remove_scrollback_cursor(&self, pane_addr: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM scrollback_cursors WHERE pane_addr = ?1",
+            params![pane_addr],
+        ).context("Failed to remove scrollback cursor")?;
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Session Metadata API (continued)
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /// List all sessions with metadata
     ///
