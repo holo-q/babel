@@ -491,10 +491,11 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 	let is_current_socket = wnd.socket() == current_socket;
 
 	// Activity state indicator - shows what Claude is doing right now
-	// ⚡ Thinking (yellow), ⚙ ToolUse (cyan), ◆ AwaitingInput (green), ◐ BackgroundTask (magenta), ○ Idle (dim), ● Unknown (blue)
+	// ⚡ Thinking (yellow), ⚙ ToolUse (cyan), 📋 PlanApproval (magenta), ◆ AwaitingInput (green), ◐ BackgroundTask (magenta), ○ Idle (dim), ● Unknown (blue)
 	let (state_icon, state_style) = match wnd.activity_state {
 		Some(ActivityState::Thinking) => ("⚡", Style::new().yellow()),
 		Some(ActivityState::ToolUse) => ("⚙", Style::new().cyan()),
+		Some(ActivityState::PlanApproval) => ("📋", Style::new().magenta()),
 		Some(ActivityState::AwaitingInput) => ("◆", Style::new().green()),
 		Some(ActivityState::BackgroundTask) => ("◐", Style::new().magenta()),
 		Some(ActivityState::Idle) => ("○", Style::new().dim()),

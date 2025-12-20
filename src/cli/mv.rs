@@ -92,12 +92,12 @@ pub async fn cmd_mv(
 
 		let migratable = conflicts
 			.iter()
-			.filter(|c| matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::Unknown))
+			.filter(|c| matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval | ActivityState::Unknown))
 			.count();
 		if migratable > 0 {
 			println!("Step 2: Migrate {} idle terminal(s)", migratable);
 			for c in &conflicts {
-				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::Unknown) {
+				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval | ActivityState::Unknown) {
 					let new_cwd = dest.join(&c.relative_path);
 					println!("  id:{} → cd {}", c.window.id(), new_cwd.display());
 				}
@@ -188,6 +188,7 @@ fn display_conflicts(conflicts: &[ConflictingPane], source: &Path) {
 		let state_str = match c.state {
 			ActivityState::Idle => "[IDLE]  ",
 			ActivityState::AwaitingInput => "[AWAIT] ",
+			ActivityState::PlanApproval => "[PLAN]  ",
 			ActivityState::Thinking => "[ACTIVE: Thinking]",
 			ActivityState::ToolUse => "[ACTIVE: Tool Use]",
 			ActivityState::BackgroundTask => "[ACTIVE: Background]",

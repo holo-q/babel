@@ -137,6 +137,7 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                 match activity {
                     Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),
                     Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),
+                    Some(ActivityState::PlanApproval) => ("📋", Style::default().fg(Color::Magenta)),
                     Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),
                     Some(ActivityState::BackgroundTask) => ("◐", Style::default().fg(Color::Magenta)),
                     Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),

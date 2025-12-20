@@ -847,8 +847,9 @@ impl BabelCore {
         let conflicts = self.find_windows_in_path(&old_canonical).await?;
 
         // Partition by migratable state
+        // PlanApproval is considered migratable (waiting for user decision, not actively processing)
         let (migratable, active): (Vec<_>, Vec<_>) = conflicts.iter().partition(|c| {
-            matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput)
+            matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval)
         });
 
         // Check for blocking active windows
