@@ -81,8 +81,8 @@ src/
 - **No Claude-specific logic**
 
 **`utility/claude_discovery.rs`** - Claude-specific detection
-- `ClaudeSignals` - detection heuristics (process, title, tags)
-- `ClaudeWindow` - enriched pane with session info
+- `ClaudeMarkers` - detection heuristics (process, title, tags)
+- `ClaudePane` - enriched pane with session info
 - `find_claude_windows()` - filter panes running Claude
 - `spawn_claude_session()` - launch new sessions
 - `load_wset()` - restore workspace sets
@@ -126,10 +126,10 @@ pub struct KittyPane {
 - Methods on `KittyPane` are self-targeted: `pane.focus()`, `pane.send_text()`
 - Avoids confusion between kitty "windows" (panes) and OS windows
 
-### ClaudeWindow - Enriched Pane
+### ClaudePane - Enriched Pane
 
 ```rust
-pub struct ClaudeWindow {
+pub struct ClaudePane {
     /// The underlying kitty pane
     pub kitty_id: u64,
     pub socket: String,
@@ -141,17 +141,17 @@ pub struct ClaudeWindow {
     pub session_info: Option<SessionInfo>,
 
     /// Detection signals
-    pub signals: ClaudeSignals,
+    pub signals: ClaudeMarkers,
 
     /// Fingerprint for session matching
     pub fingerprint: Option<SessionFingerprint>,
 }
 ```
 
-### ClaudeSignals - Detection Heuristics
+### ClaudeMarkers - Detection Heuristics
 
 ```rust
-pub struct ClaudeSignals {
+pub struct ClaudeMarkers {
     /// "claude" in foreground process cmdline (definitive)
     pub process_running: bool,
     /// "✳" prefix in title (Claude's active indicator)

@@ -371,6 +371,22 @@ impl std::fmt::Display for PaneAddr {
     }
 }
 
+/// Screen geometry for a pane (absolute coordinates)
+///
+/// This is the pane's position on the screen, including the OS window position.
+/// Kitty provides this in the `screen` field of `kitten @ ls` output (newer versions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenGeometry {
+    /// Absolute X position on screen
+    pub x: i32,
+    /// Absolute Y position on screen
+    pub y: i32,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+}
+
 /// A kitty pane with all relevant metadata
 ///
 /// Each pane carries its `socket` so operations can target the correct kitty instance.
@@ -392,6 +408,12 @@ pub struct KittyPane {
     pub os_window_id: u64,
     /// X11/Wayland window ID for workspace lookup
     pub platform_window_id: u64,
+    /// Screen geometry (absolute coordinates) - newer kitty versions only
+    ///
+    /// When available, this provides precise per-pane positioning for multi-pane windows.
+    /// Falls back to OS window geometry if not provided by kitty.
+    #[serde(default)]
+    pub screen: Option<ScreenGeometry>,
 }
 
 impl KittyPane {
@@ -612,6 +634,7 @@ fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
                     user_vars: raw.user_vars,
                     os_window_id,
                     platform_window_id,
+                    screen: raw.screen,
                 });
             }
         }
@@ -1129,13 +1152,13 @@ pub fn move_window_to_workspace(platform_window_id: u64, workspace: i32) -> Resu
 // Window Geometry (for multi-monitor precise restoration)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use crate::wset::WindowGeometry;
+use crate::wset::PaneGeometry;
 
 /// Get window geometry using xdotool
 ///
 /// Returns (x, y, width, height) for precise multi-monitor restoration.
 /// Uses xdotool which handles frame/decoration offsets consistently.
-pub fn get_window_geometry(platform_window_id: u64) -> Result<WindowGeometry> {
+pub fn get_window_geometry(platform_window_id: u64) -> Result<PaneGeometry> {
     let hex_id = format!("0x{:x}", platform_window_id);
 
     // Get geometry with xdotool
@@ -1178,7 +1201,7 @@ pub fn get_window_geometry(platform_window_id: u64) -> Result<WindowGeometry> {
     // Get monitor name for this position
     let monitor = get_monitor_at_position(x, y);
 
-    Ok(WindowGeometry {
+    Ok(PaneGeometry {
         x,
         y,
         width,
@@ -1191,7 +1214,7 @@ pub fn get_window_geometry(platform_window_id: u64) -> Result<WindowGeometry> {
 ///
 /// Moves and resizes window to exact position. The gravity parameter (first value)
 /// is 0 to use default positioning.
-pub fn set_window_geometry(platform_window_id: u64, geom: &WindowGeometry) -> Result<()> {
+pub fn set_window_geometry(platform_window_id: u64, geom: &PaneGeometry) -> Result<()> {
     let hex_id = format!("0x{:08x}", platform_window_id);
 
     // wmctrl -i -r <id> -e <gravity>,<x>,<y>,<width>,<height>
@@ -1288,11 +1311,11 @@ struct RawOsWindow {
 
 #[derive(Debug, Deserialize)]
 struct RawTab {
-    windows: Vec<RawWindow>,
+    windows: Vec<RawPane>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RawWindow {
+struct RawPane {
     id: u64,
     title: String,
     cwd: PathBuf,
@@ -1301,6 +1324,9 @@ struct RawWindow {
     foreground_processes: Vec<RawForegroundProcess>,
     #[serde(default)]
     user_vars: HashMap<String, String>,
+    /// Screen geometry from newer kitty versions (absolute coordinates)
+    #[serde(default)]
+    screen: Option<ScreenGeometry>,
 }
 
 #[derive(Debug, Deserialize)]

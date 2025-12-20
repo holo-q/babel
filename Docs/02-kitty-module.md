@@ -49,7 +49,7 @@ And flattens it into a simple list of windows for easier consumption.
 ### JSON Parsing
 
 Uses internal `Raw*` structs to deserialize kitty's JSON format:
-- `RawOsWindow` -> `RawTab` -> `RawWindow` -> `RawForegroundProcess`
+- `RawOsWindow` -> `RawTab` -> `RawPane` -> `RawForegroundProcess`
 
 Then transforms into public API structs, flattening the hierarchy.
 

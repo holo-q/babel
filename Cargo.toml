@@ -31,6 +31,7 @@ rofi = "0.4"              # Spawn rofi menus and parse selections
 
 # LLM summarization
 reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
 
 # Logging - delegated to spaceship-std for centralized config
 # View logs: journalctl -t babel -f
@@ -48,6 +49,10 @@ regex = "1"
 toml = "0.8"
 anstyle = "1.0.13"
 
+# MCP server - babel mcp subcommand exposes Claude session tools via Model Context Protocol
+rmcp = { version = "0.12", features = ["server", "transport-io"] }
+schemars = "1"
+
 # TUI - Debug console for IPC traffic inspection and daemon state
 ratatui = "0.29"
 crossterm = "0.29"
@@ -56,3 +61,6 @@ crossterm = "0.29"
 wnck-rs = { path = "../../Lib/wnck-rs" }
 glib = "0.18"
 gtk = "0.18"
+
+[dev-dependencies]
+tempfile = "3"

@@ -17,7 +17,7 @@ use super::WSetCommands;
 
 /// Save current workspace layout to a WSet file
 ///
-/// Captures all Claude windows across all workspaces with their positions.
+/// Captures all Claude panes across all workspaces with their positions.
 pub async fn cmd_wset_save(core: &BabelCore, name: Option<String>, _force: bool, json: bool) -> Result<()> {
     let wset = core.wset_save(name).await?;
 
@@ -38,7 +38,7 @@ pub async fn cmd_wset_save(core: &BabelCore, name: Option<String>, _force: bool,
 
 /// Load a workspace layout from a WSet file
 ///
-/// Restores Claude windows to their saved positions. Shows interactive confirmation
+/// Restores Claude panes to their saved positions. Shows interactive confirmation
 /// unless dry_run is enabled. Sessions that no longer exist are skipped.
 pub async fn cmd_wset_load(core: &BabelCore, name: Option<String>, dry_run: bool, _anxious: bool, json: bool) -> Result<()> {
     // First, get a dry-run preview

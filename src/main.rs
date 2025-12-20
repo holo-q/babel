@@ -67,10 +67,10 @@ async fn main() -> Result<()> {
     let mut core = BabelCore::connect().await;
 
     // Print mode indicator to stderr for commands that use BabelCore
-    // Skip for daemon/tui/monitor which have their own connection handling
+    // Skip for daemon/tui/monitor/mcp which have their own connection handling
     let show_mode = !matches!(
         cli.command,
-        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. }
+        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. } | Commands::Mcp
     );
     if show_mode && !cli.json {
         eprintln!("[{}]", core.mode_label());
@@ -192,6 +192,11 @@ async fn main() -> Result<()> {
         // ─── CLI Event Monitor ──────────────────────────────────────────────────
         Commands::Monitor { filter } => {
             cli::action::cmd_monitor(filter).await
+        }
+
+        // ─── MCP Server ─────────────────────────────────────────────────────────
+        Commands::Mcp => {
+            cli::mcp::run_mcp().await
         }
     }
 }

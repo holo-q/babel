@@ -1,11 +1,11 @@
 //! WSet - Workspace Set persistence for babel
 //!
-//! A WSet captures the complete state of Claude windows across all workspaces,
+//! A WSet captures the complete state of Claude panes across all workspaces,
 //! enabling save/restore of the spaceship's wspace configuration.
 //!
 //! Terminology:
-//! - WSet: A named snapshot of all wspaces + claude windows
-//! - WSpace: An individual XFCE workspace containing claude windows
+//! - WSet: A named snapshot of all wspaces + claude panes
+//! - WSpace: An individual XFCE workspace containing claude panes
 //! - Session: A claude conversation (identified by session_id UUID)
 //!
 //! Storage: ~/.config/claude-babel/wsets/
@@ -21,13 +21,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::BabelState;
-use crate::utility::claude_discovery::ClaudeWindow;
+use crate::utility::claude_discovery::ClaudePane;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// A workspace set - complete snapshot of claude windows across all wspaces
+/// A workspace set - complete snapshot of claude panes across all wspaces
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WSet {
     pub meta: WSetMeta,
@@ -54,12 +54,12 @@ pub struct WSpaceConfig {
     pub title: Option<String>,
     /// Windows in this workspace
     #[serde(default)]
-    pub windows: Vec<WindowConfig>,
+    pub windows: Vec<PaneConfig>,
 }
 
-/// Configuration for a single claude window
+/// Configuration for a single claude pane
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowConfig {
+pub struct PaneConfig {
     /// Claude session UUID (from ~/.claude/projects/)
     pub session_id: String,
     /// Working directory for the session
@@ -69,7 +69,7 @@ pub struct WindowConfig {
     pub title: Option<String>,
     /// Window geometry for precise multi-monitor restoration
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geometry: Option<WindowGeometry>,
+    pub geometry: Option<PaneGeometry>,
 }
 
 /// Window geometry for precise restoration
@@ -77,7 +77,7 @@ pub struct WindowConfig {
 /// Captures position and size so windows can be restored to exact locations,
 /// critical for multi-monitor setups where workspace index alone isn't enough.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowGeometry {
+pub struct PaneGeometry {
     /// X position (absolute, from left edge of combined display)
     pub x: i32,
     /// Y position (absolute, from top edge of combined display)
@@ -193,7 +193,7 @@ impl WSet {
         let now = Utc::now();
 
         // Group windows by workspace
-        let mut wspaces_map: HashMap<i32, Vec<WindowConfig>> = HashMap::new();
+        let mut wspaces_map: HashMap<i32, Vec<PaneConfig>> = HashMap::new();
 
         for window in state.windows.values() {
             // Skip windows without session IDs - can't restore them
@@ -209,7 +209,7 @@ impl WSet {
                 .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
                 .ok();
 
-            let config = WindowConfig {
+            let config = PaneConfig {
                 session_id,
                 cwd: window.cwd.clone(),
                 title: Some(window.title.clone()),
@@ -243,15 +243,15 @@ impl WSet {
         }
     }
 
-    /// Build a WSet from a list of ClaudeWindows (for direct mode without daemon)
+    /// Build a WSet from a list of ClaudePanes (for direct mode without daemon)
     ///
     /// Captures geometry for precise multi-monitor restoration.
-    pub fn from_windows(name: &str, windows: &[ClaudeWindow], workspace_titles: &HashMap<i32, String>) -> Self {
+    pub fn from_windows(name: &str, windows: &[ClaudePane], workspace_titles: &HashMap<i32, String>) -> Self {
         use crate::kitty::get_window_geometry;
 
         let now = Utc::now();
 
-        let mut wspaces_map: HashMap<i32, Vec<WindowConfig>> = HashMap::new();
+        let mut wspaces_map: HashMap<i32, Vec<PaneConfig>> = HashMap::new();
 
         for window in windows {
             let session_id = match &window.session_id {
@@ -266,7 +266,7 @@ impl WSet {
                 .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
                 .ok();
 
-            let config = WindowConfig {
+            let config = PaneConfig {
                 session_id,
                 cwd: window.cwd.clone(),
                 title: Some(window.title.clone()),

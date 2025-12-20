@@ -70,7 +70,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_session_info};
-use crate::utility::claude_discovery::{enrich_window, load_wset, ClaudeWindow};
+use crate::utility::claude_discovery::{enrich_window, load_wset, ClaudePane};
 use crate::events::{BabelEvent, EventFilter, EventMessage, EventPublisher};
 use crate::kitty::PaneAddr;
 use crate::fingerprint::{
@@ -266,9 +266,9 @@ impl Default for ScrollbackActivity {
 /// multiple kitty instances. This enables graceful degradation when things
 /// are "fucked" - multiple instances, dead sockets, etc.
 pub struct BabelState {
-	/// Current Claude windows (PaneAddr → ClaudeWindow)
+	/// Current Claude panes (PaneAddr → ClaudePane)
 	/// Keyed by PaneAddr to handle ID collisions across kitty instances
-	pub windows: HashMap<PaneAddr, ClaudeWindow>,
+	pub windows: HashMap<PaneAddr, ClaudePane>,
 
 	/// All kitty terminals (PaneAddr → TerminalInfo)
 	/// Includes both Claude and non-Claude terminals for full visibility
@@ -382,7 +382,7 @@ impl BabelState {
 			.flat_map(|i| i.panes)
 			.collect();
 
-		// Filter to just Claude windows for the main tracking
+		// Filter to just Claude panes for the main tracking
 		let kitty_windows: Vec<_> = all_panes.iter()
 			.filter(|p| detect_claude_signals(p).is_claude())
 			.cloned()
@@ -447,7 +447,7 @@ impl BabelState {
 
 		// ─── Claude Window Tracking ─────────────────────────────────────────────────
 		// Build new windows map, preserving enriched data where possible
-		let mut new_windows: HashMap<PaneAddr, ClaudeWindow> = HashMap::new();
+		let mut new_windows: HashMap<PaneAddr, ClaudePane> = HashMap::new();
 
 		for kw in kitty_windows {
 			let addr = kw.addr();
@@ -481,7 +481,7 @@ impl BabelState {
 				let existing_session = kw.user_vars.get("babel_session_id")
 				                         .filter(|id| !id.starts_with("agent-"))
 				                         .cloned();
-				ClaudeWindow {
+				ClaudePane {
 					addr: addr.clone(),
 					title: kw.title.clone(),
 					session_id: existing_session,
@@ -1152,12 +1152,12 @@ impl BabelState {
 	/// Find a window by its kitty ID (searches across all sockets)
 	///
 	/// Returns None if no window with that ID exists in any socket
-	pub fn find_window_by_id(&self, id: u64) -> Option<&ClaudeWindow> {
+	pub fn find_window_by_id(&self, id: u64) -> Option<&ClaudePane> {
 		self.windows.values().find(|w| w.id() == id)
 	}
 
 	/// Find a window by its kitty ID (mutable, searches across all sockets)
-	pub fn find_window_by_id_mut(&mut self, id: u64) -> Option<&mut ClaudeWindow> {
+	pub fn find_window_by_id_mut(&mut self, id: u64) -> Option<&mut ClaudePane> {
 		self.windows.values_mut().find(|w| w.id() == id)
 	}
 
@@ -1682,46 +1682,73 @@ mod handlers {
 
 	/// Sort items by screen position (left→right, then top→bottom)
 	///
-	/// Uses xdotool to get geometry for each unique platform_window_id, then sorts
-	/// by x coordinate (primary) and y coordinate (secondary). Items in the same
-	/// OS window maintain their relative order.
+	/// Two-tier geometry lookup:
+	/// 1. **Pane-level geometry** (preferred): Uses `get_pane_screen` callback to extract
+	///    kitty's `screen.x/y` from items - provides per-pane coordinates even for split panes
+	///    within the same OS window. Available on patched kitty with geometry fields.
+	/// 2. **OS window geometry** (fallback): Uses xdotool to get platform_window_id position.
+	///    All panes in the same OS window share the same coordinates with this method.
 	///
-	/// Performance: O(n) xdotool calls where n = unique platform_window_ids.
-	/// For typical workloads (5-10 windows), this adds ~50-100ms to list calls.
-	fn sort_by_screen_position<T, F>(items: &mut [T], get_platform_id: F)
+	/// This gracefully degrades: new kitty with geometry → pane-level sort,
+	/// old kitty without geometry → OS window-level sort (existing behavior).
+	///
+	/// Performance: O(n) xdotool calls where n = unique platform_window_ids without pane geometry.
+	fn sort_by_screen_position<T, F, G>(items: &mut [T], get_platform_id: F, get_pane_screen: G)
 	where
 		F: Fn(&T) -> u64,
+		G: Fn(&T) -> Option<(i32, i32)>,
 	{
 		use std::collections::HashMap;
 
-		// Collect unique platform_window_ids and their geometries
-		let mut geometry_cache: HashMap<u64, (i32, i32)> = HashMap::new();
-		for item in items.iter() {
+		// Cache OS window geometries for items without pane-level geometry
+		// Only calls xdotool for unique platform_window_ids that we actually need
+		let mut os_geometry_cache: HashMap<u64, (i32, i32)> = HashMap::new();
+
+		// Build per-item geometry: prefer pane screen, fallback to OS window
+		let geometries: Vec<(i32, i32)> = items.iter().map(|item| {
+			// First try pane-level geometry (from patched kitty)
+			if let Some((x, y)) = get_pane_screen(item) {
+				return (x, y);
+			}
+
+			// Fallback: OS window geometry via xdotool
 			let pid = get_platform_id(item);
-			geometry_cache.entry(pid).or_insert_with(|| {
-				// Default to (i32::MAX, i32::MAX) if geometry lookup fails
-				// This puts windows with unknown geometry at the end
+			*os_geometry_cache.entry(pid).or_insert_with(|| {
 				get_window_geometry(pid)
 					.map(|g| (g.x, g.y))
 					.unwrap_or((i32::MAX, i32::MAX))
-			});
-		}
+			})
+		}).collect();
 
-		// Sort by x (left→right), then by y (top→bottom)
-		items.sort_by(|a, b| {
-			let (ax, ay) = geometry_cache.get(&get_platform_id(a)).copied().unwrap_or((i32::MAX, i32::MAX));
-			let (bx, by) = geometry_cache.get(&get_platform_id(b)).copied().unwrap_or((i32::MAX, i32::MAX));
-			(ax, ay).cmp(&(bx, by))
-		});
+		// Create indices and sort by geometry
+		let mut indices: Vec<usize> = (0..items.len()).collect();
+		indices.sort_by_key(|&i| geometries[i]);
+
+		// Reorder items in-place using the sorted indices
+		// Uses a permutation cycle approach to avoid extra allocation
+		let mut sorted = vec![false; items.len()];
+		for i in 0..items.len() {
+			if sorted[i] {
+				continue;
+			}
+			let mut j = i;
+			while indices[j] != i {
+				let next = indices[j];
+				items.swap(j, next);
+				sorted[j] = true;
+				j = next;
+			}
+			sorted[j] = true;
+		}
 	}
 
-	/// List all Claude windows with activity states
+	/// List all Claude panes with activity states
 	///
 	/// Windows are sorted by screen position (left→right, then top→bottom)
 	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
-		let mut windows: Vec<ClaudeWindow> = s.windows.values()
+		let mut windows: Vec<ClaudePane> = s.windows.values()
 			.map(|w| {
 				let mut win = w.clone();
 				win.activity_state = s.get_activity_state(w.id());
@@ -1730,7 +1757,8 @@ mod handlers {
 			.collect();
 		drop(s); // Release lock before geometry lookups
 
-		sort_by_screen_position(&mut windows, |w| w.platform_window_id);
+		// ClaudePane doesn't carry pane geometry; fallback to OS window
+		sort_by_screen_position(&mut windows, |w| w.platform_window_id, |_| None);
 		Response::Windows { windows }
 	}
 
@@ -1743,7 +1771,8 @@ mod handlers {
 		let mut terminals: Vec<TerminalInfo> = s.terminals.values().cloned().collect();
 		drop(s); // Release lock before geometry lookups
 
-		sort_by_screen_position(&mut terminals, |t| t.platform_window_id);
+		// TerminalInfo doesn't carry pane geometry; fallback to OS window
+		sort_by_screen_position(&mut terminals, |t| t.platform_window_id, |_| None);
 		Response::Terminals { terminals }
 	}
 
@@ -1757,7 +1786,13 @@ mod handlers {
 	pub async fn list_panes() -> Response {
 		match crate::kitty::list_all_panes() {
 			Ok(mut panes) => {
-				sort_by_screen_position(&mut panes, |p| p.platform_window_id);
+				// Use pane-level screen geometry when available (patched kitty)
+				// Falls back to OS window geometry for older kitty versions
+				sort_by_screen_position(
+					&mut panes,
+					|p| p.platform_window_id,
+					|p| p.screen.as_ref().map(|s| (s.x, s.y)),
+				);
 				Response::Panes { panes }
 			}
 			Err(e) => Response::Error { message: format!("Failed to list panes: {}", e) },
@@ -1776,7 +1811,7 @@ mod handlers {
 	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list_with_fingerprints(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
-		let mut windows: Vec<ClaudeWindow> = s.windows.values()
+		let mut windows: Vec<ClaudePane> = s.windows.values()
 			.map(|w| {
 				let mut win = w.clone();
 				win.activity_state = s.get_activity_state(w.id());
@@ -1798,7 +1833,8 @@ mod handlers {
 		}
 
 		// Sort after fingerprinting (geometry lookup is cheap compared to scrollback)
-		sort_by_screen_position(&mut windows, |w| w.platform_window_id);
+		// ClaudePane doesn't carry pane geometry; fallback to OS window
+		sort_by_screen_position(&mut windows, |w| w.platform_window_id, |_| None);
 		Response::Windows { windows }
 	}
 

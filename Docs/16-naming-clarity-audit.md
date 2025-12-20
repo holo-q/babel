@@ -22,15 +22,15 @@ The codebase demonstrates **strong naming conventions** overall, with comprehens
 
 ## Critical Issues (High Risk of Bugs/Confusion)
 
-### 1. `ClaudeWindow` vs `KittyWindow` - Ambiguous Distinction
+### 1. `ClaudePane` vs `KittyWindow` - Ambiguous Distinction
 
 **Location:** `src/discovery.rs:33`, `src/kitty.rs:238`
 
 **Problem:**
 - `KittyWindow` = Raw kitty pane data from `kitten @ ls`
-- `ClaudeWindow` = Enhanced window with session matching and workspace info
+- `ClaudePane` = Enhanced window with session matching and workspace info
 
-The names don't clearly convey this processing pipeline. A developer might assume `ClaudeWindow` is filtering for Claude sessions, not enriching.
+The names don't clearly convey this processing pipeline. A developer might assume `ClaudePane` is filtering for Claude sessions, not enriching.
 
 **Impact:** High - Confusion about data flow and when enrichment happens
 
@@ -38,7 +38,7 @@ The names don't clearly convey this processing pipeline. A developer might assum
 ```rust
 // BEFORE
 pub struct KittyWindow { ... }
-pub struct ClaudeWindow { ... }
+pub struct ClaudePane { ... }
 
 // AFTER
 pub struct KittyPane { ... }          // Raw from kitty API
@@ -52,7 +52,7 @@ pub struct KittyWindow { ... }
 
 /// Kitty window enriched with Claude session info and workspace metadata
 /// Created by matching KittyWindow to ~/.claude sessions via discovery
-pub struct ClaudeWindow { ... }
+pub struct ClaudePane { ... }
 ```
 
 ---
@@ -62,7 +62,7 @@ pub struct ClaudeWindow { ... }
 **Location:** `src/discovery.rs:102`
 
 ```rust
-pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()>
+pub fn enrich_window(window: &mut ClaudePane) -> Result<()>
 ```
 
 **Problem:**
@@ -78,13 +78,13 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()>
 /// Early-returns if window.session_info is already populated.
 ///
 /// MUTATES IN-PLACE - modifies window.session_info and window.session_id
-pub fn enrich_window_with_session(window: &mut ClaudeWindow) -> Result<()>
+pub fn enrich_window_with_session(window: &mut ClaudePane) -> Result<()>
 ```
 
 Or make it transformational:
 ```rust
-/// Returns a new ClaudeWindow with session_info populated
-pub fn with_session_info(window: ClaudeWindow) -> Result<ClaudeWindow>
+/// Returns a new ClaudePane with session_info populated
+pub fn with_session_info(window: ClaudePane) -> Result<ClaudePane>
 ```
 
 ---
@@ -96,14 +96,14 @@ pub fn with_session_info(window: ClaudeWindow) -> Result<ClaudeWindow>
 ```rust
 enum Target {
     Window(u64),
-    All,  // Target all Claude windows
+    All,  // Target all Claude panes
 }
 ```
 
 **Problem:**
-- `Target::All` resolves to "all Claude windows", not "all kitty windows"
+- `Target::All` resolves to "all Claude panes", not "all kitty windows"
 - Not obvious from the enum name alone - requires reading `resolve_target()`
-- CLI help says "target: window ID or '*' for all" but doesn't clarify "all Claude windows"
+- CLI help says "target: window ID or '*' for all" but doesn't clarify "all Claude panes"
 
 **Impact:** Medium - Users might expect `babel send * "text"` to hit all kitty windows, not just Claude
 
@@ -268,12 +268,12 @@ pub struct FiredTask {
 
 ---
 
-### 9. `ClaudeSignals` Name is Abstract
+### 9. `ClaudeMarkers` Name is Abstract
 
 **Location:** `src/kitty.rs:258`
 
 ```rust
-pub struct ClaudeSignals {
+pub struct ClaudeMarkers {
     pub process_running: bool,
     pub title_indicator: bool,
     pub babel_tagged: bool,
@@ -306,7 +306,7 @@ pub struct ClaudeMarkers { ... }
 **Location:** `src/kitty.rs:273`
 
 ```rust
-impl ClaudeSignals {
+impl ClaudeMarkers {
     pub fn is_claude(&self) -> bool { ... }
     pub fn status(&self) -> &'static str { ... } // "running", "titled", "tagged"
 }
@@ -320,7 +320,7 @@ impl ClaudeSignals {
 **Recommendation:**
 Rename to clarify binary vs granular:
 ```rust
-impl ClaudeSignals {
+impl ClaudeMarkers {
     /// Returns true if ANY signal indicates this is a Claude session
     pub fn has_any_signal(&self) -> bool { ... }
 
@@ -353,17 +353,17 @@ pub fn find_window_by_id(id: u64) -> Result<Option<KittyWindow>>
 
 ## Minor Issues (Polish & Consistency)
 
-### 12. `detect_claude_signals()` vs `ClaudeSignals` - Naming Redundancy
+### 12. `detect_claude_signals()` vs `ClaudeMarkers` - Naming Redundancy
 
 **Location:** `src/kitty.rs:305`
 
 ```rust
-pub fn detect_claude_signals(window: &KittyWindow) -> ClaudeSignals
+pub fn detect_claude_signals(window: &KittyWindow) -> ClaudeMarkers
 ```
 
 The function name and return type both say "signals" - consider:
 ```rust
-pub fn analyze_for_claude_session(window: &KittyWindow) -> ClaudeSignals
+pub fn analyze_for_claude_session(window: &KittyWindow) -> ClaudeMarkers
 ```
 
 ---
@@ -375,7 +375,7 @@ pub fn analyze_for_claude_session(window: &KittyWindow) -> ClaudeSignals
 ```rust
 struct RawOsWindow { ... }
 struct RawTab { ... }
-struct RawWindow { ... }
+struct RawPane { ... }
 struct RawForegroundProcess { ... }
 ```
 
@@ -592,9 +592,9 @@ No module-level doc comment. Reading the code suggests it builds title strings f
 /// For bulk operations, use discover_claude_windows() + enrich_window().
 pub fn match_window_to_session(window: &KittyWindow) -> Result<Option<SessionInfo>>
 
-/// Populate session_info for an already-discovered ClaudeWindow (idempotent).
+/// Populate session_info for an already-discovered ClaudePane (idempotent).
 /// Cheaper than match_window_to_session() if window is already in cache.
-pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()>
+pub fn enrich_window(window: &mut ClaudePane) -> Result<()>
 ```
 
 ---
@@ -603,7 +603,7 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()>
 
 ### High Priority
 
-1. **Distinguish `KittyWindow` from `ClaudeWindow`** - Critical for understanding data flow
+1. **Distinguish `KittyWindow` from `ClaudePane`** - Critical for understanding data flow
 2. **Fix `extract_summary_from_title()` to return `Option<String>`** - Eliminates sentinel values
 3. **Document `Target::All` scope clearly** - Prevents user confusion
 
@@ -626,7 +626,7 @@ pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()>
 
 The claude-babel codebase is **well-architected** with thoughtful naming and extensive documentation. Most issues are **polish-level** rather than architectural flaws.
 
-The critical findings focus on **data flow clarity** (KittyWindow → ClaudeWindow) and **mutation semantics** (enrich_window). Addressing these will significantly reduce cognitive load for new contributors.
+The critical findings focus on **data flow clarity** (KittyWindow → ClaudePane) and **mutation semantics** (enrich_window). Addressing these will significantly reduce cognitive load for new contributors.
 
 **Recommended Action:**
 1. Fix critical issues (3 items)

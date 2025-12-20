@@ -307,7 +307,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 ### CLI Command
 
 ```bash
-# View scrollback of a Claude window
+# View scrollback of a Claude pane
 babel pager <window_id>
 
 # View with selection mode

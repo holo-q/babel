@@ -7,7 +7,7 @@
 //! ## Matching Strategy
 //!
 //! 1. **Pre-tagged windows**: Check user_vars for "babel_session_id" - already matched
-//! 2. **Title extraction**: Strip "✳ " prefix from active Claude window titles
+//! 2. **Title extraction**: Strip "✳ " prefix from active Claude pane titles
 //! 3. **Conversation search**: Search ~/.claude/projects/ for matching summaries
 //! 4. **Tagging**: Once matched, tag the window with session ID for fast future lookups
 //! 5. **CWD tiebreaker**: If multiple matches, use working directory proximity
@@ -38,7 +38,7 @@ use crate::wset::WSet;
 /// Multiple signals can be present simultaneously. A window is considered
 /// a Claude session if ANY signal is positive.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ClaudeSignals {
+pub struct ClaudeMarkers {
     /// "claude" found in foreground process cmdline (definitive)
     pub process_running: bool,
     /// "✳" prefix in title (Claude's active session indicator)
@@ -50,7 +50,7 @@ pub struct ClaudeSignals {
     pub session_id: Option<String>,
 }
 
-impl ClaudeSignals {
+impl ClaudeMarkers {
     /// Returns true if any signal suggests this is a Claude session
     pub fn is_claude(&self) -> bool {
         self.process_running || self.title_indicator || self.babel_tagged
@@ -84,7 +84,7 @@ impl ClaudeSignals {
 }
 
 /// Analyze a window for Claude session signals
-pub fn detect_claude_signals(window: &KittyPane) -> ClaudeSignals {
+pub fn detect_claude_signals(window: &KittyPane) -> ClaudeMarkers {
     let process_running = window.foreground_processes.iter().any(|proc| {
         proc.cmdline.iter().any(|arg| arg.contains("claude"))
     });
@@ -101,7 +101,7 @@ pub fn detect_claude_signals(window: &KittyPane) -> ClaudeSignals {
         .filter(|s| !s.is_empty())
         .cloned();
 
-    ClaudeSignals {
+    ClaudeMarkers {
         process_running,
         title_indicator,
         babel_tagged,
@@ -182,7 +182,7 @@ pub fn find_claude_windows() -> Result<Vec<KittyPane>> {
 /// Uniquely identified by `addr` (PaneAddr = socket + kitty window ID).
 /// This supports multiple kitty instances where window IDs may collide.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeWindow {
+pub struct ClaudePane {
     /// Unique address of this pane across all kitty instances
     pub addr: PaneAddr,
     pub title: String,
@@ -208,7 +208,7 @@ pub struct ClaudeWindow {
     pub match_confidence: Option<MatchConfidence>,
 }
 
-impl ClaudeWindow {
+impl ClaudePane {
     // ─── Convenience Accessors ──────────────────────────────────────────────────
 
     /// Get the kitty window ID
@@ -264,14 +264,14 @@ impl ClaudeWindow {
     }
 }
 
-/// Fast discovery - just finds Claude windows without expensive session matching
+/// Fast discovery - just finds Claude panes without expensive session matching
 ///
 /// This is O(1) kitty call + O(1) wmctrl call - no filesystem scanning.
 /// For session info, call `enrich_window` on specific windows.
-pub fn discover_claude_windows() -> Result<Vec<ClaudeWindow>> {
+pub fn discover_claude_windows() -> Result<Vec<ClaudePane>> {
     use crate::kitty::get_all_workspaces;
 
-    let claude_windows = find_claude_windows().context("Failed to find claude windows")?;
+    let claude_windows = find_claude_windows().context("Failed to find claude panes")?;
 
     // Get workspace mappings in one call
     let workspaces = get_all_workspaces();
@@ -289,7 +289,7 @@ pub fn discover_claude_windows() -> Result<Vec<ClaudeWindow>> {
             // Look up workspace for this OS window
             let workspace = workspaces.get(&window.platform_window_id).copied();
 
-            ClaudeWindow {
+            ClaudePane {
                 addr: window.addr(),
                 title: window.title.clone(),
                 session_id,
@@ -313,7 +313,7 @@ pub fn discover_claude_windows() -> Result<Vec<ClaudeWindow>> {
 ///
 /// Call this only when you need the full session metadata for a specific window.
 /// This does the filesystem scan to match window title → conversation file.
-pub fn enrich_window(window: &mut ClaudeWindow) -> Result<()> {
+pub fn enrich_window(window: &mut ClaudePane) -> Result<()> {
     // If already has session_info, skip
     if window.session_info.is_some() {
         return Ok(());
@@ -533,7 +533,7 @@ pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Re
     Ok(None)
 }
 
-/// Load a WSet by closing all existing claude windows and spawning new ones
+/// Load a WSet by closing all existing claude panes and spawning new ones
 ///
 /// Returns a list of session IDs that couldn't be restored (file missing, etc.)
 pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
@@ -541,8 +541,8 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
 
     let mut skipped: Vec<String> = Vec::new();
 
-    // Step 1: Close all existing claude windows
-    tracing::info!(wset = %wset.meta.name, "Closing existing claude windows");
+    // Step 1: Close all existing claude panes
+    tracing::info!(wset = %wset.meta.name, "Closing existing claude panes");
     for win in find_claude_windows()? {
         if let Err(e) = close_window(win.id) {
             tracing::warn!(kitty_id = win.id, error = %e, "Failed to close window");

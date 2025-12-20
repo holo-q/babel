@@ -71,6 +71,8 @@ pub mod wset;
 pub mod core;
 pub mod tui;
 pub mod file_index;
+pub mod config;
+pub mod title_policy;
 
 // Re-export activity state from scrollparse for convenience
 pub use scrollparse::claude::ActivityState;

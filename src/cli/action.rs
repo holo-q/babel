@@ -27,7 +27,7 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -74,7 +74,7 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
 // Window Focus
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Focus a Claude window - by ID or interactive scrollparse-pager picker
+/// Focus a Claude pane - by ID or interactive scrollparse-pager picker
 ///
 /// With --content flag, enables searching window scrollback content.
 /// Without it, searches window titles only (faster).
@@ -85,10 +85,10 @@ pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: b
         return focus_by_id(core, id).await;
     }
 
-    // Get all Claude windows
+    // Get all Claude panes
     let windows = core.windows().await?;
     if windows.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -134,14 +134,14 @@ pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: b
     focus_by_id(core, selected_id).await
 }
 
-/// Format ClaudeWindow list for scrollparse-pager consumption
+/// Format ClaudePane list for scrollparse-pager consumption
 ///
 /// Output format is JSONL with __window__ wrapper:
 /// {"__window__": {"id": 42, "title": "...", "ws": 1, "cwd": "...", "focused": false}}
 ///
 /// If include_content=true, also fetches scrollback for each window (slow).
 fn format_windows_for_pager(
-    windows: &[claude_babel::utility::claude_discovery::ClaudeWindow],
+    windows: &[claude_babel::utility::claude_discovery::ClaudePane],
     include_content: bool,
 ) -> Result<String> {
     use serde_json::json;
@@ -228,7 +228,7 @@ pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -268,7 +268,7 @@ pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -297,7 +297,7 @@ pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool
     Ok(())
 }
 
-/// Broadcast text to all Claude windows with Enter
+/// Broadcast text to all Claude panes with Enter
 ///
 /// This is a convenience wrapper around send with target=*.
 /// If any window has pending input, the broadcast is aborted unless force=true.
@@ -312,7 +312,7 @@ pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<
     let windows = core.windows().await?;
 
     if windows.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -399,7 +399,7 @@ pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Resu
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 
@@ -417,7 +417,7 @@ pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
     let window_ids = resolve_target(core, target).await?;
 
     if window_ids.is_empty() {
-        println!("No Claude windows found");
+        println!("No Claude panes found");
         return Ok(());
     }
 

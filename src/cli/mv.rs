@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use claude_babel::core::{BabelCore, ConflictingWindow, MigrateOptions};
+use claude_babel::core::{BabelCore, ConflictingPane, MigrateOptions};
 use claude_babel::ActivityState;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -181,8 +181,8 @@ pub async fn cmd_mv(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Display conflicting windows in a user-friendly format
-fn display_conflicts(conflicts: &[ConflictingWindow], source: &Path) {
-	println!("Found {} Claude window(s) in {}:\n", conflicts.len(), source.display());
+fn display_conflicts(conflicts: &[ConflictingPane], source: &Path) {
+	println!("Found {} Claude pane(s) in {}:\n", conflicts.len(), source.display());
 
 	for c in conflicts {
 		let state_str = match c.state {

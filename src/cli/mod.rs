@@ -15,6 +15,7 @@ pub mod mv;
 pub mod fingerprint;
 pub mod wset;
 pub mod legend;
+pub mod mcp;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -30,7 +31,7 @@ pub mod legend;
 pub enum Target {
     /// Target a specific window by ID
     Window(u64),
-    /// Target all Claude windows
+    /// Target all Claude panes
     All,
     /// Target the current window (from KITTY_WINDOW_ID env var)
     /// This allows Claude to introspect its own pane
@@ -55,7 +56,7 @@ impl std::str::FromStr for Target {
 ///
 /// This is a helper that converts Target enum to concrete window IDs.
 /// - Target::Window(id) → [id]
-/// - Target::All → all Claude windows from daemon
+/// - Target::All → all Claude panes from daemon
 /// - Target::Current → current window from KITTY_WINDOW_ID env var
 pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result<Vec<u64>> {
     match target {
@@ -245,9 +246,9 @@ pub enum Commands {
 
     /// Get status of a kitty window
     ///
-    /// Shows detailed information about a Claude window including session info,
+    /// Shows detailed information about a Claude pane including session info,
     /// fingerprint data, and activity state. If no window ID is provided, shows
-    /// the currently focused Claude window.
+    /// the currently focused Claude pane.
     #[command()]
     GetWindow {
         /// Kitty window ID to query (omit for focused window)
@@ -327,7 +328,7 @@ pub enum Commands {
 
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
 
-    /// Focus a Claude window (interactive picker if no ID given)
+    /// Focus a Claude pane (interactive picker if no ID given)
     #[command()]
     Focus {
         /// Kitty window ID to focus (omit for interactive picker)
@@ -338,7 +339,7 @@ pub enum Commands {
         content: bool,
     },
 
-    /// Send text to Claude window(s) and press Enter
+    /// Send text to Claude pane(s) and press Enter
     ///
     /// Sends text followed by Enter (carriage return) to submit to Claude.
     /// If any targeted window has unsent text in the input area, the operation
@@ -363,7 +364,7 @@ pub enum Commands {
         force: bool,
     },
 
-    /// Type text into Claude window(s) without pressing Enter
+    /// Type text into Claude pane(s) without pressing Enter
     ///
     /// Types text into the input area without submitting. Useful for composing
     /// prompts incrementally or when you want manual control over when to send.
@@ -387,9 +388,9 @@ pub enum Commands {
         force: bool,
     },
 
-    /// Broadcast a prompt to all Claude windows
+    /// Broadcast a prompt to all Claude panes
     ///
-    /// Sends the same text to every Claude window and presses Enter. Equivalent
+    /// Sends the same text to every Claude pane and presses Enter. Equivalent
     /// to `babel send '*' "text"` but more explicit about intent.
     ///
     /// If any window has unsent text in the input area, the broadcast is aborted
@@ -573,7 +574,7 @@ pub enum Commands {
 
     /// Manage saved workspace sets (WSet)
     ///
-    /// Workspace sets capture all Claude windows and their positions across workspaces.
+    /// Workspace sets capture all Claude panes and their positions across workspaces.
     /// Use `babel wset save` and `babel wset load` to manage layouts.
     #[command(name = "wset")]
     WSet {
@@ -591,7 +592,7 @@ pub enum Commands {
     /// Launch interactive TUI debug console
     ///
     /// Requires daemon to be running. Shows live view of:
-    /// - Claude windows and their states
+    /// - Claude panes and their states
     /// - Fired tasks and their status
     /// - IPC traffic (SEND/RECV/EVNT) for debugging
     ///
@@ -617,6 +618,23 @@ pub enum Commands {
         #[arg(short, long)]
         filter: Vec<String>,
     },
+
+    /// Run MCP server for Claude Code integration
+    ///
+    /// Exposes babel's Claude session management via the Model Context Protocol.
+    /// This enables Claude Code (or any MCP client) to query sessions, send prompts,
+    /// and manage Claude panes programmatically.
+    ///
+    /// Tools exposed:
+    ///   - claude_sessions: List all active Claude sessions
+    ///   - claude_history: Query conversation history
+    ///   - claude_send: Send text to a Claude pane
+    ///   - claude_fire: Fire a prompt in background
+    ///   - claude_focus: Focus a Claude pane
+    ///
+    /// Runs on stdio transport (stdin/stdout JSON-RPC).
+    #[command()]
+    Mcp,
 }
 
 /// WSet management subcommands
@@ -624,7 +642,7 @@ pub enum Commands {
 pub enum WSetCommands {
     /// Save current workspace layout
     ///
-    /// Captures all Claude windows and their positions across workspaces.
+    /// Captures all Claude panes and their positions across workspaces.
     /// WSet files are stored in ~/.config/claude-babel/wsets/
     #[command(alias = "s")]
     Save {
@@ -638,7 +656,7 @@ pub enum WSetCommands {
 
     /// Load a workspace layout
     ///
-    /// Spawns Claude windows from the saved state.
+    /// Spawns Claude panes from the saved state.
     /// Sessions that no longer exist in ~/.claude are skipped.
     #[command(alias = "l")]
     Load {

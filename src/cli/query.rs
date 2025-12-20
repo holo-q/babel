@@ -11,7 +11,7 @@ use tracing::instrument;
 
 use claude_babel::utility::claude_storage::{SessionInfo, get_session_path, get_session_display_name};
 use claude_babel::core::BabelCore;
-use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudeWindow};
+use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudePane};
 use claude_babel::kitty::discover_all_instances;
 use claude_babel::babel_storage::{get_metadata, init_db};
 use claude_babel::ActivityState;
@@ -230,7 +230,7 @@ pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
 /// List kitty sockets with status and windows
 ///
 /// Socket-first view showing each kitty instance with its status,
-/// and the Claude windows running in that instance.
+/// and the Claude panes running in that instance.
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 	let sockets = core.sockets().await.context("Failed to list sockets")?;
@@ -264,7 +264,7 @@ pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 	let total_panes: usize = sockets.values().map(|s| s.pane_count).sum();
 	let total_claude: usize = windows.len();
 
-	println!("Kitty sockets ({} socket{}, {} responsive, {} panes, {} Claude windows):",
+	println!("Kitty sockets ({} socket{}, {} responsive, {} panes, {} Claude panes):",
 		total_sockets,
 		if total_sockets == 1 { "" } else { "s" },
 		responsive,
@@ -311,7 +311,7 @@ pub async fn cmd_ls_sockets(core: &BabelCore, json: bool) -> Result<()> {
 			println!("    {} {}", red.apply_to("error:"), err);
 		}
 
-		// List Claude windows in this socket
+		// List Claude panes in this socket
 		let socket_windows: Vec<_> = windows.iter()
 			.filter(|w| w.socket() == socket)
 			.collect();
@@ -372,7 +372,7 @@ pub async fn cmd_check_window(core: &BabelCore, window_id: Option<u64>, json: bo
 				println!();
 				show_available_windows(core).await?;
 			} else {
-				println!("No focused Claude window found");
+				println!("No focused Claude pane found");
 			}
 		}
 	}
@@ -448,17 +448,17 @@ pub async fn cmd_history(core: &BabelCore, sessions: Vec<String>, limit: usize, 
 // Helper Functions - Data Fetching
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Show available Claude windows for user selection
+/// Show available Claude panes for user selection
 #[instrument(level = "debug", skip(core))]
 async fn show_available_windows(core: &BabelCore) -> Result<()> {
 	let windows = core.windows().await?;
 
 	if windows.is_empty() {
-		println!("No Claude windows found");
+		println!("No Claude panes found");
 		return Ok(());
 	}
 
-	println!("Available Claude windows:");
+	println!("Available Claude panes:");
 	for wnd in &windows {
 		let title = wnd.title.strip_prefix("✳ ").unwrap_or(&wnd.title);
 		let title: String = title.chars().take(30).collect();
@@ -472,7 +472,7 @@ async fn show_available_windows(core: &BabelCore) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Print a single window in compact format
-pub fn print_window(wnd: &ClaudeWindow) -> Result<()> {
+pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 	let conn = init_db()?;
 
 	// Get overlay metadata if we have a session ID
@@ -560,7 +560,7 @@ pub fn print_window(wnd: &ClaudeWindow) -> Result<()> {
 }
 
 /// Print a single window in detailed format with all metadata
-pub fn print_window_detailed(wnd: &ClaudeWindow) -> Result<()> {
+pub fn print_window_detailed(wnd: &ClaudePane) -> Result<()> {
 	let conn = init_db()?;
 
 	// Get overlay metadata if we have a session ID

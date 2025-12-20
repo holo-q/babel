@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::daemon::TerminalInfo;
 use crate::fire::FiredTask;
-use crate::utility::claude_discovery::ClaudeWindow;
+use crate::utility::claude_discovery::ClaudePane;
 use crate::utility::ipc::{self, Request, Response};
 
 use super::ipc_client::{IpcLogEntry, LoggingIpcClient};
@@ -59,7 +59,7 @@ impl Pane {
 /// Content shown in the Details pane
 #[derive(Debug, Clone)]
 pub enum DetailContent {
-    Window(Box<ClaudeWindow>),
+    Window(Box<ClaudePane>),
     Terminal(TerminalInfo),
     FiredTask(FiredTask),
     IpcMessage(super::ipc_client::IpcLogEntry),
@@ -74,8 +74,8 @@ pub struct TuiApp {
     pub daemon_uptime: Duration,
 
     // ─── Data from daemon ───────────────────────────────────────────────────────
-    /// Claude windows from daemon cache
-    pub windows: Vec<ClaudeWindow>,
+    /// Claude panes from daemon cache
+    pub windows: Vec<ClaudePane>,
     /// All kitty terminals (including non-Claude) for visibility
     pub terminals: Vec<TerminalInfo>,
     /// Fire-and-forget tasks from filesystem
@@ -300,7 +300,7 @@ impl TuiApp {
                 // Get selected terminal
                 if let Some(term) = self.terminals.get(self.window_selected) {
                     if term.is_claude {
-                        // For Claude terminals, show full ClaudeWindow details
+                        // For Claude terminals, show full ClaudePane details
                         if let Some(window) = self.windows.iter().find(|w| w.id() == term.addr.id) {
                             self.detail_content = DetailContent::Window(Box::new(window.clone()));
                         } else {

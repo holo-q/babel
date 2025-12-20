@@ -126,9 +126,9 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
         .iter()
         .enumerate()
         .map(|(i, term)| {
-            // For Claude windows, look up activity state from windows list
+            // For Claude panes, look up activity state from windows list
             let (indicator, ind_style) = if term.is_claude {
-                // Find matching Claude window to get activity state
+                // Find matching Claude pane to get activity state
                 let activity = app.windows.iter()
                     .find(|w| w.id() == term.addr.id)
                     .and_then(|w| w.activity_state);

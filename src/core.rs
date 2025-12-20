@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! BabelState (same structure daemon uses)
-//! ├── windows: HashMap<u64, ClaudeWindow>
+//! ├── windows: HashMap<u64, ClaudePane>
 //! ├── fingerprint_index, summary_index, etc.
 //! └── refresh_windows(), rebuild_*_index(), etc.
 //!
@@ -33,7 +33,7 @@ use anyhow::{Result, bail, Context};
 use tracing::{debug, warn, info, instrument};
 
 use crate::daemon::{BabelState, TerminalInfo};
-use crate::utility::claude_discovery::ClaudeWindow;
+use crate::utility::claude_discovery::ClaudePane;
 use crate::utility::claude_storage::{SessionInfo, MigrateResult};
 use crate::utility::ipc::{send_request, is_daemon_running, Request, Response};
 use crate::kitty;
@@ -103,9 +103,9 @@ impl BabelCore {
     // Query Operations (read-only)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Get all Claude windows with enriched session data
+    /// Get all Claude panes with enriched session data
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn windows(&self) -> Result<Vec<ClaudeWindow>> {
+    pub async fn windows(&self) -> Result<Vec<ClaudePane>> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::List).await {
@@ -199,7 +199,7 @@ impl BabelCore {
 
     /// Get windows with fingerprints extracted from scrollback
     #[instrument(level = "debug", skip(self))]
-    pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudeWindow>> {
+    pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudePane>> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::ListWithFingerprints).await {
@@ -220,7 +220,7 @@ impl BabelCore {
 
     /// Get a specific window by ID, or focused window if None
     #[instrument(level = "debug", skip(self))]
-    pub async fn window(&self, window_id: Option<u64>) -> Result<Option<ClaudeWindow>> {
+    pub async fn window(&self, window_id: Option<u64>) -> Result<Option<ClaudePane>> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::Status { window_id }).await {
@@ -505,7 +505,7 @@ impl BabelCore {
 
     /// Load a workspace set, spawning windows for each session
     ///
-    /// This closes all existing Claude windows and spawns new ones from the WSet.
+    /// This closes all existing Claude panes and spawns new ones from the WSet.
     /// Returns information about what was loaded and any sessions that couldn't be restored.
     #[instrument(level = "debug", skip(self))]
     pub async fn wset_load(&mut self, name: Option<String>, dry_run: bool) -> Result<WSetLoadResult> {
@@ -702,7 +702,7 @@ impl BabelCore {
         &mut self,
         session_id: &str,
         cwd: &Path,
-    ) -> Result<Option<ClaudeWindow>> {
+    ) -> Result<Option<ClaudePane>> {
         match &mut self.mode {
             CoreMode::Connected => {
                 // Daemon handles spawning - use WSetLoad with single session as workaround
@@ -748,7 +748,7 @@ impl BabelCore {
     /// Returns windows along with their current state and relative path from source.
     /// Used by migration to detect affected terminals.
     #[instrument(level = "debug", skip(self))]
-    pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingWindow>> {
+    pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingPane>> {
         // Canonicalize source path for accurate comparison
         let source = source.canonicalize()
             .unwrap_or_else(|_| std::env::current_dir().unwrap().join(source));
@@ -766,7 +766,7 @@ impl BabelCore {
                     .unwrap_or(Path::new(""))
                     .to_path_buf();
 
-                conflicts.push(ConflictingWindow {
+                conflicts.push(ConflictingPane {
                     window: win,
                     state,
                     relative_path,
@@ -962,8 +962,8 @@ impl BabelCore {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// A window whose cwd conflicts with a migration source path
-pub struct ConflictingWindow {
-    pub window: ClaudeWindow,
+pub struct ConflictingPane {
+    pub window: ClaudePane,
     pub state: ActivityState,
     /// Path relative to source directory
     pub relative_path: PathBuf,

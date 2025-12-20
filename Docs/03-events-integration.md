@@ -19,8 +19,8 @@ The `events.rs` module has been successfully created and provides a complete pub
 ### Core Types
 
 1. **BabelEvent** - Enum of all daemon events:
-   - `WindowAdded` - New Claude window discovered
-   - `WindowRemoved` - Claude window closed
+   - `WindowAdded` - New Claude pane discovered
+   - `WindowRemoved` - Claude pane closed
    - `PaneFocused` - Window gained focus
    - `SessionMatched` - Session matched to window via fingerprint
    - `SessionUpdated` - Session JSONL file changed
@@ -131,7 +131,7 @@ Emitted when a previously tracked window disappears from kitty ls.
 **Cleanup**: Subscribers should remove window from UI and release resources
 
 ### PaneFocused
-Emitted when a Claude window becomes the focused kitty window.
+Emitted when a Claude pane becomes the focused kitty window.
 
 **Guarantees**:
 - Window has focus NOW (as of last poll)

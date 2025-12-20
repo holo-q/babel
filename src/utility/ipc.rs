@@ -13,7 +13,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::instrument;
 
 use crate::utility::claude_storage::SessionInfo;
-use crate::utility::claude_discovery::ClaudeWindow;
+use crate::utility::claude_discovery::ClaudePane;
 use crate::daemon::{TerminalInfo, SocketStatus};
 use crate::kitty::KittyPane;
 use crate::events::EventMessage;
@@ -27,7 +27,7 @@ use crate::wset::WSetSummary;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    /// List all Claude windows (fast - from cache)
+    /// List all Claude panes (fast - from cache)
     List,
 
     /// List all kitty terminals (not just Claude)
@@ -41,7 +41,7 @@ pub enum Request {
     /// List kitty socket status (multi-instance awareness)
     ListSockets,
 
-    /// List all Claude windows with fingerprint data (slow - extracts scrollback)
+    /// List all Claude panes with fingerprint data (slow - extracts scrollback)
     ListWithFingerprints,
 
     /// Get status of specific window (or focused if None)
@@ -95,7 +95,7 @@ pub enum Request {
     Titles,
 
     /// Force refresh titles for workspace(s)
-    /// If workspace is None, refreshes all workspaces with Claude windows
+    /// If workspace is None, refreshes all workspaces with Claude panes
     TitleRefresh { workspace: Option<i32> },
 
     // ─── WSet Operations ────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ pub enum Request {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     /// Success with window list
-    Windows { windows: Vec<ClaudeWindow> },
+    Windows { windows: Vec<ClaudePane> },
 
     /// Success with all terminal list (not just Claude)
     Terminals { terminals: Vec<TerminalInfo> },
@@ -143,8 +143,8 @@ pub enum Response {
     Sockets { sockets: std::collections::HashMap<String, SocketStatus> },
 
     /// Success with single window
-    /// Boxed to reduce enum size (ClaudeWindow is 432 bytes)
-    Window { window: Box<Option<ClaudeWindow>> },
+    /// Boxed to reduce enum size (ClaudePane is 432 bytes)
+    Window { window: Box<Option<ClaudePane>> },
 
     /// Success with session history
     History { sessions: Vec<SessionInfo> },
