@@ -1,61 +1,81 @@
-//! Overlay Database - User metadata NOT stored in Claude's files
+//! The Tower's Long Memory
 //!
-//! This module manages user-specific metadata for Claude sessions:
-//! - Custom icons for visual identification
-//! - Read/unread status tracking
-//! - Chapter navigation history
-//! - Personal notes and annotations
+//! This module is the institutional memory of Babel—what persists when workers sleep,
+//! what the tower remembers about each conversation's soul. While Claude's native storage
+//! holds the dialogue itself, this is the overlay: the sigils, the witness marks, the notes
+//! scrawled in margins by those who tend the tower.
 //!
-//! All data is stored in SQLite at ~/.local/share/babel/overlay.db, separate from
-//! Claude's conversation files to avoid pollution and enable independent backups.
+//! The tower remembers:
+//! - Icons assigned to sessions—visual sigils for quick recognition
+//! - Which conversations have been witnessed (read status)
+//! - The path of exploration through each session (chapter history)
+//! - Annotations and notes about each worker's purpose
+//! - Which files each soul has touched during its work
+//!
+//! All memory persists in SQLite at ~/.local/share/babel/overlay.db, separate from
+//! Claude's conversation files to keep the memories clean and independently preservable.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
-/// User metadata for a single Claude session
+/// What the Tower Remembers About a Soul
 ///
-/// This is the "overlay" data - enrichments that live outside Claude's native storage.
-/// The session_id links to Claude's conversation IDs for correlation.
+/// Each session is a worker's soul—the conversation thread where work unfolds.
+/// This metadata is what the tower's librarians keep in their ledgers: annotations
+/// that exist outside the conversation itself, enrichments that help navigate and
+/// understand the workers' collective labor.
+///
+/// The session_id is the soul's true name (Claude's UUID), linking institutional memory
+/// to the actual dialogue preserved in Claude's native storage.
 #[derive(Debug, Clone, Default)]
 pub struct SessionMetadata {
-    /// Claude conversation ID (UUID) - primary key linking to Claude's data
+    /// The soul's true name (Claude conversation UUID)
+    /// Links institutional memory to the actual conversation stored by Claude
     pub session_id: String,
 
-    /// Custom icon/emoji for visual identification in UIs (e.g., "🔥", "📊", "🐛")
+    /// The sigil assigned to this soul for quick recognition
+    /// Visual markers like "🔥" (urgent work), "📊" (analysis), "🐛" (debugging)
     pub icon: Option<String>,
 
-    /// Whether this session has been read/reviewed by the user
-    /// (useful for marking "inbox zero" style workflows)
+    /// Whether this conversation has been witnessed by the Captain
+    /// The tower tracks which souls have been reviewed, which still await attention
     pub is_read: bool,
 
-    /// Chronological list of chapter titles visited during navigation
-    /// Enables "back" functionality and tracks exploration patterns
+    /// The path of exploration through this soul's work
+    /// Chronological record of chapters visited—the trail of navigation through memory
     pub chapter_history: Vec<String>,
 
-    /// Freeform user notes/annotations about this session
-    /// (e.g., "refactoring work", "blocked on upstream bug", etc.)
+    /// Annotations about this soul's purpose and progress
+    /// Notes scrawled in margins: "refactoring auth", "blocked on API", "ready for review"
     pub notes: Option<String>,
 }
 
-/// SQLite database for session overlay metadata
+/// The Tower's Memory—What Persists When Workers Sleep
 ///
-/// Thread-safe for reads, but writes should be serialized at the application level
-/// if concurrent access is needed. For single-user CLI tools this is typically fine.
+/// This is Babel's institutional knowledge, the durable substrate that survives restarts
+/// and outlives individual sessions. While workers come and go, Claude processes spawn
+/// and terminate, the tower remembers: which souls exist, what they've done, which files
+/// they've touched, where exploration has led.
+///
+/// Thread-safe for concurrent reads. Writes should be serialized at the application level
+/// if multiple processes need simultaneous access, though for single-user CLI usage the
+/// natural serialization of command invocations handles this implicitly.
 pub struct BabelStorage {
     conn: Connection,
 }
 
 impl BabelStorage {
-    /// Open or create the overlay database
+    /// Awaken the tower's memory or create it anew if this is the first summoning
     ///
-    /// Database location: ~/.local/share/babel/overlay.db
-    /// Creates directory and initializes schema if needed.
+    /// Opens the persistent institutional memory at ~/.local/share/babel/overlay.db.
+    /// If the tower has never stored memories before, initializes the ledgers (schema).
+    /// If the tower already knows things, reconnects to what it remembers.
     ///
     /// # Errors
-    /// - If ~/.local/share cannot be determined (rare, but possible in exotic setups)
-    /// - If directory creation fails (permissions, disk full, etc.)
-    /// - If database connection fails (corrupt db, filesystem issues)
+    /// - If ~/.local/share cannot be determined (rare, exotic system configurations)
+    /// - If directory creation fails (permissions, disk space)
+    /// - If database connection fails (corruption, filesystem issues)
     pub fn open() -> Result<Self> {
         let db_path = Self::db_path()?;
 
@@ -103,10 +123,9 @@ impl BabelStorage {
             [],
         ).context("Failed to create session_metadata table")?;
 
-        // File touches: tracks which files each session has interacted with
-        // Built from scrollback parsing - tool calls like Read, Write, Edit
-        // Enables queries like "which sessions touched this file?" or
-        // "what files has this session modified?"
+        // The tower's ledger of file interactions—which souls touched which paths
+        // Built from scrollback parsing of tool invocations (Read, Write, Edit, etc.)
+        // Enables institutional memory queries: "who worked on this?" and "what did they touch?"
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS file_touches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,10 +201,13 @@ impl BabelStorage {
         }
     }
 
-    /// Set custom icon for a session
+    /// Give a soul its sigil—a visual mark for quick recognition
     ///
-    /// Creates metadata row if it doesn't exist (upsert semantics).
-    /// Icon should typically be a single emoji or short string for UI display.
+    /// Assigns or updates the icon associated with this session. The tower inscribes this
+    /// into its ledgers, creating a new entry if this soul is not yet known. Sigils are
+    /// typically single emoji ("🔥", "📊", "🐛") but can be short strings for UI rendering.
+    ///
+    /// This is how the Captain marks important work, urgent threads, or thematic categories.
     pub fn set_icon(&self, session_id: &str, icon: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session_metadata (session_id, icon)
@@ -196,10 +218,13 @@ impl BabelStorage {
         Ok(())
     }
 
-    /// Mark session as read
+    /// Note that this conversation has been witnessed
     ///
-    /// Useful for "inbox" style workflows where you track which sessions you've reviewed.
-    /// Creates metadata row if needed.
+    /// The tower records that the Captain (or another observer) has reviewed this soul's work.
+    /// Useful for tracking which conversations await attention and which have been processed—
+    /// an institutional memory of "inbox zero" style workflows.
+    ///
+    /// Creates a memory record if this soul is not yet known to the tower.
     pub fn mark_read(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session_metadata (session_id, is_read)
@@ -210,9 +235,11 @@ impl BabelStorage {
         Ok(())
     }
 
-    /// Mark session as unread
+    /// Mark that this conversation requires fresh eyes
     ///
-    /// Reverts read status (e.g., if new activity requires re-review).
+    /// Reverts the witnessed status—the tower notes that new activity has emerged or
+    /// that re-review is needed. Perhaps the work has continued, or discoveries warrant
+    /// another pass. The institutional memory reflects that this soul's work is unfinished.
     pub fn mark_unread(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session_metadata (session_id, is_read)
@@ -274,13 +301,18 @@ impl BabelStorage {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // File Touches API
+    // File Memory—Remembering What Each Soul Touched
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// Record a file operation (read, write, edit) for a session
+    /// Remember that a soul touched this file
     ///
-    /// Uses upsert semantics: increments touch_count if already exists.
-    /// Timestamps are Unix epoch seconds.
+    /// The tower records every interaction: reads, writes, edits. This institutional memory
+    /// enables queries like "which workers touched this file?" or "what files has this soul
+    /// modified?" Built from scrollback analysis—the tower parses tool invocations and notes
+    /// what each conversation has handled.
+    ///
+    /// Uses upsert semantics: if this soul has touched this file before, increments the count
+    /// and updates the timestamp. Memory compounds with repeated interaction.
     pub fn record_file_touch(
         &self,
         session_id: &str,
@@ -302,10 +334,11 @@ impl BabelStorage {
         Ok(())
     }
 
-    /// Get all sessions that touched a specific file
+    /// Recall which souls have touched this file
     ///
-    /// Returns (session_id, operation, touch_count, last_seen_at) tuples
-    /// ordered by last_seen_at descending (most recent first).
+    /// Query institutional memory for all workers who interacted with this path.
+    /// Returns (session_id, operation, touch_count, last_seen_at) ordered by recency—
+    /// most recent touches first. The tower's ledger of who has handled what.
     pub fn get_sessions_for_file(&self, file_path: &str) -> Result<Vec<(String, String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, operation, touch_count, last_seen_at
@@ -327,10 +360,11 @@ impl BabelStorage {
             .context("Failed to collect file touch rows")
     }
 
-    /// Get all files touched by a specific session
+    /// Recall what files this soul has touched
     ///
-    /// Returns (file_path, operation, touch_count, last_seen_at) tuples
-    /// ordered by last_seen_at descending (most recent first).
+    /// Query institutional memory for all paths this worker has interacted with.
+    /// Returns (file_path, operation, touch_count, last_seen_at) ordered by recency—
+    /// most recent touches first. The tower's record of what this soul has handled.
     pub fn get_files_for_session(&self, session_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT file_path, operation, touch_count, last_seen_at
@@ -411,15 +445,16 @@ impl BabelStorage {
     // Session Metadata API (continued)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// List all sessions with metadata
+    /// Enumerate all souls the tower remembers
     ///
-    /// Returns all sessions that have any overlay data (icon, notes, history, etc.).
-    /// Sessions with no metadata are not included - this filters to "enriched" sessions.
+    /// Returns every session that has institutional memory attached—any soul with an icon,
+    /// notes, navigation history, or other annotations. Pure conversations without metadata
+    /// are not included; this filters to souls the tower has been told to remember.
     ///
     /// Useful for:
-    /// - Displaying a dashboard of active/tracked sessions
-    /// - Finding sessions with specific icons or notes (filter in application layer)
-    /// - Backup/export of user annotations
+    /// - Displaying a dashboard of active/tracked work
+    /// - Searching for souls by sigil or annotation (filter results in caller)
+    /// - Backup/export of the tower's institutional knowledge
     pub fn list_all(&self) -> Result<Vec<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, icon, is_read, chapter_history, notes

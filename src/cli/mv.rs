@@ -185,14 +185,15 @@ fn display_conflicts(conflicts: &[ConflictingPane], source: &Path) {
 	println!("Found {} Claude pane(s) in {}:\n", conflicts.len(), source.display());
 
 	for c in conflicts {
+		// Reading the worker's breath before migration
 		let state_str = match c.state {
-			ActivityState::Idle => "[IDLE]  ",
-			ActivityState::AwaitingInput => "[AWAIT] ",
-			ActivityState::PlanApproval => "[PLAN]  ",
-			ActivityState::Thinking => "[ACTIVE: Thinking]",
-			ActivityState::ToolUse => "[ACTIVE: Tool Use]",
-			ActivityState::BackgroundTask => "[ACTIVE: Background]",
-			ActivityState::Unknown => "[UNKNOWN]",
+			ActivityState::Idle => "[IDLE]  ",                    // resting, safe to move
+			ActivityState::AwaitingInput => "[AWAIT] ",           // awaiting the user's voice, safe to move
+			ActivityState::PlanApproval => "[PLAN]  ",            // awaiting blessing, safe to move
+			ActivityState::Thinking => "[ACTIVE: Thinking]",      // soul processing—cannot migrate
+			ActivityState::ToolUse => "[ACTIVE: Tool Use]",       // hands moving—cannot migrate
+			ActivityState::BackgroundTask => "[ACTIVE: Background]", // working in shadow—cannot migrate
+			ActivityState::Unknown => "[UNKNOWN]",                // breath obscured
 		};
 		let title = c.window.title.strip_prefix("✳ ").unwrap_or(&c.window.title);
 		let title_short: String = title.chars().take(40).collect();

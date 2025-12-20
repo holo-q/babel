@@ -1,11 +1,12 @@
 //! WSet - Workspace Set persistence for babel
 //!
-//! A WSet captures the complete state of Claude panes across all workspaces,
-//! enabling save/restore of the spaceship's wspace configuration.
+//! A WSet captures the arrangement of the choir—remembering where each voice stood
+//! when the tower last rested. This enables save/restore of the spaceship's complete
+//! workspace configuration, preserving which workers gathered in which chambers.
 //!
 //! Terminology:
-//! - WSet: A named snapshot of all wspaces + claude panes
-//! - WSpace: An individual XFCE workspace containing claude panes
+//! - WSet: A remembered arrangement of all workspaces and their claude panes
+//! - WSpace: A chamber in the tower where workers gather (XFCE workspace)
 //! - Session: A claude conversation (identified by session_id UUID)
 //!
 //! Storage: ~/.config/claude-babel/wsets/
@@ -27,7 +28,10 @@ use crate::utility::claude_discovery::ClaudePane;
 // Data Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// A workspace set - complete snapshot of claude panes across all wspaces
+/// A remembered arrangement—where each worker stood when the tower last rested.
+///
+/// Captures the complete state of claude panes across all workspaces, preserving
+/// which voices gathered in which chambers and their exact positions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WSet {
     pub meta: WSetMeta,
@@ -44,7 +48,10 @@ pub struct WSetMeta {
     pub description: Option<String>,
 }
 
-/// Configuration for a single workspace
+/// A chamber's contents—which voices gathered there.
+///
+/// Records the configuration of a single workspace, including which claude panes
+/// (workers) occupy this chamber and the chamber's designated title.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WSpaceConfig {
     /// XFCE workspace index (0-based)
@@ -57,7 +64,11 @@ pub struct WSpaceConfig {
     pub windows: Vec<PaneConfig>,
 }
 
-/// Configuration for a single claude pane
+/// A single voice's position in the arrangement.
+///
+/// Records where a claude worker stood—their session identity, working context,
+/// and precise spatial coordinates. When the choir reassembles, each voice returns
+/// to their remembered place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneConfig {
     /// Claude session UUID (from ~/.claude/projects/)
@@ -183,10 +194,10 @@ impl WSet {
         }
     }
 
-    /// Build a WSet from current babel state
+    /// Build a WSet from current babel state—committing the choir to memory.
     ///
-    /// Groups windows by workspace and captures their session IDs and geometry.
-    /// Geometry capture enables precise multi-monitor restoration.
+    /// Groups windows by workspace and captures their session IDs and geometry,
+    /// preserving the arrangement so voices can be called back to their places.
     pub fn from_babel_state(name: &str, state: &BabelState) -> Self {
         use crate::kitty::get_window_geometry;
 
@@ -243,9 +254,9 @@ impl WSet {
         }
     }
 
-    /// Build a WSet from a list of ClaudePanes (for direct mode without daemon)
+    /// Build a WSet from a list of ClaudePanes—committing the arrangement to memory.
     ///
-    /// Captures geometry for precise multi-monitor restoration.
+    /// Captures geometry for precise multi-monitor restoration (for direct mode without daemon).
     pub fn from_windows(name: &str, windows: &[ClaudePane], workspace_titles: &HashMap<i32, String>) -> Self {
         use crate::kitty::get_window_geometry;
 
@@ -298,7 +309,7 @@ impl WSet {
         }
     }
 
-    /// Save this WSet to disk
+    /// Save this WSet to disk—inscribing the arrangement for later recall.
     pub fn save(&mut self) -> Result<PathBuf> {
         let path = wset_path(&self.meta.name)?;
 
@@ -316,7 +327,7 @@ impl WSet {
         Ok(path)
     }
 
-    /// Load a WSet from disk by name
+    /// Load a WSet from disk—calling the choir back to their remembered places.
     pub fn load(name: &str) -> Result<Self> {
         let path = wset_path(name)?;
 

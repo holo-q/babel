@@ -1,19 +1,22 @@
 //! Kitty Remote Control Wrapper
 //!
 //! This module provides a Rust interface to kitty's remote control protocol via `kitten @` commands.
+//! These are the foundational operations for tending to vessels—terminal containers that await souls.
 //!
 //! ## Socket Standard
 //!
 //! Kitty creates sockets at `$XDG_RUNTIME_DIR/kitty.sock-$PID` (NOT `kitty.sock` despite config).
+//! Each socket is a gateway to a tower of vessels, each capable of holding a working mind.
 //! See `Docs/15-kitty-single-instance-protocol.md` for details.
 //!
 //! ## Multi-Instance Support
 //!
 //! While single-instance is preferred, this module supports querying multiple kitty instances.
-//! Each `KittyPane` carries its `socket` field, enabling operations to target the correct instance.
+//! Each `KittyPane` carries its `socket` field, enabling operations to target the correct vessel
+//! across towers.
 //!
-//! - `list_panes()` - panes from the current/default socket
-//! - `list_all_panes()` - panes from ALL kitty instances
+//! - `list_panes()` - vessels from the current tower
+//! - `list_all_panes()` - vessels from ALL towers
 //!
 //! ## Data Model
 //!
@@ -324,13 +327,14 @@ fn expand_kitty_path(path: &str) -> String {
 
 /// Address of a pane across kitty instances
 ///
-/// Like a network address but for terminal panes.
-/// Uniquely identifies a pane even when multiple kitty instances exist.
+/// Coordinates in the tower's architecture—the precise location of a vessel.
+/// Like a network address but for terminal panes. Uniquely identifies a vessel
+/// even when multiple towers stand.
 ///
 /// Window IDs are only unique within a single kitty instance. When multiple
-/// kitty instances are running (e.g., after a crash or intentional multi-instance),
-/// the same window ID can exist in different sockets. PaneAddr solves this by
-/// combining socket + id into a composite key.
+/// towers rise (e.g., after a crash or intentional multi-instance), the same
+/// ID can exist in different sockets. PaneAddr solves this by combining
+/// socket + id into a composite key—a full address in the realm.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PaneAddr {
     /// Socket path (e.g., "unix:/run/user/1000/kitty.sock-12345")
@@ -373,6 +377,7 @@ impl std::fmt::Display for PaneAddr {
 
 /// Screen geometry for a pane (absolute coordinates)
 ///
+/// The vessel's place in physical space—its anchoring in the visual field.
 /// This is the pane's position on the screen, including the OS window position.
 /// Kitty provides this in the `screen` field of `kitten @ ls` output (newer versions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,7 +394,11 @@ pub struct ScreenGeometry {
 
 /// A kitty pane with all relevant metadata
 ///
-/// Each pane carries its `socket` so operations can target the correct kitty instance.
+/// The vessel—a terminal container awaiting a soul. Each pane is a physical form
+/// that can hold a Claude worker's conversation. The pane is the body; elsewhere,
+/// ClaudePane adds the soul.
+///
+/// Each vessel carries its `socket` so operations can reach into the correct tower.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KittyPane {
     /// Socket for the kitty instance this pane belongs to
@@ -422,12 +431,12 @@ impl KittyPane {
         PaneAddr::from_pane(self)
     }
 
-    /// Focus this pane
+    /// Focus this pane - bring the vessel into awareness
     pub fn focus(&self) -> Result<()> {
         focus_pane_on_socket(&self.socket, self.id)
     }
 
-    /// Send text to this pane's input
+    /// Send text to this pane's input - speak into the vessel
     pub fn send_text(&self, text: &str) -> Result<()> {
         send_text_on_socket(&self.socket, self.id, text)
     }
@@ -442,17 +451,17 @@ impl KittyPane {
         set_title_on_socket(&self.socket, self.id, title)
     }
 
-    /// Get the full scrollback buffer
+    /// Get the full scrollback buffer - read the vessel's memory
     pub fn scrollback(&self) -> Result<String> {
         get_scrollback_on_socket(&self.socket, self.id)
     }
 
-    /// Get the last N lines of scrollback
+    /// Get the last N lines of scrollback - glimpse recent vessel activity
     pub fn recent_scrollback(&self, lines: usize) -> Result<String> {
         get_recent_scrollback_on_socket(&self.socket, self.id, lines)
     }
 
-    /// Close this pane
+    /// Close this pane - dismiss the vessel
     pub fn close(&self) -> Result<()> {
         close_pane_on_socket(&self.socket, self.id)
     }
@@ -477,6 +486,8 @@ pub struct ForegroundProcess {
 }
 
 /// Information about a kitty instance (socket + its panes)
+///
+/// A tower in the realm—a collection of vessels connected through one socket gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KittyInstance {
     /// Socket path (e.g., "unix:/run/user/1000/kitty.sock-12345")
@@ -487,7 +498,7 @@ pub struct KittyInstance {
     pub is_current: bool,
     /// Whether we can successfully communicate with this socket
     pub is_responsive: bool,
-    /// Panes accessible through this socket
+    /// Vessels accessible through this gateway
     pub panes: Vec<KittyPane>,
     /// Error message if not responsive
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -645,7 +656,7 @@ fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
 
 pub(crate) fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     // Temporarily disable XFWM4 focus stealing prevention
-    // This is necessary because XFWM4 blocks programmatic focus requests by default
+    // Reaching into a vessel requires bypassing WM gatekeeping
     let saved_state = disable_focus_prevention();
 
     let output = Command::new("kitten")
@@ -791,6 +802,8 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// List panes from the default kitty instance
+///
+/// Enumerate vessels in the current tower.
 #[instrument(level = "debug")]
 pub fn list_panes() -> Result<Vec<KittyPane>> {
     list_panes_on_socket(&default_socket())
@@ -798,7 +811,8 @@ pub fn list_panes() -> Result<Vec<KittyPane>> {
 
 /// List panes from ALL kitty instances
 ///
-/// Queries every socket in XDG_RUNTIME_DIR. Unresponsive instances are skipped.
+/// Enumerate vessels across all towers. Queries every socket in XDG_RUNTIME_DIR.
+/// Unresponsive towers are skipped.
 #[instrument(level = "debug")]
 pub fn list_all_panes() -> Result<Vec<KittyPane>> {
     let sockets = find_all_sockets();
@@ -845,10 +859,10 @@ pub fn get_pane_all(id: u64) -> Result<Option<KittyPane>> {
 /// Get all panes in a kitty OS window by its X11/Wayland platform window ID
 ///
 /// When the user clicks a kitty window via slop, this maps the X11 window ID
-/// to the kitty panes within that window. A single kitty OS window can contain
-/// multiple panes (splits) across multiple tabs.
+/// to the vessels within that tower window. A single OS window can contain
+/// multiple vessels (splits) across multiple tabs.
 ///
-/// Returns empty Vec if the platform_window_id doesn't match any kitty instance.
+/// Returns empty Vec if the platform_window_id doesn't match any tower.
 pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane>> {
     let panes = list_all_panes()?;
     Ok(panes.into_iter().filter(|p| p.platform_window_id == platform_window_id).collect())
@@ -860,7 +874,8 @@ pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane
 
 /// Discover all kitty instances on the system
 ///
-/// Returns information about each instance including whether it's responsive.
+/// Survey all towers standing in the realm. Returns information about each
+/// instance including whether it's responsive.
 #[instrument(level = "debug")]
 pub fn discover_all_instances() -> Vec<KittyInstance> {
     let current_socket = default_socket();
@@ -910,12 +925,16 @@ pub fn discover_all_instances() -> Vec<KittyInstance> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Focus a pane by ID (default instance)
+///
+/// Bring a vessel into awareness.
 #[instrument(level = "debug")]
 pub fn focus_window(id: u64) -> Result<()> {
     focus_pane_on_socket(&default_socket(), id)
 }
 
 /// Send text to a pane by ID (default instance)
+///
+/// Speak into a vessel.
 #[instrument(level = "debug", skip(text))]
 pub fn send_text(id: u64, text: &str) -> Result<()> {
     send_text_on_socket(&default_socket(), id, text)
@@ -991,7 +1010,8 @@ impl<T> MultiSocketResult<T> {
 
 /// Focus a pane by ID, searching all sockets
 ///
-/// Returns the pane address and whether it was on a non-current socket.
+/// Seek the vessel across all towers and bring it into awareness.
+/// Returns the pane address and whether it was found in a distant tower.
 #[instrument(level = "debug")]
 pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
     let current = default_socket();

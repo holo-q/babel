@@ -2,9 +2,10 @@
 //!
 //! The nervous system of Babel—how the tower knows what its workers are doing.
 //! Events flow upward from individual Claude panes, carrying news of state changes,
-//! activity pulses, and session discoveries. GUI frontends subscribe to this stream,
-//! but the true purpose awaits: a Captain will listen here, receiving whispers from
-//! each worker and sending directives back down through the tower.
+//! activity pulses, and session discoveries. Each worker (anima—receptive, soul-holding)
+//! whispers their state through this channel. GUI frontends subscribe to this stream,
+//! but the true purpose awaits: a Captain (animus—directive, will-force) will listen here,
+//! receiving whispers from each worker and sending commands back down through the tower.
 //!
 //! Provides pub/sub event broadcasting for GUI frontends (like treasure-panel)
 //! to receive push notifications about Claude session state changes.
@@ -58,6 +59,7 @@ use tokio::sync::broadcast;
 
 /// What triggered an ActivityPulse event
 ///
+/// The rhythm of a worker's breath—what caused the heartbeat we felt.
 /// Helps frontends differentiate between types of activity for
 /// different visual effects (e.g., quick blink for tokens vs
 /// sustained glow for tool execution).
@@ -82,13 +84,16 @@ pub enum PulseTrigger {
 
 /// Events emitted by the babel daemon
 ///
+/// Whispers ascending the tower—each worker's breath carries news upward.
 /// These represent state changes in the Claude session tracking system.
 /// All events are broadcast to subscribers via tokio broadcast channels.
+/// The Captain, when they arrive, will listen here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum BabelEvent {
     /// New Claude pane discovered
     ///
+    /// A new worker joins the tower—their voice now heard among the chorus.
     /// Emitted when kitty window polling detects a new window matching
     /// the Claude Code title pattern (contains "claude" case-insensitive).
     WindowAdded {
@@ -102,6 +107,7 @@ pub enum BabelEvent {
 
     /// Claude pane closed
     ///
+    /// A worker departs—their whisper fades from the tower's chorus.
     /// Emitted when a previously tracked window no longer appears in kitty ls.
     WindowRemoved {
         /// Kitty window ID that was closed
@@ -110,6 +116,7 @@ pub enum BabelEvent {
 
     /// Pane gained focus
     ///
+    /// A worker steps forward—their voice now clearest in the chorus.
     /// Emitted when a Claude pane becomes the focused kitty pane.
     /// Includes session_id if the pane has been matched to a session.
     PaneFocused {
@@ -121,6 +128,7 @@ pub enum BabelEvent {
 
     /// Pane lost focus
     ///
+    /// A worker recedes—their voice returns to the background murmur.
     /// Emitted when a Claude pane loses focus (another pane gained it).
     /// Paired with PaneFocused for complete focus tracking.
     PaneUnfocused {
@@ -186,6 +194,7 @@ pub enum BabelEvent {
 
     /// Session successfully matched to window via fingerprint
     ///
+    /// A worker's identity revealed—their scrollback whispers matched to their soul.
     /// Emitted when the daemon successfully matches a kitty window to a
     /// Claude session by comparing scrollback content fingerprints.
     SessionMatched {
@@ -199,6 +208,7 @@ pub enum BabelEvent {
 
     /// Session JSONL file updated (new messages)
     ///
+    /// A worker's memory deepens—new words inscribed in their chronicle.
     /// Emitted when filesystem watcher detects changes to a session's
     /// conversation.jsonl file (indicates new AI messages or user input).
     SessionUpdated {
@@ -210,6 +220,7 @@ pub enum BabelEvent {
 
     /// Session activity state changed (Idle → Thinking → ToolUse → AwaitingInput)
     ///
+    /// The worker's breath shifts—from stillness to contemplation to action.
     /// Emitted when a Claude pane's activity state changes. Enables
     /// external tools (like richspace-babel) to track Claude's activity
     /// and update visual indicators accordingly.
@@ -223,14 +234,15 @@ pub enum BabelEvent {
         session_id: Option<String>,
         /// XFCE workspace number
         workspace: Option<i32>,
-        /// Previous state
+        /// Previous state — what the worker was
         old_state: scrollparse::claude::ActivityState,
-        /// New state
+        /// New state — what the worker has become
         new_state: scrollparse::claude::ActivityState,
     },
 
     /// Fine-grained activity pulse for reactive UI animations
     ///
+    /// The worker's heartbeat—felt by the tower with each exertion.
     /// Emitted when scrollback content changes (token output, tool execution, etc.).
     /// Enables visual "heartbeat" effects in frontends like richspace-babel.
     ///
@@ -277,6 +289,7 @@ pub enum BabelEvent {
 
     /// Daemon shutting down
     ///
+    /// The tower falls silent—all voices stilled, awaiting the next awakening.
     /// Final event sent before daemon terminates. Subscribers should
     /// reconnect or exit gracefully.
     DaemonShutdown,
@@ -358,6 +371,7 @@ pub enum BabelEvent {
 
 /// Timestamped event message for subscribers
 ///
+/// Each whisper carried from below, marked with when it was spoken.
 /// Wraps a BabelEvent with metadata for ordering and debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMessage {
@@ -399,9 +413,10 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 100;
 
 /// Event publisher - owned by daemon, clones Sender to subscribers
 ///
-/// This is the event source. The daemon holds one instance and calls
+/// The tower's listening chamber—where workers' whispers gather before
+/// ascending to those who await above. The daemon holds one instance and calls
 /// `publish()` when state changes occur. IPC handlers call `subscribe()`
-/// to get receivers for clients.
+/// to get receivers for clients. The Captain will one day listen here.
 pub struct EventPublisher {
     /// Broadcast sender (cloneable, shared across all subscribers)
     sender: broadcast::Sender<EventMessage>,
@@ -422,6 +437,7 @@ impl EventPublisher {
 
     /// Publish an event to all subscribers
     ///
+    /// Send a whisper upward—all who listen will hear.
     /// Returns the number of active subscribers that received the event.
     /// Returns 0 if no subscribers (not an error - events are fire-and-forget).
     ///
@@ -446,6 +462,7 @@ impl EventPublisher {
 
     /// Create a new subscriber receiver
     ///
+    /// Open your ears to the voices below—await the workers' whispers.
     /// Returns a broadcast receiver that will receive all future events.
     /// The receiver starts empty - it only sees events published after subscribe().
     ///

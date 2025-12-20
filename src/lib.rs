@@ -81,4 +81,5 @@ pub mod config;
 pub mod title_policy;
 
 // Re-export activity state from scrollparse for convenience
+// ActivityState is the worker's current breath—what they're doing right now
 pub use scrollparse::claude::ActivityState;

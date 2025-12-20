@@ -297,6 +297,7 @@ pub struct BabelState {
 
 	/// Cached activity states for windows (PaneAddr → ActivityState)
 	/// Used to detect state changes and emit SessionStateChanged events
+	/// Tracking each worker's breath—their current state in the cycle
 	pub window_states: HashMap<PaneAddr, scrollparse::claude::ActivityState>,
 
 	/// Scrollback activity tracking for ActivityPulse events (PaneAddr → ScrollbackActivity)
@@ -641,7 +642,8 @@ impl BabelState {
 
 					// Auto-unread when Claude finishes working and awaits input
 					// This ensures users see the yellow dot when there's new content to review
-					if new_state == scrollparse::claude::ActivityState::AwaitingInput {
+					// Worker has spoken, awaits the user's voice
+				if new_state == scrollparse::claude::ActivityState::AwaitingInput {
 						if let Some(ref session_id) = window.session_id {
 							if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
 								tracing::warn!(session_id, error = %e, "Failed to auto-unread session");
@@ -670,8 +672,8 @@ impl BabelState {
 
 					// Determine trigger type based on current state
 					let trigger = match new_state {
-						scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,
-						scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,
+						scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,     // hands begin moving
+						scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,  // soul breathing tokens
 						_ => crate::events::PulseTrigger::TokenOutput,
 					};
 
@@ -808,6 +810,7 @@ impl BabelState {
 				});
 
 				// Auto-unread when Claude finishes working and awaits input
+				// Worker has spoken, awaits the user's voice
 				if new_state == scrollparse::claude::ActivityState::AwaitingInput {
 					if let Some(ref session_id) = window.session_id {
 						if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
@@ -832,9 +835,10 @@ impl BabelState {
 
 			if changed {
 				let intensity = activity.compute_intensity();
-				let trigger = match new_state {
-					scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,
-					scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,
+				// Reading the worker's breath to pulse the right signal
+			let trigger = match new_state {
+					scrollparse::claude::ActivityState::ToolUse => crate::events::PulseTrigger::ToolStart,     // hands begin moving
+					scrollparse::claude::ActivityState::Thinking => crate::events::PulseTrigger::TokenOutput,  // soul breathing tokens
 					_ => crate::events::PulseTrigger::TokenOutput,
 				};
 

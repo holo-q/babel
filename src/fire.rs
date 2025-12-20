@@ -1,12 +1,16 @@
 //! Fire-and-Forget Claude Session Tracking
 //!
 //! Tracks background Claude sessions launched via `babel fire`. These are
-//! "fire-and-forget" prompts that run detached from any terminal, with
-//! optional ambient sound and state persistence for monitoring.
+//! autonomous workers released to work alone—given a task and set free to
+//! complete it, detached from any terminal. Each worker may carry its own
+//! ambient sound as it works in solitude.
 //!
 //! State files are stored in `~/.local/state/claude-fire/`:
 //! - `{task_id}.pid` - Process ID for liveness checks
 //! - `{task_id}.info` - Prompt preview, ambient sound, workdir
+//!
+//! This is proto-Captain behavior: launching multiple workers to operate
+//! independently in parallel, each pursuing its own mission.
 //!
 //! See [`crate::utility::workdir`] for smart working directory resolution.
 
@@ -16,7 +20,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A tracked fire-and-forget Claude task
+/// A worker released to the wilderness—given a task, set free to complete it
+///
+/// Each FiredTask represents an autonomous Claude agent working independently.
+/// We track these lone workers so we may observe their progress and know when
+/// they complete their journey.
 ///
 /// Stored in ~/.local/state/claude-fire/ to allow monitoring and cleanup
 /// of background claude sessions.
@@ -30,7 +38,7 @@ pub struct FiredTask {
     pub prompt_preview: String,
     /// Working directory where claude was launched
     pub workdir: PathBuf,
-    /// Optional ambient sound name being played
+    /// The worker's soundtrack in its solitude
     pub ambient_sound: Option<String>,
 }
 
@@ -45,7 +53,7 @@ impl FiredTask {
         format!("{}-{}", secs, std::process::id())
     }
 
-    /// Check if this task's process is still alive
+    /// Check if the lone worker still breathes
     pub fn is_alive(&self) -> bool {
         is_process_alive(self.pid)
     }
@@ -60,7 +68,11 @@ pub fn state_dir() -> PathBuf {
         .join("claude-fire")
 }
 
-/// Track a newly fired task by writing state files
+/// Remember a worker we've sent forth
+///
+/// When we release a worker to operate alone, we inscribe its details so we
+/// may recall it later—its identity, its mission, the sound that accompanies
+/// its solitary work.
 ///
 /// Creates:
 /// - `{task_id}.pid` - Contains the PID
@@ -88,9 +100,10 @@ pub fn track_task(task: &FiredTask) -> Result<()> {
     Ok(())
 }
 
-/// List all currently running fired tasks
+/// Survey the workers still out in the field
 ///
 /// Checks that PID files reference live processes before returning them.
+/// Only those who still breathe are counted among the active.
 pub fn list_running_tasks() -> Result<Vec<FiredTask>> {
     let state = state_dir();
     if !state.exists() {
@@ -150,7 +163,11 @@ pub fn list_running_tasks() -> Result<Vec<FiredTask>> {
     Ok(tasks)
 }
 
-/// Clean up state files for tasks that are no longer running
+/// Acknowledge workers who have completed their journey
+///
+/// When a worker finishes its task and returns to stillness, we honor its
+/// completion by clearing its records. This is not erasure but recognition—
+/// the work is done, the vigil ended.
 ///
 /// Scans the state directory and removes .pid/.info files for dead processes.
 pub fn cleanup_finished_tasks() -> Result<usize> {

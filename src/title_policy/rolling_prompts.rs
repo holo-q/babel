@@ -1,4 +1,9 @@
-//! Rolling prompts title policy
+//! Distilling the conversation's essence into a name
+//!
+//! The worker gathers its recent prompts—the living context of its task—and
+//! asks Haiku to help find words. Are these prompts a sequence building toward
+//! one goal? Or unrelated threads where only the latest matters? The policy
+//! embodies the worker's process of self-naming from the flow of its work.
 //!
 //! Takes last N user prompts and generates "project:task" titles via Haiku.
 //! Designed to handle both unrelated prompts (use latest) and stacking sequences
@@ -12,7 +17,12 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
 
-/// Rolling prompts policy - generates titles from last N prompts via Haiku
+/// Distilling the conversation's evolving essence into a name
+///
+/// A worker using this policy looks back at its recent prompts to find its name.
+/// It gathers the last N exchanges and asks Haiku: "What is the through-line here?"
+/// Haiku sees whether the prompts build on each other or stand alone, then offers
+/// a title—the worker's chosen expression of its work to the tower.
 ///
 /// This policy:
 /// 1. Collects the last N user prompts from the conversation
@@ -186,6 +196,7 @@ impl TitlePolicy for RollingPromptsPolicy {
         };
 
         // Take last N prompts (configured prompt_count)
+        // The worker gathers its recent context to understand what it's been doing
         let prompts: Vec<String> = ctx
             .recent_prompts
             .iter()
@@ -202,17 +213,17 @@ impl TitlePolicy for RollingPromptsPolicy {
         tracing::info!(
             session_id = %ctx.session_id,
             prompt_count = prompts.len(),
-            "Generating title from rolling prompts"
+            "Worker finding words for its work"
         );
 
-        // Call Haiku
+        // Ask Haiku to help distill the essence into a name
         let title = match self.call_haiku(api_key, &prompts).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
                     session_id = %ctx.session_id,
                     error = %e,
-                    "Haiku title generation failed"
+                    "Failed to generate title"
                 );
                 return Ok(None);
             }

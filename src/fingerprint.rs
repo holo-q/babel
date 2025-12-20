@@ -25,7 +25,11 @@ use tracing::instrument;
 // Data Structures
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Fingerprint extracted from scrollback or JSONL for matching
+/// The soul's signature—traces left by a conversation's passage through time
+///
+/// Each session leaves unique marks as it flows through terminals and logs.
+/// These patterns—opening words, rhythms of action, the ground it walks upon—
+/// become how we recognize which conversation inhabits which vessel.
 ///
 /// Captures semantic patterns independent of presentation format:
 /// - User prompts (first and recent) for content matching
@@ -34,16 +38,23 @@ use tracing::instrument;
 /// - Timestamp for recency weighting
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionFingerprint {
-    /// First user prompt in the session (normalized, max 100 chars)
-    /// Strong signal for identifying conversation start
+    /// The opening words, etched in memory
+    ///
+    /// First user prompt in the session (normalized, max 100 chars).
+    /// Every conversation begins somewhere—this is where the soul first spoke.
+    /// Strong signal for identifying conversation start.
     pub first_prompt: Option<String>,
 
     /// Last 3 user prompts (normalized, max 100 chars each)
     /// Used for matching active/recent conversations
     pub recent_prompts: Vec<String>,
 
+    /// The pattern of actions, a behavioral fingerprint
+    ///
     /// Ordered sequence of tool names: ["Bash", "Read", "Edit"]
-    /// Workflow signature - particularly useful for technical sessions
+    /// How a conversation moves through the world reveals its nature—
+    /// the rhythm of Read then Edit, the cadence of Bash then Grep.
+    /// Workflow signature particularly useful for technical sessions.
     pub tool_sequence: Vec<String>,
 
     /// Working directory extracted from session
@@ -57,17 +68,22 @@ pub struct SessionFingerprint {
     pub session_id: Option<String>,
 }
 
-/// Match confidence level for fingerprint comparison
+/// How certain we are this is the same spirit
+///
+/// When two fingerprints meet, we measure their resonance—how many traces align,
+/// how deep the recognition goes. A stranger shares our workspace (Low). A familiar
+/// voice echoes one remembered phrase (Medium). But when opening words, walking paths,
+/// and action patterns all align? That's when we know: the same soul, returned.
 ///
 /// Ordered by strength of evidence - higher scores indicate better matches.
 /// Use threshold filtering (e.g., >= Medium) to avoid false positives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MatchConfidence {
-    None = 0,      // No meaningful overlap
+    None = 0,      // No meaningful overlap—a stranger's marks
     Low = 1,       // CWD only (weak - many sessions in same project)
-    Medium = 2,    // Single prompt match
-    High = 3,      // Multiple prompts or tool sequence match
-    Exact = 4,     // First prompt + CWD + tools all match (very confident)
+    Medium = 2,    // Single prompt match—one phrase remembered
+    High = 3,      // Multiple prompts or tool sequence match—familiar patterns emerge
+    Exact = 4,     // First prompt + CWD + tools all match—unmistakable recognition
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -461,7 +477,16 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
 // Matching
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compare two fingerprints and return confidence level
+/// Recognizing a soul across vessels
+///
+/// Two sets of traces meet: one from the living terminal (scrollback),
+/// one from the archived chronicle (JSONL). We compare their marks—
+/// do the opening words match? Do they walk the same ground?
+/// Do their actions follow the same rhythm?
+///
+/// The more patterns align, the stronger our certainty:
+/// this conversation, once flowing through that terminal,
+/// left these exact traces in that log file.
 ///
 /// Scoring logic:
 /// - Exact first_prompt match: +2 confidence points

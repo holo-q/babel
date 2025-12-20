@@ -1,9 +1,15 @@
-//! IPC Protocol - Unix socket communication between CLI and daemon
+//! IPC Protocol - The voice channel through the tower
 //!
-//! Protocol: newline-delimited JSON over unix socket
-//! Socket location: $XDG_RUNTIME_DIR/babel.sock (or /tmp/babel.sock fallback)
+//! This module implements the communication protocol between Babel's many workers
+//! and the world outside. Requests descend into the tower, responses ascend bearing
+//! knowledge from the collective.
 //!
-//! Request/Response pattern - client sends Request, daemon sends Response.
+//! **Protocol**: Newline-delimited JSON over Unix socket
+//! **Channel**: `$XDG_RUNTIME_DIR/babel.sock` (or `/tmp/babel.sock` fallback)
+//! **Pattern**: Request/Response - queries flow down, answers flow up
+//!
+//! The socket is where voices meet: CLI tools speak to the daemon's receptive workers,
+//! and in the future, a Captain will use this same channel to orchestrate the anima below.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,7 +29,10 @@ use crate::wset::WSetSummary;
 // Protocol Messages
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Request from CLI to daemon
+/// Request - A query descending into the tower
+///
+/// These messages flow from the outside world down to the daemon's receptive workers.
+/// Each request seeks knowledge or action from the collective below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
@@ -86,6 +95,7 @@ pub enum Request {
     Refresh,
 
     /// Subscribe to events (connection stays open for streaming)
+    /// Opens one's ears to the workers below, listening for their continuous reports
     Subscribe {
         /// Event types to receive (empty = all events)
         events: Vec<String>,
@@ -125,7 +135,10 @@ pub enum Request {
     WSetDescribe { name: String, description: Option<String> },
 }
 
-/// Response from daemon to CLI
+/// Response - Knowledge ascending from the tower
+///
+/// These messages carry answers back up from the daemon's workers to those who queried.
+/// The collective speaks through these responses, sharing what it knows and has done.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
@@ -221,7 +234,11 @@ pub enum Response {
 // Socket Path
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Get the daemon socket path
+/// Get the daemon socket path - where voices meet
+///
+/// This is the rendezvous point where external queries enter the tower and
+/// responses emerge. The Captain, when implemented, will use this same channel
+/// to direct the workers below.
 pub fn socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir).join("babel.sock")
@@ -235,6 +252,8 @@ pub fn socket_path() -> PathBuf {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Send a request to the daemon and get a response
+///
+/// The fundamental dialogue: speak a query into the tower, await the answer that rises.
 #[tracing::instrument(level = "debug", skip(request), fields(cmd = ?request))]
 pub async fn send_request(request: &Request) -> Result<Response> {
     let sock_path = socket_path();
@@ -285,6 +304,9 @@ pub fn send_request_sync(request: &Request) -> Result<Response> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Create and bind the daemon socket
+///
+/// Establishes the listening point where the tower receives its queries.
+/// This is the daemon opening itself to communication from above.
 #[instrument(level = "debug")]
 pub async fn create_listener() -> Result<UnixListener> {
     let sock_path = socket_path();
@@ -309,6 +331,8 @@ pub async fn create_listener() -> Result<UnixListener> {
 }
 
 /// Read a request from a client connection
+///
+/// Listen for a query arriving at the tower's threshold.
 #[instrument(level = "debug", skip(stream))]
 pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
     let mut line = String::new();
@@ -325,6 +349,8 @@ pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<R
 }
 
 /// Send a response to a client
+///
+/// Return knowledge upward through the channel - the tower speaks its answer.
 #[instrument(level = "debug", skip(stream, response))]
 pub async fn send_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
     let mut response_json = serde_json::to_string(response)?;

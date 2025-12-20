@@ -1,4 +1,8 @@
-//! Configurable conversation title policies
+//! How workers name their conversations to the world
+//!
+//! Titles are self-expression: when a worker names its conversation, it reveals
+//! how it understands its work. The Captain sees these titles in the tower—
+//! each one is a worker's public face, their chosen words for the task at hand.
 //!
 //! Generates "project:task" titles from user prompts via LLM.
 //! Titles are buffered and spliced into JSONL on pane close.
@@ -45,6 +49,10 @@ pub struct GeneratedTitle {
 }
 
 /// Title generation policy trait
+///
+/// Defines how a worker finds words for its work. Different policies embody
+/// different philosophies of self-naming: some workers name from the latest prompt,
+/// others distill the essence of an evolving conversation.
 #[async_trait]
 pub trait TitlePolicy: Send + Sync {
     /// Policy name for logging
@@ -53,7 +61,10 @@ pub trait TitlePolicy: Send + Sync {
     /// Check if generation should trigger
     fn should_generate(&self, ctx: &TitleContext) -> bool;
 
-    /// Generate a title from context
+    /// Finding words for the work within
+    ///
+    /// The worker examines its conversation and chooses a name to present
+    /// to the tower. This is how it expresses its understanding of the task.
     async fn generate(&self, ctx: TitleContext) -> Result<Option<GeneratedTitle>>;
 
     /// Cleanup on pane close

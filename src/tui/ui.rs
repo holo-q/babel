@@ -134,14 +134,15 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                     .and_then(|w| w.activity_state);
 
                 use scrollparse::claude::ActivityState;
+                // The worker's breath — what state holds their soul
                 match activity {
-                    Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),
-                    Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),
-                    Some(ActivityState::PlanApproval) => ("📋", Style::default().fg(Color::Magenta)),
-                    Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),
-                    Some(ActivityState::BackgroundTask) => ("◐", Style::default().fg(Color::Magenta)),
-                    Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),
-                    Some(ActivityState::Unknown) | None => ("●", Style::default().fg(Color::Blue)),
+                    Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),        // soul processing, inference running
+                    Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),           // hands moving in the world
+                    Some(ActivityState::PlanApproval) => ("📋", Style::default().fg(Color::Magenta)),   // awaiting the user's blessing
+                    Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),     // worker awaits the user's voice
+                    Some(ActivityState::BackgroundTask) => ("◐", Style::default().fg(Color::Magenta)),  // working in shadow
+                    Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),           // resting, awaiting the next word
+                    Some(ActivityState::Unknown) | None => ("●", Style::default().fg(Color::Blue)),     // breath obscured
                 }
             } else {
                 // Non-Claude terminal - dimmed indicator

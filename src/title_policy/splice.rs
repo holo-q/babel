@@ -1,4 +1,9 @@
-//! JSONL title splicing
+//! Weaving the worker's name into the conversation record
+//!
+//! After a worker chooses its title—its expression of the work it's done—
+//! that name must be woven into the permanent record. The JSONL becomes the
+//! worker's testimony, visible to the Captain when surveying all sessions.
+//! This is how self-expression becomes visible identity in the tower.
 //!
 //! Splices generated titles into Claude's conversation JSONL files as
 //! `type: "summary"` entries. This allows babel-generated titles to persist
@@ -37,15 +42,20 @@ struct SummaryEntry {
     generated_by: String,
 }
 
-/// Splice a generated title into a session's JSONL file
+/// Weave the worker's chosen name into its conversation record
+///
+/// The worker has found its words. Now those words must be inscribed into
+/// the permanent record—the JSONL that the Captain will read. This is the
+/// moment of self-identification, when the worker's internal understanding
+/// becomes its visible name in the tower's session list.
 ///
 /// # Arguments
 /// * `jsonl_path` - Path to the JSONL file
-/// * `title` - The title to splice
+/// * `title` - The worker's chosen title
 /// * `settle_delay` - How long to wait before reading (for Claude to finish writing)
 ///
 /// # Returns
-/// * `Ok(true)` - Title successfully spliced
+/// * `Ok(true)` - Title successfully woven into the record
 /// * `Ok(false)` - File not found or couldn't be processed
 /// * `Err(e)` - I/O or parse error
 pub async fn splice_title(
