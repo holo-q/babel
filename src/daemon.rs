@@ -1,12 +1,18 @@
-//! Babel Daemon - Background service for Claude session tracking
+//! Babel Daemon - The watchful eye atop the tower
+//!
+//! The daemon observes all Claude workers in the tower, maintaining awareness of
+//! their states, conversations, and movements between workspaces. It speaks to no
+//! one directly—it only watches and reports. When the Captain arrives, this daemon
+//! will serve as their eyes: the ground truth of who is working, who awaits input,
+//! who has fallen silent. For now, it simply keeps the tower's ledger.
 //!
 //! The daemon maintains:
-//! - Live mapping of kitty windows → Claude sessions
+//! - Live mapping of kitty panes → Claude sessions
 //! - Cached session info from ~/.claude
 //! - Summary index for fast matching
 //!
 //! It watches:
-//! - Kitty windows (polling every 500ms)
+//! - Kitty panes (polling every 500ms)
 //! - ~/.claude/projects/ (inotify for new/changed files)
 //!
 //! CLI commands query the daemon over unix socket for instant responses.

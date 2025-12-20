@@ -1,7 +1,12 @@
 //! BabelCore - Unified API for Claude session management
 //!
-//! This is the "brain" of babel. All CLI commands should be thin puppets
-//! that call BabelCore methods. The core transparently handles:
+//! The brain of Babel, and the foundation for the Captain's throne. Today it serves
+//! CLI commands as thin puppets; tomorrow it will be the Captain's interface to the
+//! workers below. Every method here—`windows()`, `focus()`, `send()`—is a lever the
+//! Captain will pull. The anima of orchestration flows through this core: queries
+//! descend, states ascend, and soon, directives will flow both ways.
+//!
+//! The core transparently handles:
 //!
 //! - **Connected mode**: Fast path via IPC to babeld (persistent state, events)
 //! - **Local mode**: Initialize state same as daemon, use directly

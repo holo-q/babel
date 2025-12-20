@@ -177,7 +177,13 @@ pub fn find_claude_windows() -> Result<Vec<KittyPane>> {
     Ok(claude_windows)
 }
 
-/// A kitty window matched to its Claude session
+/// A single Claude worker in the tower—one voice among many
+///
+/// Each ClaudePane represents an individual Claude Code session running in a kitty
+/// terminal pane. In the Babel architecture, these are the workers: autonomous agents
+/// each engaged in their own conversation, yet observable and (soon) directable by
+/// a Captain orchestrator. The pane carries both its terminal identity (`addr`) and
+/// its conversational soul (`session_id`, `fingerprint`).
 ///
 /// Uniquely identified by `addr` (PaneAddr = socket + kitty window ID).
 /// This supports multiple kitty instances where window IDs may collide.

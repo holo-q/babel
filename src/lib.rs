@@ -1,8 +1,14 @@
-//! Claude Babel - Unified interface for Claude Code sessions across kitty windows
+//! Claude Babel - The tower where many voices speak as one
 //!
-//! This library provides the core functionality for discovering, tracking, and interacting
-//! with Claude Code sessions running in kitty terminal windows. It integrates with both
-//! kitty's remote control protocol and Claude's conversation storage.
+//! A unified interface for discovering, tracking, and orchestrating Claude Code sessions
+//! across kitty terminal panes. Each pane hosts a Claude—a worker in the tower, speaking
+//! its own conversation yet part of the greater chorus. Babel listens to all voices,
+//! translates their states, and awaits the Captain who will conduct them.
+//!
+//! The name evokes both the multiplicity of concurrent Claude sessions and the aspiration
+//! to bridge them into coherent collaboration. Where the mythic tower fell to confusion,
+//! this Babel succeeds through structured communication: events, fingerprints, and the
+//! coming orchestration layer that will let a Captain coordinate the workers below.
 //!
 //! ## Architecture
 //!

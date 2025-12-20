@@ -1,5 +1,11 @@
 //! Event notification system for claude-babel daemon
 //!
+//! The nervous system of Babel—how the tower knows what its workers are doing.
+//! Events flow upward from individual Claude panes, carrying news of state changes,
+//! activity pulses, and session discoveries. GUI frontends subscribe to this stream,
+//! but the true purpose awaits: a Captain will listen here, receiving whispers from
+//! each worker and sending directives back down through the tower.
+//!
 //! Provides pub/sub event broadcasting for GUI frontends (like treasure-panel)
 //! to receive push notifications about Claude session state changes.
 //!
