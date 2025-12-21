@@ -542,13 +542,13 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 		cwd_display
 	};
 
-	// Format: " ▸●⚡123 Title                        ~/path"
-	// Components: focus | unread/icon | state | id | title | cwd [socket]
+	// Format: " ▸●⚡123 ~/path  Title"
+	// Components: focus | unread/icon | state | id | cwd | title [socket]
 	// Socket indicator: nothing for current, ⚠sock-XXXXX for non-current
 	print!(" {}{}{}", focus_indicator, marker, state_style.apply_to(state_icon));
 	print!("{} ", if wnd.is_focused { bold.apply_to(&id_str) } else { dim.apply_to(&id_str) });
+	print!("{}  ", dim.apply_to(&cwd_short));
 	print!("{}", if wnd.is_focused { yellow.apply_to(title) } else { Style::new().apply_to(title) });
-	print!("  {}", dim.apply_to(&cwd_short));
 
 	// Show socket warning for non-current socket
 	if !is_current_socket {
