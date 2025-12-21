@@ -36,6 +36,9 @@ pub enum IndicatorEvent {
         color: String,
         /// Workspace number where the session lives
         workspace: u32,
+        /// X position on screen for left-to-right sorting (None = use id order)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        x_pos: Option<i32>,
     },
     /// Remove an indicator (session closed)
     Remove {
@@ -63,11 +66,12 @@ impl IndicatorBatch {
     }
 
     /// Add a set event
-    pub fn set(&mut self, id: impl Into<String>, color: impl Into<String>, workspace: u32) {
+    pub fn set(&mut self, id: impl Into<String>, color: impl Into<String>, workspace: u32, x_pos: Option<i32>) {
         self.events.push(IndicatorEvent::Set {
             id: id.into(),
             color: color.into(),
             workspace,
+            x_pos,
         });
     }
 
@@ -114,6 +118,7 @@ mod tests {
             id: "k5".to_string(),
             color: "#f0c040".to_string(),
             workspace: 4,
+            x_pos: Some(100),
         };
         let json = event.to_json();
         assert!(json.contains("\"type\":\"Set\""));
@@ -124,8 +129,8 @@ mod tests {
     #[test]
     fn test_batch() {
         let mut batch = IndicatorBatch::new();
-        batch.set("k5", "#f0c040", 4);
-        batch.set("k2", "#666666", 4);
+        batch.set("k5", "#f0c040", 4, Some(100));
+        batch.set("k2", "#666666", 4, Some(200));
         batch.remove("k3");
 
         assert_eq!(batch.len(), 3);
