@@ -122,20 +122,36 @@ pub fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState 
 
 /// Get both activity state and scrollback content for a Claude session
 ///
-/// Returns (state, scrollback_content) for use in both state detection
-/// and activity pulse tracking. Avoids double-fetching scrollback.
+/// Activity detection result with all derived state
+#[derive(Debug, Clone)]
+pub struct ActivityResult {
+    /// Current activity state (Idle, Thinking, ToolUse, etc.)
+    pub state: scrollparse::claude::ActivityState,
+    /// True if Claude's last message ended with a question
+    pub asking_question: bool,
+    /// Raw scrollback content (for pulse tracking)
+    pub scrollback: String,
+}
+
+/// Returns activity state, asking_question, and scrollback for use in both
+/// state detection and activity pulse tracking. Avoids double-fetching scrollback.
 ///
-/// Returns (Unknown, empty string) on any error.
+/// Returns (Unknown, false, empty string) on any error.
 ///
 /// NOTE: This uses the default socket. For windows on other sockets, use
 /// `get_activity_with_scrollback_on_socket` instead.
-pub fn get_window_activity_with_scrollback(id: u64) -> (scrollparse::claude::ActivityState, String) {
+pub fn get_window_activity_with_scrollback(id: u64) -> ActivityResult {
     match get_recent_scrollback(id, 50) {
         Ok(scrollback) => {
             let state = scrollparse::claude::detect_activity_state(&scrollback);
-            (state, scrollback)
+            let asking_question = scrollparse::claude::detect_asking_question(&scrollback);
+            ActivityResult { state, asking_question, scrollback }
         }
-        Err(_) => (scrollparse::claude::ActivityState::Unknown, String::new()),
+        Err(_) => ActivityResult {
+            state: scrollparse::claude::ActivityState::Unknown,
+            asking_question: false,
+            scrollback: String::new(),
+        },
     }
 }
 
@@ -144,16 +160,21 @@ pub fn get_window_activity_with_scrollback(id: u64) -> (scrollparse::claude::Act
 /// Socket-aware variant that works with windows on non-default kitty instances.
 /// Takes a PaneAddr to correctly route the query to the right socket.
 ///
-/// Returns (Unknown, empty string) on any error.
-pub fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> (scrollparse::claude::ActivityState, String) {
+/// Returns ActivityResult with Unknown state on any error.
+pub fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> ActivityResult {
     use crate::kitty::get_recent_scrollback_on_socket;
 
     match get_recent_scrollback_on_socket(&addr.socket, addr.id, 50) {
         Ok(scrollback) => {
             let state = scrollparse::claude::detect_activity_state(&scrollback);
-            (state, scrollback)
+            let asking_question = scrollparse::claude::detect_asking_question(&scrollback);
+            ActivityResult { state, asking_question, scrollback }
         }
-        Err(_) => (scrollparse::claude::ActivityState::Unknown, String::new()),
+        Err(_) => ActivityResult {
+            state: scrollparse::claude::ActivityState::Unknown,
+            asking_question: false,
+            scrollback: String::new(),
+        },
     }
 }
 

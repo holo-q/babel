@@ -238,6 +238,9 @@ pub enum BabelEvent {
         old_state: scrollparse::claude::ActivityState,
         /// New state — what the worker has become
         new_state: scrollparse::claude::ActivityState,
+        /// True if Claude's last message ended with a question
+        /// Dialogue state indicator for visual styling (ring + stripes when Idle)
+        asking_question: bool,
     },
 
     /// Fine-grained activity pulse for reactive UI animations
@@ -802,6 +805,7 @@ mod tests {
                 workspace: Some(1),
                 old_state: ActivityState::Idle,
                 new_state: ActivityState::Thinking,
+                asking_question: false,
             },
             BabelEvent::ActivityPulse {
                 kitty_id: 6,
@@ -880,6 +884,7 @@ mod tests {
             workspace: Some(0),
             old_state: ActivityState::Idle,
             new_state: ActivityState::AwaitingInput,
+            asking_question: true,
         };
         let window_added = BabelEvent::WindowAdded {
             kitty_id: 1,

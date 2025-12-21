@@ -613,8 +613,9 @@ impl BabelState {
 		// Cached activity states from previous polls are still available.
 		if !skip_activity_fetch {
 		for (addr, window) in &new_windows {
-			// Get both state and scrollback in one fetch to avoid double I/O
-			let (new_state, scrollback) = get_window_activity_with_scrollback(addr.id);
+			// Get state, asking_question, and scrollback in one fetch to avoid double I/O
+			let activity = get_window_activity_with_scrollback(addr.id);
+			let new_state = activity.state;
 			let old_state = self.window_states.get(addr).copied();
 
 			// ─── State Change Detection ─────────────────────────────────────────────
@@ -628,6 +629,7 @@ impl BabelState {
 						workspace: window.workspace,
 						old_state: old,
 						new_state,
+						asking_question: activity.asking_question,
 					});
 					self.window_states.insert(addr.clone(), new_state);
 
@@ -663,12 +665,12 @@ impl BabelState {
 			// ─── Activity Pulse Detection ───────────────────────────────────────────
 			// Track scrollback changes to emit fine-grained activity pulses
 			// for reactive UI animations (heartbeat blinks, etc.)
-			if !scrollback.is_empty() {
-				let activity = self.window_activity.entry(addr.clone()).or_default();
-				let (changed, _delta_bytes) = activity.update(&scrollback);
+			if !activity.scrollback.is_empty() {
+				let window_activity = self.window_activity.entry(addr.clone()).or_default();
+				let (changed, _delta_bytes) = window_activity.update(&activity.scrollback);
 
 				if changed {
-					let intensity = activity.compute_intensity();
+					let intensity = window_activity.compute_intensity();
 
 					// Determine trigger type based on current state
 					let trigger = match new_state {
@@ -778,6 +780,7 @@ impl BabelState {
 		&mut self,
 		addr: &PaneAddr,
 		new_state: scrollparse::claude::ActivityState,
+		asking_question: bool,
 		scrollback: String,
 	) {
 		let old_state = self.window_states.get(addr).copied();
@@ -797,6 +800,7 @@ impl BabelState {
 					workspace: window.workspace,
 					old_state: old,
 					new_state,
+					asking_question,
 				});
 				self.window_states.insert(addr.clone(), new_state);
 
@@ -1410,8 +1414,8 @@ pub async fn run_daemon() -> Result<()> {
                                 window_addrs.iter()
                                     .map(|addr| {
                                         // Use socket-aware function to handle multi-instance kitty
-                                        let (activity_state, scrollback) = get_activity_with_scrollback_on_socket(addr);
-                                        (addr.clone(), activity_state, scrollback)
+                                        let activity = get_activity_with_scrollback_on_socket(addr);
+                                        (addr.clone(), activity)
                                     })
                                     .collect()
                             }).await.unwrap_or_default();
@@ -1419,8 +1423,8 @@ pub async fn run_daemon() -> Result<()> {
                             // Phase 3: Apply activity updates with quick write lock
                             {
                                 let mut s = state_clone.write().await;
-                                for (addr, new_state, scrollback) in activity_results {
-                                    s.apply_activity_update(&addr, new_state, scrollback);
+                                for (addr, activity) in activity_results {
+                                    s.apply_activity_update(&addr, activity.state, activity.asking_question, activity.scrollback);
                                 }
                             }
 
