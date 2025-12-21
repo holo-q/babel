@@ -79,11 +79,13 @@ pub mod tui;
 pub mod file_index;
 pub mod config;
 pub mod title_policy;
-pub mod visual;
+pub mod logging;
+pub mod indicator;
 
-// Re-export activity state from scrollparse for convenience
-// ActivityState is the worker's current breath—what they're doing right now
-pub use scrollparse::claude::ActivityState;
+// Re-export activity state and visual types from spaceship-std
+// These were extracted to spaceship-std to be shared across components
+pub use spaceship_std::activity::ActivityState;
+pub use spaceship_std::visual::{DotStyle, DotTexture, RingStyle, RingPattern, Rgb, colors};
 
-// Re-export visual types for panel indicator styling
-pub use visual::{DotStyle, DotTexture, RingStyle, RingPattern, Rgb, colors};
+// Re-export indicator types for panel widgets
+pub use indicator::{IndicatorEvent, IndicatorBatch};
