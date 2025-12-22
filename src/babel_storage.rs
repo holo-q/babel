@@ -23,13 +23,18 @@ use std::path::PathBuf;
 ///
 /// This is ground truth from the neural interface: hooks fire on lifecycle events,
 /// giving us deterministic state transitions rather than scrollback heuristics.
+///
+/// Full lifecycle: SessionStart → (Idle ↔ Working ↔ ToolRunning) → Stop
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HookState {
-    /// Worker is processing—after UserPromptSubmit, before Stop
+    /// Worker is processing—after UserPromptSubmit or PostToolUse
     Working,
     /// Worker awaits input—after Stop, before next UserPromptSubmit
     #[default]
     Idle,
+    /// Tool executing—after PreToolUse, before PostToolUse
+    /// Enables finer-grained activity tracking (e.g., Bash running, file being edited)
+    ToolRunning,
 }
 
 impl HookState {
@@ -37,12 +42,14 @@ impl HookState {
         match self {
             HookState::Working => "working",
             HookState::Idle => "idle",
+            HookState::ToolRunning => "tool_running",
         }
     }
 
     pub fn from_str(s: &str) -> Self {
         match s {
             "working" => HookState::Working,
+            "tool_running" => HookState::ToolRunning,
             _ => HookState::Idle,
         }
     }

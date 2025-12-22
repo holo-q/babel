@@ -200,6 +200,7 @@ async fn main() -> Result<()> {
         }
 
         // ─── Hook Handlers ──────────────────────────────────────────────────────
+        // All 8 Claude Code lifecycle hooks wired here
         Commands::Hook { command } => {
             use cli::HookCommands;
             match command {
@@ -209,10 +210,33 @@ async fn main() -> Result<()> {
                 HookCommands::Prompt { session, kitty_id } => {
                     cli::hook::handle_prompt(&session, kitty_id).await
                 }
+                HookCommands::PreTool { session, tool, input, kitty_id } => {
+                    cli::hook::handle_pre_tool(&session, kitty_id, &tool, input.as_deref()).await
+                }
+                HookCommands::PostTool { session, tool, output, kitty_id } => {
+                    cli::hook::handle_post_tool(&session, kitty_id, &tool, output.as_deref()).await
+                }
+                HookCommands::Notification { session, notif_type, message, kitty_id } => {
+                    cli::hook::handle_notification(&session, kitty_id, &notif_type, message.as_deref()).await
+                }
+                HookCommands::SessionStart { session, cwd, resumed, kitty_id } => {
+                    cli::hook::handle_session_start(&session, kitty_id, &cwd, resumed).await
+                }
+                HookCommands::SubagentStop { session, subagent_id, kitty_id } => {
+                    cli::hook::handle_subagent_stop(&session, kitty_id, &subagent_id).await
+                }
+                HookCommands::PreCompact { session, transcript, kitty_id } => {
+                    cli::hook::handle_pre_compact(&session, kitty_id, &transcript).await
+                }
                 HookCommands::Install { dry_run } => {
                     cli::hook::install_hooks(dry_run).await
                 }
             }
+        }
+
+        // ─── Diagnostics ──────────────────────────────────────────────────────────
+        Commands::Doctor => {
+            cli::doctor::cmd_doctor().await
         }
     }
 }

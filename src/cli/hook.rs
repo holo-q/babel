@@ -92,11 +92,156 @@ pub async fn handle_prompt(
     Ok(())
 }
 
+/// Handle PreToolUse hook—tool execution begins
+///
+/// Sets state to ToolRunning for finer-grained activity tracking.
+/// Logs tool invocations for telemetry.
+pub async fn handle_pre_tool(
+    session: &str,
+    kitty_id: Option<u64>,
+    tool_name: &str,
+    _tool_input: Option<&str>,
+) -> Result<()> {
+    debug!(session, kitty_id, tool = tool_name, "Hook: PreToolUse received");
+
+    if let Ok(conn) = init_db() {
+        // Set hook state to ToolRunning
+        if let Err(e) = set_hook_state(&conn, session, HookState::ToolRunning) {
+            warn!(session, error = %e, "Failed to set hook state to ToolRunning");
+        } else {
+            debug!(session, tool = tool_name, "Hook: PreToolUse → ToolRunning");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle PostToolUse hook—tool execution completed
+///
+/// Returns state to Working after tool completes.
+pub async fn handle_post_tool(
+    session: &str,
+    kitty_id: Option<u64>,
+    tool_name: &str,
+    _tool_output: Option<&str>,
+) -> Result<()> {
+    debug!(session, kitty_id, tool = tool_name, "Hook: PostToolUse received");
+
+    if let Ok(conn) = init_db() {
+        // Return to Working state
+        if let Err(e) = set_hook_state(&conn, session, HookState::Working) {
+            warn!(session, error = %e, "Failed to set hook state to Working");
+        } else {
+            debug!(session, tool = tool_name, "Hook: PostToolUse → Working");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle Notification hook—system alerts
+///
+/// Logs notifications for visibility. Permission notifications may flash the ring.
+pub async fn handle_notification(
+    session: &str,
+    kitty_id: Option<u64>,
+    notif_type: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    info!(
+        session,
+        kitty_id,
+        notif_type,
+        message = message.unwrap_or("<none>"),
+        "Hook: Notification received"
+    );
+
+    // Future: flash ring for permission notifications
+    // if notif_type == "permission" { ... }
+
+    Ok(())
+}
+
+/// Handle SessionStart hook—session begins or resumes
+///
+/// Logs session start for telemetry. This is the first hook fired when Claude launches.
+pub async fn handle_session_start(
+    session: &str,
+    kitty_id: Option<u64>,
+    cwd: &str,
+    resumed: bool,
+) -> Result<()> {
+    info!(
+        session,
+        kitty_id,
+        cwd,
+        resumed,
+        "Hook: SessionStart received"
+    );
+
+    // Session is now known—could initialize state here if needed
+    // Currently just logging for telemetry
+
+    Ok(())
+}
+
+/// Handle SubagentStop hook—subagent finished
+///
+/// Logs when Task tool subagents complete their work.
+pub async fn handle_subagent_stop(
+    session: &str,
+    kitty_id: Option<u64>,
+    subagent_id: &str,
+) -> Result<()> {
+    debug!(
+        session,
+        kitty_id,
+        subagent_id,
+        "Hook: SubagentStop received"
+    );
+
+    Ok(())
+}
+
+/// Handle PreCompact hook—transcript compression imminent
+///
+/// Called before Claude Code compresses the conversation transcript.
+/// Good opportunity to archive the full transcript if needed.
+pub async fn handle_pre_compact(
+    session: &str,
+    kitty_id: Option<u64>,
+    transcript_path: &str,
+) -> Result<()> {
+    info!(
+        session,
+        kitty_id,
+        transcript_path,
+        "Hook: PreCompact received—transcript compression imminent"
+    );
+
+    // Future: could archive transcript here before compression
+
+    Ok(())
+}
+
+/// All 8 Claude Code hook events and their script names
+const HOOK_SCRIPTS: &[(&str, &str)] = &[
+    ("Stop", "on-stop"),
+    ("UserPromptSubmit", "on-prompt"),
+    ("PreToolUse", "on-tool-pre"),
+    ("PostToolUse", "on-tool-post"),
+    ("Notification", "on-notification"),
+    ("SessionStart", "on-session-start"),
+    ("SubagentStop", "on-subagent-stop"),
+    ("PreCompact", "on-pre-compact"),
+];
+
 /// Install babel hooks into Claude Code settings
 ///
-/// Modifies ~/.claude/settings.json to register our hook handlers.
+/// Modifies ~/.claude/settings.json to register all 8 hook handlers.
+/// Hook scripts live in ~/.config/babel/hooks/ and are written in nu.
 pub async fn install_hooks(dry_run: bool) -> Result<()> {
-    use serde_json::{json, Value};
+    use serde_json::{json, Map, Value};
 
     let settings_path = dirs::home_dir()
         .context("No home directory")?
@@ -114,53 +259,51 @@ pub async fn install_hooks(dry_run: bool) -> Result<()> {
         .context("No config directory")?
         .join("babel/hooks");
 
-    let on_stop = hooks_dir.join("on-stop");
-    let on_prompt = hooks_dir.join("on-prompt");
-
-    // Verify hook scripts exist
-    if !on_stop.exists() {
-        anyhow::bail!("Hook script not found: {}", on_stop.display());
-    }
-    if !on_prompt.exists() {
-        anyhow::bail!("Hook script not found: {}", on_prompt.display());
+    // Verify all hook scripts exist
+    let mut missing = Vec::new();
+    for (_, script_name) in HOOK_SCRIPTS {
+        let script_path = hooks_dir.join(script_name);
+        if !script_path.exists() {
+            missing.push(script_path);
+        }
     }
 
-    // Build hooks configuration
-    let babel_hooks = json!({
-        "Stop": [
-            {
+    if !missing.is_empty() {
+        let missing_list: Vec<_> = missing.iter().map(|p| p.display().to_string()).collect();
+        anyhow::bail!(
+            "Missing hook scripts ({}/{}):\n  {}",
+            missing.len(),
+            HOOK_SCRIPTS.len(),
+            missing_list.join("\n  ")
+        );
+    }
+
+    // Build hooks configuration for all 8 events
+    let mut babel_hooks = Map::new();
+    for (event_name, script_name) in HOOK_SCRIPTS {
+        let script_path = hooks_dir.join(script_name);
+        babel_hooks.insert(
+            (*event_name).to_string(),
+            json!([{
                 "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": on_stop.to_string_lossy()
-                    }
-                ]
-            }
-        ],
-        "UserPromptSubmit": [
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": on_prompt.to_string_lossy()
-                    }
-                ]
-            }
-        ]
-    });
+                "hooks": [{
+                    "type": "command",
+                    "command": script_path.to_string_lossy()
+                }]
+            }]),
+        );
+    }
 
     // Merge hooks into settings
     if let Some(existing_hooks) = settings.get_mut("hooks") {
         if let Some(obj) = existing_hooks.as_object_mut() {
             // Merge our hooks with existing ones
-            for (event, config) in babel_hooks.as_object().unwrap() {
-                obj.insert(event.clone(), config.clone());
+            for (event, config) in babel_hooks {
+                obj.insert(event, config);
             }
         }
     } else {
-        settings["hooks"] = babel_hooks;
+        settings["hooks"] = Value::Object(babel_hooks);
     }
 
     // Output
@@ -176,9 +319,11 @@ pub async fn install_hooks(dry_run: bool) -> Result<()> {
 
         println!("✓ Installed babel hooks to {}", settings_path.display());
         println!();
-        println!("Hooks registered:");
-        println!("  Stop → {}", on_stop.display());
-        println!("  UserPromptSubmit → {}", on_prompt.display());
+        println!("Hooks registered ({}):", HOOK_SCRIPTS.len());
+        for (event_name, script_name) in HOOK_SCRIPTS {
+            let script_path = hooks_dir.join(script_name);
+            println!("  {} → {}", event_name, script_path.display());
+        }
         println!();
         println!("⚠ Note: Review changes in Claude Code with /hooks command");
     }

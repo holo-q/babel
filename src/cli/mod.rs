@@ -17,6 +17,7 @@ pub mod wset;
 pub mod legend;
 pub mod mcp;
 pub mod hook;
+pub mod doctor;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -651,9 +652,32 @@ pub enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
+
+    /// Check system health and kitty patch status
+    ///
+    /// Diagnoses the babel ecosystem:
+    ///   - Daemon status (running, responsive)
+    ///   - Kitty patches (screen geometry, etc.)
+    ///   - Watcher integration (babel-watcher.py loaded)
+    ///   - Socket connectivity
+    ///
+    /// Use this to troubleshoot issues with pane sorting, geometry tracking,
+    /// or real-time event updates.
+    #[command()]
+    Doctor,
 }
 
 /// Hook handler subcommands—direct signals from Claude Code
+///
+/// All 8 Claude Code lifecycle hooks are wired here:
+/// - SessionStart: Session begins or resumes
+/// - UserPromptSubmit: User sends a prompt (existing)
+/// - PreToolUse: Before tool execution
+/// - PostToolUse: After tool completes
+/// - Notification: Permission/idle alerts
+/// - SubagentStop: Subagent finishes
+/// - PreCompact: Before transcript compression
+/// - Stop: Claude finishes responding (existing)
 #[derive(Subcommand)]
 pub enum HookCommands {
     /// Handle Stop event—worker has finished speaking
@@ -684,6 +708,134 @@ pub enum HookCommands {
         /// Session ID from Claude Code hook payload
         #[arg(long)]
         session: String,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle PreToolUse event—tool execution begins
+    ///
+    /// Called before Claude executes a tool (Bash, Edit, Write, Read, etc.).
+    /// Sets state to ToolRunning for finer-grained activity tracking.
+    #[command()]
+    PreTool {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Tool name (e.g., "Bash", "Edit", "Write")
+        #[arg(long)]
+        tool: String,
+
+        /// Tool input (truncated for safety)
+        #[arg(long)]
+        input: Option<String>,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle PostToolUse event—tool execution completed
+    ///
+    /// Called after a tool finishes. Returns state to Working.
+    #[command()]
+    PostTool {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Tool name (e.g., "Bash", "Edit", "Write")
+        #[arg(long)]
+        tool: String,
+
+        /// Tool output (truncated for safety)
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle Notification event—system alerts
+    ///
+    /// Called on permission requests, idle warnings, and other notifications.
+    /// May flash the ring for permission-required notifications.
+    #[command()]
+    Notification {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Notification type (e.g., "permission", "idle")
+        #[arg(long, name = "type")]
+        notif_type: String,
+
+        /// Notification message
+        #[arg(long)]
+        message: Option<String>,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle SessionStart event—session begins or resumes
+    ///
+    /// Called when a Claude Code session starts or is resumed.
+    /// Logs the session start for telemetry.
+    #[command()]
+    SessionStart {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Working directory
+        #[arg(long)]
+        cwd: String,
+
+        /// Whether this is a resumed session
+        #[arg(long)]
+        resumed: bool,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle SubagentStop event—subagent finished
+    ///
+    /// Called when a Task tool subagent completes its work.
+    #[command()]
+    SubagentStop {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Subagent ID that completed
+        #[arg(long)]
+        subagent_id: String,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Handle PreCompact event—transcript compression imminent
+    ///
+    /// Called before Claude Code compresses the conversation transcript.
+    /// Good time to archive or process the full transcript.
+    #[command()]
+    PreCompact {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Path to the transcript file
+        #[arg(long)]
+        transcript: String,
 
         /// Kitty window ID (from KITTY_WINDOW_ID env var)
         #[arg(long)]

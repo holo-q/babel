@@ -502,6 +502,9 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 		// Hook says Idle → trust it absolutely (worker finished, awaiting the Captain's voice)
 		(Some(HookState::Idle), _) => ("○", Style::new().dim()),
 
+		// Hook says ToolRunning → most precise state from PreToolUse hook
+		(Some(HookState::ToolRunning), _) => ("⚙", Style::new().cyan().bold()),
+
 		// Hook says Working → use activity_state for granularity
 		(Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", Style::new().yellow()),
 		(Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", Style::new().cyan()),

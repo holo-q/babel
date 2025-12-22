@@ -159,6 +159,39 @@ pub fn format_event(event: &BabelEvent) -> String {
             }
         }
 
+        // ─── Hook Events (from Claude Code neural interface) ────────────────────
+        BabelEvent::ToolStarted { session_id, kitty_id, tool_name } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            format!("Hook::ToolStarted {{ {}, {}{} }}", short_uuid(session_id), tool_name, kit)
+        }
+
+        BabelEvent::ToolCompleted { session_id, kitty_id, tool_name } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            format!("Hook::ToolCompleted {{ {}, {}{} }}", short_uuid(session_id), tool_name, kit)
+        }
+
+        BabelEvent::NotificationReceived { session_id, kitty_id, notif_type, message } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            let msg = message.as_ref().map_or(String::new(), |m| format!(" \"{}\"", truncate_title(m, 30)));
+            format!("Hook::Notification {{ {}, {}{}{} }}", short_uuid(session_id), notif_type, msg, kit)
+        }
+
+        BabelEvent::SessionStarted { session_id, kitty_id, cwd, resumed } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            let res = if *resumed { " resumed" } else { "" };
+            format!("Hook::SessionStarted {{ {}, {}{}{} }}", short_uuid(session_id), cwd, res, kit)
+        }
+
+        BabelEvent::SubagentCompleted { session_id, kitty_id, subagent_id } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            format!("Hook::SubagentCompleted {{ {}, sub:{}{} }}", short_uuid(session_id), short_uuid(subagent_id), kit)
+        }
+
+        BabelEvent::TranscriptCompacting { session_id, kitty_id, transcript_path } => {
+            let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
+            format!("Hook::TranscriptCompacting {{ {}, {}{} }}", short_uuid(session_id), transcript_path, kit)
+        }
+
         // ─── Daemon Events ──────────────────────────────────────────────────────
         BabelEvent::DaemonShutdown => "Daemon::Shutdown".to_string(),
     }
