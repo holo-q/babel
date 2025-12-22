@@ -10,6 +10,7 @@
 //! that build toward a single work item.
 
 use super::{GeneratedTitle, TitleContext, TitlePolicy};
+use crate::babel_storage::{init_db, set_generated_title};
 use crate::config::RollingPromptsConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -228,6 +229,24 @@ impl TitlePolicy for RollingPromptsPolicy {
                 return Ok(None);
             }
         };
+
+        // Persist to babel's overlay DB so we can distinguish haiku titles from procedural
+        // This enables babel ls to style titles: haiku=normal, procedural=dim+italic
+        if let Ok(conn) = init_db() {
+            if let Err(e) = set_generated_title(&conn, &ctx.session_id, &title) {
+                tracing::warn!(
+                    session_id = %ctx.session_id,
+                    error = %e,
+                    "Failed to persist generated title to overlay DB"
+                );
+            } else {
+                tracing::debug!(
+                    session_id = %ctx.session_id,
+                    title = %title,
+                    "Persisted haiku-generated title to overlay DB"
+                );
+            }
+        }
 
         // Update tracking state
         {

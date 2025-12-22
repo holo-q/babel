@@ -13,7 +13,7 @@ use claude_babel::utility::claude_storage::{SessionInfo, get_session_path, get_s
 use claude_babel::core::BabelCore;
 use claude_babel::utility::claude_discovery::{detect_claude_signals, ClaudePane};
 use claude_babel::kitty::discover_all_instances;
-use claude_babel::babel_storage::{get_metadata, init_db};
+use claude_babel::babel_storage::{get_metadata, get_generated_title, init_db};
 use claude_babel::ActivityState;
 use crate::cli::legend::Legend;
 use super::Target;
@@ -512,10 +512,33 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 		.unwrap_or(&wnd.title);
 	let title = raw_title.strip_prefix("✳ ").unwrap_or(raw_title);
 
+	// Determine title source for styling:
+	// - Haiku-generated (babel's own) → non-italic, normal color
+	// - User /rename (from history.jsonl) → italic, normal color
+	// - Procedural (JSONL summary, first prompt) → italic, dim
+	enum TitleSource { BabelHaiku, UserRename, Procedural }
+
+	let title_source = if let Some(ref id) = wnd.session_id {
+		if get_generated_title(&conn, id).ok().flatten().is_some() {
+			TitleSource::BabelHaiku
+		} else if get_session_display_name(id).is_some() {
+			TitleSource::UserRename
+		} else {
+			TitleSource::Procedural
+		}
+	} else {
+		TitleSource::Procedural
+	};
+
+	let title_style = match title_source {
+		TitleSource::BabelHaiku => Style::new(),              // non-italic, normal
+		TitleSource::UserRename => Style::new().italic(),     // italic, normal
+		TitleSource::Procedural => Style::new().dim().italic(), // italic, dim
+	};
+
 	// Styles
 	let dim = Style::new().dim();
 	let bold = Style::new().bold();
-	let yellow = Style::new().yellow();
 
 	// Build the line
 	let id_str = format!("{:>3}", wnd.id());
@@ -548,7 +571,9 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 	print!(" {}{}{}", focus_indicator, marker, state_style.apply_to(state_icon));
 	print!("{} ", if wnd.is_focused { bold.apply_to(&id_str) } else { dim.apply_to(&id_str) });
 	print!("{}  ", dim.apply_to(&cwd_short));
-	print!("{}", if wnd.is_focused { yellow.apply_to(title) } else { Style::new().apply_to(title) });
+	// Title styled by source: haiku=normal, user-rename=italic, procedural=dim+italic
+	// Focus no longer affects title color (▸ marker is sufficient)
+	print!("{}", title_style.apply_to(title));
 
 	// Show socket warning for non-current socket
 	if !is_current_socket {
@@ -574,7 +599,6 @@ pub fn print_window_detailed(wnd: &ClaudePane) -> Result<()> {
 	// Styles
 	let dim = Style::new().dim();
 	let bold = Style::new().bold();
-	let yellow = Style::new().yellow();
 	let cyan = Style::new().cyan();
 
 	// Title - strip ✳ prefix
@@ -586,18 +610,35 @@ pub fn print_window_detailed(wnd: &ClaudePane) -> Result<()> {
 		.unwrap_or(&wnd.title);
 	let title = raw_title.strip_prefix("✳ ").unwrap_or(raw_title);
 
+	// Determine title source for styling (same as print_window)
+	enum TitleSource { BabelHaiku, UserRename, Procedural }
+
+	let title_source = if let Some(ref id) = wnd.session_id {
+		if get_generated_title(&conn, id).ok().flatten().is_some() {
+			TitleSource::BabelHaiku
+		} else if get_session_display_name(id).is_some() {
+			TitleSource::UserRename
+		} else {
+			TitleSource::Procedural
+		}
+	} else {
+		TitleSource::Procedural
+	};
+
+	let title_style = match title_source {
+		TitleSource::BabelHaiku => Style::new(),              // non-italic, normal
+		TitleSource::UserRename => Style::new().italic(),     // italic, normal
+		TitleSource::Procedural => Style::new().dim().italic(), // italic, dim
+	};
+
 	// Focus/unread indicators
 	let focus_marker = if wnd.is_focused { "▸ " } else { "  " };
 	let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
 
-	// Header line: focus + ID + title
+	// Header line: focus + ID + title (title styled by source, not focus)
 	print!("{}", focus_marker);
 	print!("{} ", if wnd.is_focused { bold.apply_to(format!("[{}]", wnd.id())) } else { dim.apply_to(format!("[{}]", wnd.id())) });
-	if wnd.is_focused {
-		println!("{}", yellow.apply_to(title));
-	} else {
-		println!("{}", title);
-	}
+	println!("{}", title_style.apply_to(title));
 
 	// Details
 	let indent = "      ";
@@ -695,7 +736,7 @@ pub fn print_window_detailed(wnd: &ClaudePane) -> Result<()> {
 
 	// Unread status
 	if unread {
-		println!("{}{}", indent, yellow.apply_to("● unread"));
+		println!("{}{}", indent, style("● unread").yellow());
 	}
 
 	println!(); // Blank line between entries

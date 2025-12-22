@@ -164,6 +164,20 @@ impl BabelStorage {
             [],
         ).context("Failed to create scrollback_cursors table")?;
 
+        // Generated titles: tracks which sessions have babel-generated haiku titles
+        // This is how we distinguish "proper" titles from procedural fallbacks.
+        // Claude Code may discard extended fields on reserialization, so we maintain
+        // our own cache keyed by session_id.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS generated_titles (
+                session_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                generated_at INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'haiku'
+            )",
+            [],
+        ).context("Failed to create generated_titles table")?;
+
         Ok(())
     }
 
@@ -442,6 +456,47 @@ impl BabelStorage {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
+    // Generated Titles—Babel's Own Haiku-Generated Names
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Record that babel generated a haiku title for this session
+    ///
+    /// This marks a session as having a "proper" title (non-procedural).
+    /// Used in `babel ls` to style titles: haiku=normal, procedural=dim+italic.
+    pub fn set_generated_title(&self, session_id: &str, title: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO generated_titles (session_id, title, generated_at, source)
+             VALUES (?1, ?2, ?3, 'haiku')
+             ON CONFLICT(session_id) DO UPDATE SET title = ?2, generated_at = ?3",
+            params![session_id, title, now],
+        ).context("Failed to set generated title")?;
+        Ok(())
+    }
+
+    /// Check if babel has a haiku-generated title for this session
+    ///
+    /// Returns the title if this session has a babel-generated title,
+    /// None if it's using a procedural fallback.
+    pub fn get_generated_title(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT title FROM generated_titles WHERE session_id = ?1"
+        )?;
+
+        let mut rows = stmt.query(params![session_id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
     // Session Metadata API (continued)
     // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -559,6 +614,37 @@ pub fn mark_unread(conn: &Connection, session_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record that babel generated a haiku title for this session (standalone function)
+pub fn set_generated_title(conn: &Connection, session_id: &str, title: &str) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    conn.execute(
+        "INSERT INTO generated_titles (session_id, title, generated_at, source)
+         VALUES (?1, ?2, ?3, 'haiku')
+         ON CONFLICT(session_id) DO UPDATE SET title = ?2, generated_at = ?3",
+        params![session_id, title, now],
+    ).context("Failed to set generated title")?;
+    Ok(())
+}
+
+/// Check if babel has a haiku-generated title for this session (standalone function)
+pub fn get_generated_title(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT title FROM generated_titles WHERE session_id = ?1"
+    )?;
+
+    let mut rows = stmt.query(params![session_id])?;
+
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +725,26 @@ mod tests {
         let db = test_db();
         let meta = db.get_metadata("nonexistent").unwrap();
         assert!(meta.is_none());
+    }
+
+    #[test]
+    fn test_generated_title() {
+        let db = test_db();
+        let session_id = "test-session-haiku";
+
+        // Initially no generated title
+        assert!(db.get_generated_title(session_id).unwrap().is_none());
+
+        // Set a haiku-generated title
+        db.set_generated_title(session_id, "babel: refactoring auth").unwrap();
+
+        // Now we should get it back
+        let title = db.get_generated_title(session_id).unwrap();
+        assert_eq!(title, Some("babel: refactoring auth".to_string()));
+
+        // Update the title
+        db.set_generated_title(session_id, "babel: auth complete").unwrap();
+        let title = db.get_generated_title(session_id).unwrap();
+        assert_eq!(title, Some("babel: auth complete".to_string()));
     }
 }

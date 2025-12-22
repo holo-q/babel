@@ -577,6 +577,12 @@ impl BabelState {
 						kitty_id: addr.id,
 						session_id: w.session_id.clone(),
 					});
+					// Mark as read when pane gains focus—the worker's voice is now heard
+					if let Some(ref session_id) = w.session_id {
+						if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session_id)) {
+							tracing::warn!(session_id, error = %e, "Failed to mark as read on focus");
+						}
+					}
 				}
 			}
 		}

@@ -30,7 +30,10 @@ unicode-width = "0.2"     # Proper alignment with unicode chars
 rofi = "0.4"              # Spawn rofi menus and parse selections
 
 # LLM summarization
-reqwest = { version = "0.12", features = ["json"] }
+# CRITICAL: Must use rustls-tls, NOT native-tls (default)
+# native-tls pulls in openssl which has EVP_bf_ecb symbol that causes
+# dlopen failures in XFCE panel plugins linked against this crate
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 async-trait = "0.1"
 
 # Logging - delegated to spaceship-std for centralized config
