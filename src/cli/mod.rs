@@ -16,6 +16,7 @@ pub mod fingerprint;
 pub mod wset;
 pub mod legend;
 pub mod mcp;
+pub mod hook;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -635,6 +636,70 @@ pub enum Commands {
     /// Runs on stdio transport (stdin/stdout JSON-RPC).
     #[command()]
     Mcp,
+
+    /// Claude Code hook handlers—the neural interface
+    ///
+    /// These commands are called by Claude Code hooks to signal lifecycle events.
+    /// They receive session_id directly from Claude Code, bypassing the need for
+    /// fingerprint matching or scrollback analysis.
+    ///
+    /// Hooks are configured in ~/.claude/settings.json and call these handlers:
+    ///   - Stop hook → `babel hook stop --session <id>`
+    ///   - UserPromptSubmit hook → `babel hook prompt --session <id>`
+    #[command(name = "hook")]
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+}
+
+/// Hook handler subcommands—direct signals from Claude Code
+#[derive(Subcommand)]
+pub enum HookCommands {
+    /// Handle Stop event—worker has finished speaking
+    ///
+    /// Called when Claude Code finishes responding. Marks the session as unread
+    /// and lights the ring (amber border) to signal that the worker awaits attention.
+    #[command()]
+    Stop {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+
+        /// Transcript path from hook payload
+        #[arg(long)]
+        transcript: Option<String>,
+    },
+
+    /// Handle UserPromptSubmit event—the Captain speaks
+    ///
+    /// Called when the user submits a prompt. Marks the session as read and dims
+    /// the ring (restore theme border) to signal the worker's output was acknowledged.
+    #[command()]
+    Prompt {
+        /// Session ID from Claude Code hook payload
+        #[arg(long)]
+        session: String,
+
+        /// Kitty window ID (from KITTY_WINDOW_ID env var)
+        #[arg(long)]
+        kitty_id: Option<u64>,
+    },
+
+    /// Install babel hooks into Claude Code settings
+    ///
+    /// Registers babel's hook handlers in ~/.claude/settings.json so Claude Code
+    /// will call them on lifecycle events. This is the neural handshake.
+    #[command()]
+    Install {
+        /// Preview changes without writing (dry run)
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// WSet management subcommands

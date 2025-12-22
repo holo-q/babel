@@ -67,10 +67,10 @@ async fn main() -> Result<()> {
     let mut core = BabelCore::connect().await;
 
     // Print mode indicator to stderr for commands that use BabelCore
-    // Skip for daemon/tui/monitor/mcp which have their own connection handling
+    // Skip for daemon/tui/monitor/mcp/hook which have their own connection handling
     let show_mode = !matches!(
         cli.command,
-        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. } | Commands::Mcp
+        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. } | Commands::Mcp | Commands::Hook { .. }
     );
     if show_mode && !cli.json {
         eprintln!("[{}]", core.mode_label());
@@ -197,6 +197,22 @@ async fn main() -> Result<()> {
         // ─── MCP Server ─────────────────────────────────────────────────────────
         Commands::Mcp => {
             cli::mcp::run_mcp().await
+        }
+
+        // ─── Hook Handlers ──────────────────────────────────────────────────────
+        Commands::Hook { command } => {
+            use cli::HookCommands;
+            match command {
+                HookCommands::Stop { session, kitty_id, transcript } => {
+                    cli::hook::handle_stop(&session, kitty_id, transcript.as_deref()).await
+                }
+                HookCommands::Prompt { session, kitty_id } => {
+                    cli::hook::handle_prompt(&session, kitty_id).await
+                }
+                HookCommands::Install { dry_run } => {
+                    cli::hook::install_hooks(dry_run).await
+                }
+            }
         }
     }
 }

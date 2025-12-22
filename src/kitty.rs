@@ -801,7 +801,7 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 ///
 /// The border is the visual echo of attention: bright when the worker calls,
 /// dim when their voice has been heard.
-pub(crate) fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
+pub fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
     let output = Command::new("kitten")
         .args([
             "@", "--to", socket, "set-colors",
@@ -821,7 +821,7 @@ pub(crate) fn set_border_color_on_socket(socket: &str, id: u64, active_color: &s
 }
 
 /// Reset border colors to theme defaults for a specific pane
-pub(crate) fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
+pub fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
     // Read the active border color from the palette theme
     // Fallback to a sensible default if file isn't readable
     let palette_path = dirs::config_dir()
