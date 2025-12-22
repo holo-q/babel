@@ -19,6 +19,35 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
+/// The worker's current state—derived from Claude Code hooks
+///
+/// This is ground truth from the neural interface: hooks fire on lifecycle events,
+/// giving us deterministic state transitions rather than scrollback heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookState {
+    /// Worker is processing—after UserPromptSubmit, before Stop
+    Working,
+    /// Worker awaits input—after Stop, before next UserPromptSubmit
+    #[default]
+    Idle,
+}
+
+impl HookState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HookState::Working => "working",
+            HookState::Idle => "idle",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "working" => HookState::Working,
+            _ => HookState::Idle,
+        }
+    }
+}
+
 /// What the Tower Remembers About a Soul
 ///
 /// Each session is a worker's soul—the conversation thread where work unfolds.
@@ -49,6 +78,14 @@ pub struct SessionMetadata {
     /// Annotations about this soul's purpose and progress
     /// Notes scrawled in margins: "refactoring auth", "blocked on API", "ready for review"
     pub notes: Option<String>,
+
+    /// The worker's current state—ground truth from Claude Code hooks
+    /// This is the neural interface's verdict, not a scrollback heuristic
+    pub hook_state: HookState,
+
+    /// When the last hook fired (unix timestamp)
+    /// The pulse of the neural link—when did we last hear from this worker?
+    pub last_hook_at: Option<i64>,
 }
 
 /// The Tower's Memory—What Persists When Workers Sleep
@@ -178,6 +215,38 @@ impl BabelStorage {
             [],
         ).context("Failed to create generated_titles table")?;
 
+        // Migration: add hook_state and last_hook_at columns if they don't exist
+        // These columns track state from the neural interface (Claude Code hooks)
+        self.migrate_add_hook_columns()?;
+
+        Ok(())
+    }
+
+    /// Migration: add hook state columns to session_metadata
+    ///
+    /// SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we check the schema first.
+    fn migrate_add_hook_columns(&self) -> Result<()> {
+        // Check if hook_state column exists
+        let has_hook_state: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_metadata') WHERE name='hook_state'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+
+        if !has_hook_state {
+            self.conn.execute(
+                "ALTER TABLE session_metadata ADD COLUMN hook_state TEXT DEFAULT 'idle'",
+                [],
+            ).context("Failed to add hook_state column")?;
+
+            self.conn.execute(
+                "ALTER TABLE session_metadata ADD COLUMN last_hook_at INTEGER",
+                [],
+            ).context("Failed to add last_hook_at column")?;
+
+            tracing::info!("Migrated session_metadata: added hook_state and last_hook_at columns");
+        }
+
         Ok(())
     }
 
@@ -188,7 +257,7 @@ impl BabelStorage {
     /// the user hasn't interacted with overlay features yet.
     pub fn get_metadata(&self, session_id: &str) -> Result<Option<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
              FROM session_metadata
              WHERE session_id = ?1"
         )?;
@@ -203,12 +272,19 @@ impl BabelStorage {
                 Vec::new()
             };
 
+            let hook_state_str: Option<String> = row.get(5)?;
+            let hook_state = hook_state_str
+                .map(|s| HookState::from_str(&s))
+                .unwrap_or_default();
+
             Ok(Some(SessionMetadata {
                 session_id: row.get(0)?,
                 icon: row.get(1)?,
                 is_read: row.get::<_, i32>(2)? != 0,  // SQLite INTEGER to bool
                 chapter_history,
                 notes: row.get(4)?,
+                hook_state,
+                last_hook_at: row.get(6)?,
             }))
         } else {
             Ok(None)
@@ -512,7 +588,7 @@ impl BabelStorage {
     /// - Backup/export of the tower's institutional knowledge
     pub fn list_all(&self) -> Result<Vec<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
              FROM session_metadata
              ORDER BY session_id"
         )?;
@@ -525,12 +601,19 @@ impl BabelStorage {
                 Vec::new()
             };
 
+            let hook_state_str: Option<String> = row.get(5)?;
+            let hook_state = hook_state_str
+                .map(|s| HookState::from_str(&s))
+                .unwrap_or_default();
+
             Ok(SessionMetadata {
                 session_id: row.get(0)?,
                 icon: row.get(1)?,
                 is_read: row.get::<_, i32>(2)? != 0,
                 chapter_history,
                 notes: row.get(4)?,
+                hook_state,
+                last_hook_at: row.get(6)?,
             })
         })?;
 
@@ -554,7 +637,7 @@ pub fn init_db() -> Result<Connection> {
 /// Get metadata for a session (standalone function)
 pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<SessionMetadata>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, icon, is_read, chapter_history, notes
+        "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
          FROM session_metadata
          WHERE session_id = ?1"
     )?;
@@ -569,12 +652,19 @@ pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<Sessio
             Vec::new()
         };
 
+        let hook_state_str: Option<String> = row.get(5)?;
+        let hook_state = hook_state_str
+            .map(|s| HookState::from_str(&s))
+            .unwrap_or_default();
+
         Ok(Some(SessionMetadata {
             session_id: row.get(0)?,
             icon: row.get(1)?,
             is_read: row.get::<_, i32>(2)? != 0,
             chapter_history,
             notes: row.get(4)?,
+            hook_state,
+            last_hook_at: row.get(6)?,
         }))
     } else {
         Ok(None)
@@ -612,6 +702,36 @@ pub fn mark_unread(conn: &Connection, session_id: &str) -> Result<()> {
         params![session_id],
     ).context("Failed to mark session as unread")?;
     Ok(())
+}
+
+/// Set the hook state for a session—ground truth from the neural interface
+///
+/// Called by hook handlers when Claude Code lifecycle events fire.
+/// This is deterministic state, not a scrollback heuristic.
+pub fn set_hook_state(conn: &Connection, session_id: &str, state: HookState) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    conn.execute(
+        "INSERT INTO session_metadata (session_id, hook_state, last_hook_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET hook_state = ?2, last_hook_at = ?3",
+        params![session_id, state.as_str(), now],
+    ).context("Failed to set hook state")?;
+    Ok(())
+}
+
+/// Get the hook state for a session
+pub fn get_hook_state(conn: &Connection, session_id: &str) -> Result<Option<HookState>> {
+    let result: Option<String> = conn.query_row(
+        "SELECT hook_state FROM session_metadata WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    ).ok();
+
+    Ok(result.map(|s| HookState::from_str(&s)))
 }
 
 /// Record that babel generated a haiku title for this session (standalone function)

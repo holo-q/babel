@@ -8,7 +8,7 @@
 use anyhow::{Result, Context};
 use tracing::{info, debug, warn};
 
-use claude_babel::babel_storage::{init_db, mark_read, mark_unread};
+use claude_babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
 use claude_babel::kitty::{
     set_border_color_on_socket, reset_border_color_on_socket, default_socket,
 };
@@ -19,7 +19,7 @@ const UNREAD_INACTIVE: &str = "#7a3a00";
 
 /// Handle Stop hook—worker has finished speaking
 ///
-/// Marks session as unread and lights the ring (amber border).
+/// Marks session as unread, sets state to Idle, and lights the ring (amber border).
 pub async fn handle_stop(
     session: &str,
     kitty_id: Option<u64>,
@@ -27,11 +27,19 @@ pub async fn handle_stop(
 ) -> Result<()> {
     debug!(session, kitty_id, "Hook: Stop received");
 
-    // Mark session as unread in the database
-    if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session)) {
-        warn!(session, error = %e, "Failed to mark session unread");
-    } else {
-        info!(session, "Marked unread via hook");
+    // Update state and read status in one transaction
+    if let Ok(conn) = init_db() {
+        // Set hook state to Idle (worker finished, awaiting input)
+        if let Err(e) = set_hook_state(&conn, session, HookState::Idle) {
+            warn!(session, error = %e, "Failed to set hook state to Idle");
+        }
+
+        // Mark session as unread
+        if let Err(e) = mark_unread(&conn, session) {
+            warn!(session, error = %e, "Failed to mark session unread");
+        } else {
+            info!(session, "Hook: Stop → Idle, unread");
+        }
     }
 
     // Light the ring if we have a kitty window ID
@@ -49,18 +57,26 @@ pub async fn handle_stop(
 
 /// Handle UserPromptSubmit hook—the Captain speaks
 ///
-/// Marks session as read and dims the ring (restore theme border).
+/// Marks session as read, sets state to Working, and dims the ring (restore theme border).
 pub async fn handle_prompt(
     session: &str,
     kitty_id: Option<u64>,
 ) -> Result<()> {
     debug!(session, kitty_id, "Hook: Prompt received");
 
-    // Mark session as read in the database
-    if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session)) {
-        warn!(session, error = %e, "Failed to mark session read");
-    } else {
-        info!(session, "Marked read via hook");
+    // Update state and read status in one transaction
+    if let Ok(conn) = init_db() {
+        // Set hook state to Working (user submitted, Claude processing)
+        if let Err(e) = set_hook_state(&conn, session, HookState::Working) {
+            warn!(session, error = %e, "Failed to set hook state to Working");
+        }
+
+        // Mark session as read
+        if let Err(e) = mark_read(&conn, session) {
+            warn!(session, error = %e, "Failed to mark session read");
+        } else {
+            info!(session, "Hook: Prompt → Working, read");
+        }
     }
 
     // Dim the ring if we have a kitty window ID
