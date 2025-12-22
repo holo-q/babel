@@ -10,14 +10,21 @@
 //!
 //! ## Event Types
 //!
-//! - `Set`: Add or update a session's indicator (color + workspace)
+//! - `Set`: Add or update a session's indicator (color, ring, workspace)
 //! - `Remove`: Session closed, remove its indicator
 //! - `Clear`: Reset all indicators (daemon restart, etc.)
+//!
+//! ## Visual Properties
+//!
+//! - `color`: Base dot color (hex string, e.g. "#f0c040")
+//! - `ring_intensity`: Animated glow during activity (0.0-1.0)
+//! - `has_outline`: Whether to show static outline border
+//! - `scale`: Size multiplier (1.0 = default)
 //!
 //! ## Example Flow
 //!
 //! ```text
-//! babel: {"Set":{"id":"k5","color":"#f0c040","workspace":4}}
+//! babel: {"Set":{"id":"k5","color":"#f0c040","workspace":4,"ring_intensity":0.5}}
 //! babel: {"Set":{"id":"k2","color":"#666666","workspace":4}}
 //! babel: {"Remove":{"id":"k5"}}
 //! ```
@@ -25,7 +32,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single indicator update event
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum IndicatorEvent {
     /// Set or update an indicator
@@ -37,8 +44,22 @@ pub enum IndicatorEvent {
         /// Workspace number where the session lives
         workspace: u32,
         /// X position on screen for left-to-right sorting (None = use id order)
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         x_pos: Option<i32>,
+
+        // ═══ Extended visual properties (for cairo renderers) ═══
+
+        /// Ring glow intensity (0.0-1.0) — animated aura during token output
+        #[serde(default, skip_serializing_if = "is_zero")]
+        ring_intensity: f64,
+
+        /// Whether to show outline border (e.g., for question state)
+        #[serde(default, skip_serializing_if = "is_false")]
+        has_outline: bool,
+
+        /// Size multiplier (1.0 = default)
+        #[serde(default = "default_scale", skip_serializing_if = "is_default_scale")]
+        scale: f64,
     },
     /// Remove an indicator (session closed)
     Remove {
@@ -47,6 +68,22 @@ pub enum IndicatorEvent {
     },
     /// Clear all indicators (full reset)
     Clear,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+
+fn is_default_scale(v: &f64) -> bool {
+    (*v - 1.0).abs() < 0.001
 }
 
 /// Batch of indicator events for atomic updates
@@ -65,13 +102,38 @@ impl IndicatorBatch {
         Self { events: Vec::new() }
     }
 
-    /// Add a set event
+    /// Add a set event with basic properties
     pub fn set(&mut self, id: impl Into<String>, color: impl Into<String>, workspace: u32, x_pos: Option<i32>) {
         self.events.push(IndicatorEvent::Set {
             id: id.into(),
             color: color.into(),
             workspace,
             x_pos,
+            ring_intensity: 0.0,
+            has_outline: false,
+            scale: 1.0,
+        });
+    }
+
+    /// Add a set event with full visual properties
+    pub fn set_full(
+        &mut self,
+        id: impl Into<String>,
+        color: impl Into<String>,
+        workspace: u32,
+        x_pos: Option<i32>,
+        ring_intensity: f64,
+        has_outline: bool,
+        scale: f64,
+    ) {
+        self.events.push(IndicatorEvent::Set {
+            id: id.into(),
+            color: color.into(),
+            workspace,
+            x_pos,
+            ring_intensity,
+            has_outline,
+            scale,
         });
     }
 
@@ -119,11 +181,35 @@ mod tests {
             color: "#f0c040".to_string(),
             workspace: 4,
             x_pos: Some(100),
+            ring_intensity: 0.5,
+            has_outline: true,
+            scale: 1.0,
         };
         let json = event.to_json();
         assert!(json.contains("\"type\":\"Set\""));
         assert!(json.contains("\"id\":\"k5\""));
         assert!(json.contains("\"color\":\"#f0c040\""));
+        assert!(json.contains("\"ring_intensity\":0.5"));
+        assert!(json.contains("\"has_outline\":true"));
+    }
+
+    #[test]
+    fn test_event_skips_defaults() {
+        // Default values should be skipped in serialization
+        let event = IndicatorEvent::Set {
+            id: "k5".to_string(),
+            color: "#f0c040".to_string(),
+            workspace: 4,
+            x_pos: None,
+            ring_intensity: 0.0,
+            has_outline: false,
+            scale: 1.0,
+        };
+        let json = event.to_json();
+        assert!(!json.contains("x_pos"));
+        assert!(!json.contains("ring_intensity"));
+        assert!(!json.contains("has_outline"));
+        assert!(!json.contains("scale"));
     }
 
     #[test]
@@ -136,5 +222,16 @@ mod tests {
         assert_eq!(batch.len(), 3);
         let json = batch.to_json();
         assert!(json.contains("events"));
+    }
+
+    #[test]
+    fn test_batch_full() {
+        let mut batch = IndicatorBatch::new();
+        batch.set_full("k5", "#f0c040", 4, Some(100), 0.5, true, 1.2);
+
+        let json = batch.to_json();
+        assert!(json.contains("ring_intensity"));
+        assert!(json.contains("has_outline"));
+        assert!(json.contains("scale"));
     }
 }
