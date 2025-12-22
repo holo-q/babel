@@ -227,6 +227,10 @@ pub struct ClaudePane {
     /// Populated from scrollback analysis when available
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_state: Option<scrollparse::claude::ActivityState>,
+    /// Hook state—ground truth from Claude Code lifecycle events
+    /// This is deterministic: Working (after prompt submit) or Idle (after stop)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_state: Option<crate::babel_storage::HookState>,
     /// Extracted fingerprint from scrollback (for debugging/verification)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<SessionFingerprint>,
@@ -327,6 +331,7 @@ pub fn discover_claude_windows() -> Result<Vec<ClaudePane>> {
                 platform_window_id: window.platform_window_id,
                 workspace,
                 activity_state: None, // Populated by daemon from cached scrollback analysis
+                hook_state: None, // Populated by daemon from babel_storage
                 fingerprint: None, // Only populated in daemon with --details
                 match_confidence: None,
             }

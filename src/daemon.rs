@@ -500,6 +500,7 @@ impl BabelState {
 					platform_window_id: kw.platform_window_id,
 					workspace,
 					activity_state: None, // Will be populated from window_states cache
+					hook_state: None, // Populated later from babel_storage
 					fingerprint: None,
 					match_confidence: None,
 				}
@@ -1782,10 +1783,31 @@ mod handlers {
 	/// to ensure consistent ordering for panel plugins and other connectors.
 	pub async fn list(state: &Arc<RwLock<BabelState>>) -> Response {
 		let s = state.read().await;
+
+		// Fetch hook states from database for sessions we know about
+		let hook_states: std::collections::HashMap<String, crate::babel_storage::HookState> =
+			if let Ok(conn) = init_db() {
+				s.windows.values()
+					.filter_map(|w| w.session_id.as_ref())
+					.filter_map(|sid| {
+						crate::babel_storage::get_hook_state(&conn, sid)
+							.ok()
+							.flatten()
+							.map(|state| (sid.clone(), state))
+					})
+					.collect()
+			} else {
+				std::collections::HashMap::new()
+			};
+
 		let mut windows: Vec<ClaudePane> = s.windows.values()
 			.map(|w| {
 				let mut win = w.clone();
 				win.activity_state = s.get_activity_state(w.id());
+				// Populate hook_state from database if we have a session_id
+				if let Some(ref sid) = w.session_id {
+					win.hook_state = hook_states.get(sid).copied();
+				}
 				win
 			})
 			.collect();

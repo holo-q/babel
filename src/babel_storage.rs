@@ -23,7 +23,7 @@ use std::path::PathBuf;
 ///
 /// This is ground truth from the neural interface: hooks fire on lifecycle events,
 /// giving us deterministic state transitions rather than scrollback heuristics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HookState {
     /// Worker is processing—after UserPromptSubmit, before Stop
     Working,
