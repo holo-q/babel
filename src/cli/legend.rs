@@ -24,11 +24,18 @@
 //! - `*`        = focused pane (in raw pane listings)
 //!
 //! ## Activity State (what Claude is doing)
+//!
+//! Hook state (ground truth from Claude Code lifecycle) determines Working/Idle.
+//! Activity state (from scrollback) provides granularity when working.
+//!
+//! - `●` yellow = Working (hook says working, no granular state)
 //! - `⚡` yellow = Thinking (generating response)
 //! - `⚙` cyan   = ToolUse (executing a tool)
-//! - `◆` green  = AwaitingInput (waiting for user)
-//! - `○` dim    = Idle (at prompt, not active)
-//! - `●` blue   = Unknown (can't determine state)
+//! - `📋` magenta = PlanApproval (awaiting plan approval)
+//! - `◐` magenta = BackgroundTask (working in shadow)
+//! - `◆` green  = AwaitingInput (waiting for user, fallback only)
+//! - `○` dim    = Idle (finished, awaiting the Captain's voice)
+//! - `◌` blue   = Unknown (no hook data)
 
 use console::{style, Style};
 use std::collections::HashSet;
@@ -48,12 +55,14 @@ pub enum LegendSymbol {
     FocusedPane,
 
     // Activity state
+    ActivityWorking,         // Hook says working, no granular state
     ActivityThinking,
     ActivityToolUse,
+    ActivityPlanApproval,
     ActivityAwaitingInput,
     ActivityBackgroundTask,
     ActivityIdle,
-    ActivityUnknown,
+    ActivityUnknown,         // No hook data available
 }
 
 impl LegendSymbol {
@@ -68,12 +77,14 @@ impl LegendSymbol {
             Self::Focused => "▸",
             Self::Unread => "●",
             Self::FocusedPane => "*",
+            Self::ActivityWorking => "●",
             Self::ActivityThinking => "⚡",
             Self::ActivityToolUse => "⚙",
+            Self::ActivityPlanApproval => "📋",
             Self::ActivityAwaitingInput => "◆",
             Self::ActivityBackgroundTask => "◐",
             Self::ActivityIdle => "○",
-            Self::ActivityUnknown => "●",
+            Self::ActivityUnknown => "◌",
         }
     }
 
@@ -87,12 +98,14 @@ impl LegendSymbol {
             Self::Focused => "▸".to_string(),
             Self::Unread => style("●").yellow().to_string(),
             Self::FocusedPane => "*".to_string(),
+            Self::ActivityWorking => style("●").yellow().to_string(),
             Self::ActivityThinking => style("⚡").yellow().to_string(),
             Self::ActivityToolUse => style("⚙").cyan().to_string(),
+            Self::ActivityPlanApproval => style("📋").magenta().to_string(),
             Self::ActivityAwaitingInput => style("◆").green().to_string(),
             Self::ActivityBackgroundTask => style("◐").magenta().to_string(),
             Self::ActivityIdle => Style::new().dim().apply_to("○").to_string(),
-            Self::ActivityUnknown => style("●").blue().to_string(),
+            Self::ActivityUnknown => style("◌").blue().to_string(),
         }
     }
 
@@ -106,12 +119,14 @@ impl LegendSymbol {
             Self::Focused => "focused",
             Self::Unread => "unread",
             Self::FocusedPane => "focused pane",
+            Self::ActivityWorking => "working",
             Self::ActivityThinking => "thinking",
             Self::ActivityToolUse => "tool use",
+            Self::ActivityPlanApproval => "plan approval",
             Self::ActivityAwaitingInput => "awaiting input",
             Self::ActivityBackgroundTask => "background task",
             Self::ActivityIdle => "idle",
-            Self::ActivityUnknown => "unknown state",
+            Self::ActivityUnknown => "no hook data",
         }
     }
 }
@@ -188,8 +203,10 @@ impl Legend {
 
         // Activity state symbols
         let activity_order = [
+            LegendSymbol::ActivityWorking,
             LegendSymbol::ActivityThinking,
             LegendSymbol::ActivityToolUse,
+            LegendSymbol::ActivityPlanApproval,
             LegendSymbol::ActivityAwaitingInput,
             LegendSymbol::ActivityBackgroundTask,
             LegendSymbol::ActivityIdle,
@@ -216,8 +233,10 @@ impl Legend {
         legend.add_all(&[
             LegendSymbol::Focused,
             LegendSymbol::Unread,
+            LegendSymbol::ActivityWorking,
             LegendSymbol::ActivityThinking,
             LegendSymbol::ActivityToolUse,
+            LegendSymbol::ActivityPlanApproval,
             LegendSymbol::ActivityAwaitingInput,
             LegendSymbol::ActivityBackgroundTask,
             LegendSymbol::ActivityIdle,

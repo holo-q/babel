@@ -491,16 +491,32 @@ pub fn print_window(wnd: &ClaudePane) -> Result<()> {
 	let is_current_socket = wnd.socket() == current_socket;
 
 	// The worker's breath — reading their current state
-	// ⚡ Thinking (soul processing), ⚙ ToolUse (hands moving), 📋 PlanApproval (awaiting blessing),
-	// ◆ AwaitingInput (awaiting voice), ◐ BackgroundTask (working in shadow), ○ Idle (resting), ● Unknown (breath obscured)
-	let (state_icon, state_style) = match wnd.activity_state {
-		Some(ActivityState::Thinking) => ("⚡", Style::new().yellow()),        // soul processing, inference running
-		Some(ActivityState::ToolUse) => ("⚙", Style::new().cyan()),           // hands moving in the world
-		Some(ActivityState::PlanApproval) => ("📋", Style::new().magenta()),  // awaiting the user's blessing
-		Some(ActivityState::AwaitingInput) => ("◆", Style::new().green()),    // worker awaits the user's voice
-		Some(ActivityState::BackgroundTask) => ("◐", Style::new().magenta()), // working in shadow
-		Some(ActivityState::Idle) => ("○", Style::new().dim()),               // resting, awaiting the next word
-		Some(ActivityState::Unknown) | None => ("●", Style::new().blue()),    // breath obscured
+	// Hook state is ground truth from Claude Code lifecycle (Working/Idle)
+	// Activity state gives granularity when working (Thinking, ToolUse, etc.)
+	//
+	// Icons: ⚡ Thinking, ⚙ ToolUse, 📋 PlanApproval, ◆ AwaitingInput,
+	//        ◐ BackgroundTask, ○ Idle, ● Working (generic), ◌ Unknown
+	use claude_babel::babel_storage::HookState;
+
+	let (state_icon, state_style) = match (wnd.hook_state, wnd.activity_state) {
+		// Hook says Idle → trust it absolutely (worker finished, awaiting the Captain's voice)
+		(Some(HookState::Idle), _) => ("○", Style::new().dim()),
+
+		// Hook says Working → use activity_state for granularity
+		(Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", Style::new().yellow()),
+		(Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", Style::new().cyan()),
+		(Some(HookState::Working), Some(ActivityState::PlanApproval)) => ("📋", Style::new().magenta()),
+		(Some(HookState::Working), Some(ActivityState::BackgroundTask)) => ("◐", Style::new().magenta()),
+		(Some(HookState::Working), _) => ("●", Style::new().yellow()),  // working but no granular state
+
+		// No hook state → fall back to activity_state
+		(None, Some(ActivityState::Thinking)) => ("⚡", Style::new().yellow()),
+		(None, Some(ActivityState::ToolUse)) => ("⚙", Style::new().cyan()),
+		(None, Some(ActivityState::PlanApproval)) => ("📋", Style::new().magenta()),
+		(None, Some(ActivityState::AwaitingInput)) => ("◆", Style::new().green()),
+		(None, Some(ActivityState::BackgroundTask)) => ("◐", Style::new().magenta()),
+		(None, Some(ActivityState::Idle)) => ("○", Style::new().dim()),
+		(None, Some(ActivityState::Unknown)) | (None, None) => ("◌", Style::new().blue()),  // no data
 	};
 
 	// Title - strip ✳ prefix if present, use summary from session if available
