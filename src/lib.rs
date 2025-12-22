@@ -81,11 +81,12 @@ pub mod config;
 pub mod title_policy;
 pub mod logging;
 pub mod indicator;
+pub mod render;
 
 // Re-export activity state and visual types from spaceship-std
 // These were extracted to spaceship-std to be shared across components
 pub use spaceship_std::activity::ActivityState;
-pub use spaceship_std::visual::{DotStyle, DotTexture, RingStyle, RingPattern, Rgb, colors};
+pub use spaceship_std::visual::{DotStyle, DotTexture, OutlineStyle, OutlinePattern, Rgb, colors};
 
 // Re-export indicator types for panel widgets
 pub use indicator::{IndicatorEvent, IndicatorBatch};
