@@ -221,6 +221,36 @@ fn render_concentric_dot(
     }
 }
 
+/// Decay ring intensity over time
+///
+/// Call this in each GTK draw callback to animate the ring glow fading.
+/// The decay is frame-rate independent - pass the elapsed time since last frame.
+///
+/// # Arguments
+/// - `intensity`: Mutable reference to the ring intensity (0.0 to 1.0)
+/// - `dt_secs`: Time elapsed since last frame in seconds
+///
+/// # Example
+/// ```rust,ignore
+/// let dt = now.duration_since(last_frame).as_secs_f32();
+/// claude_babel::render::decay_ring(&mut ring_intensity, dt);
+/// if ring_intensity > 0.0 {
+///     // Queue another redraw for animation
+/// }
+/// ```
+pub fn decay_ring(intensity: &mut f32, dt_secs: f32) {
+    if *intensity <= 0.0 {
+        return;
+    }
+    // Exponential decay: ~5% per 16ms frame at 60fps
+    // After ~1 second, intensity drops to near zero
+    let decay = 0.95_f32.powf(dt_secs * 60.0);
+    *intensity *= decay;
+    if *intensity < 0.01 {
+        *intensity = 0.0;
+    }
+}
+
 /// Render the highlight shine on top-left
 ///
 /// Adds a subtle 3D effect with a white highlight.

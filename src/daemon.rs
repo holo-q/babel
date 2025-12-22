@@ -88,6 +88,7 @@ use crate::kitty::{
     get_scrollback,  // used in fingerprint_match_addr
     focus_window_any, get_scrollback_any, send_text_any,
     discover_all_instances, default_socket,
+    set_border_color_on_socket, reset_border_color_on_socket,
 };
 use crate::utility::claude_discovery::{get_window_activity_with_scrollback, get_activity_with_scrollback_on_socket, detect_claude_signals};
 use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
@@ -582,6 +583,10 @@ impl BabelState {
 						if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session_id)) {
 							tracing::warn!(session_id, error = %e, "Failed to mark as read on focus");
 						}
+						// Dim the ring—the worker's call has been answered
+						if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id) {
+							tracing::debug!(error = %e, "Failed to reset border color");
+						}
 					}
 				}
 			}
@@ -651,10 +656,15 @@ impl BabelState {
 					// Auto-unread when Claude finishes working and awaits input
 					// This ensures users see the yellow dot when there's new content to review
 					// Worker has spoken, awaits the user's voice
-				if new_state == scrollparse::claude::ActivityState::AwaitingInput {
+					if new_state == scrollparse::claude::ActivityState::AwaitingInput {
 						if let Some(ref session_id) = window.session_id {
 							if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
 								tracing::warn!(session_id, error = %e, "Failed to auto-unread session");
+							}
+							// Light the ring—the worker calls for attention
+							// Warm amber for unread, drawing the eye to unheard voices
+							if let Err(e) = set_border_color_on_socket(&addr.socket, addr.id, "#f67400", "#7a3a00") {
+								tracing::debug!(error = %e, "Failed to set unread border color");
 							}
 						}
 					}
@@ -825,6 +835,10 @@ impl BabelState {
 					if let Some(ref session_id) = window.session_id {
 						if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
 							tracing::warn!(session_id, error = %e, "Failed to auto-unread session");
+						}
+						// Light the ring—the worker calls for attention
+						if let Err(e) = set_border_color_on_socket(&addr.socket, addr.id, "#f67400", "#7a3a00") {
+							tracing::debug!(error = %e, "Failed to set unread border color");
 						}
 					}
 				}

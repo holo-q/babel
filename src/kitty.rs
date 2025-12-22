@@ -797,6 +797,56 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     Ok(())
 }
 
+/// Set border colors for a specific pane—the ring speaks the worker's state
+///
+/// The border is the visual echo of attention: bright when the worker calls,
+/// dim when their voice has been heard.
+pub(crate) fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
+    let output = Command::new("kitten")
+        .args([
+            "@", "--to", socket, "set-colors",
+            "--match", &format!("id:{}", id),
+            &format!("active_border_color={}", active_color),
+            &format!("inactive_border_color={}", inactive_color),
+        ])
+        .output()
+        .context("Failed to execute 'kitten @ set-colors'")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ set-colors failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Reset border colors to theme defaults for a specific pane
+pub(crate) fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
+    // Read the active border color from the palette theme
+    // Fallback to a sensible default if file isn't readable
+    let palette_path = dirs::config_dir()
+        .map(|p| p.join("kitty/palette-theme.conf"))
+        .unwrap_or_default();
+
+    let (active, inactive) = if let Ok(content) = std::fs::read_to_string(&palette_path) {
+        let active = content.lines()
+            .find(|l| l.starts_with("active_border_color"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("#9ccfd8")
+            .to_string();
+        let inactive = content.lines()
+            .find(|l| l.starts_with("inactive_border_color"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("#494748")
+            .to_string();
+        (active, inactive)
+    } else {
+        ("#9ccfd8".to_string(), "#494748".to_string())
+    };
+
+    set_border_color_on_socket(socket, id, &active, &inactive)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public API: Pane Listing
 // ═══════════════════════════════════════════════════════════════════════════════
