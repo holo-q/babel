@@ -290,6 +290,10 @@ pub async fn cmd_fork(
     eprintln!("   Context: {} messages", tail_messages.len());
     eprintln!("   Location: {}", location_label);
 
+    // Write prompt to temp file - too long for command line args
+    let prompt_file = std::env::temp_dir().join(format!("babel-fork-{}.txt", std::process::id()));
+    std::fs::write(&prompt_file, &full_prompt)?;
+
     // Use kitty @ launch for full control over location
     // SHELL=bash because Claude Code doesn't support zsh
     use std::process::{Command, Stdio};
@@ -312,8 +316,10 @@ pub async fn cmd_fork(
 
     cmd.args(["--cwd", &cwd.to_string_lossy()])
         .args(["--env", "SHELL=/usr/bin/bash"])
-        .arg("claude")
-        .args(["-p", &full_prompt])
+        .arg("--")
+        .arg("sh")
+        .arg("-c")
+        .arg(format!("cat '{}' | claude -p - ; rm -f '{}'", prompt_file.display(), prompt_file.display()))
         .stdin(Stdio::null())
         .stderr(Stdio::null());
 
@@ -327,6 +333,8 @@ pub async fn cmd_fork(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Clean up prompt file on error
+        let _ = std::fs::remove_file(&prompt_file);
         return Err(anyhow!("kitty @ launch failed: {}", stderr));
     }
 
