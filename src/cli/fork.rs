@@ -71,14 +71,18 @@ async fn find_session_for_cwd(cwd: &Path) -> Result<String> {
     let sessions = get_recent_sessions(50)?;
 
     for session in sessions {
-        // Match if project path or session cwd is within target dir
-        if session.project.starts_with(cwd)
-            || session
-                .cwd
-                .as_ref()
-                .map(|c| c.starts_with(cwd))
-                .unwrap_or(false)
-        {
+        // Match if:
+        // - cwd is within session's project (e.g., cwd=/foo/bar/baz, project=/foo/bar)
+        // - session's project is within cwd (e.g., project=/foo/bar/baz, cwd=/foo/bar)
+        // - session's cwd matches either direction
+        let project_match = cwd.starts_with(&session.project) || session.project.starts_with(cwd);
+        let cwd_match = session
+            .cwd
+            .as_ref()
+            .map(|c| cwd.starts_with(c) || c.starts_with(cwd))
+            .unwrap_or(false);
+
+        if project_match || cwd_match {
             return Ok(session.session_id);
         }
     }
