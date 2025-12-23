@@ -18,6 +18,8 @@ pub mod legend;
 pub mod mcp;
 pub mod hook;
 pub mod doctor;
+pub mod resume;
+pub mod fork;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -136,12 +138,12 @@ const RESET: &str = "\x1b[0m";
 /// Query commands (read-only, safe) - rendered italic in help
 const QUERY_COMMANDS: &[&str] = &[
     "ls", "ls-terminals", "ls-panes", "ls-sockets", "get-window", "get-pane",
-    "get-scrollback", "history", "target"
+    "get-scrollback", "history", "target", "plan", "resume", "continue", "tail"
 ];
 
 /// Mutation commands (state-changing) - rendered underlined in help
 const MUTATION_COMMANDS: &[&str] = &[
-    "focus", "send", "type", "broadcast", "set-icon", "set-read", "set-title", "mv", "fire"
+    "focus", "send", "type", "broadcast", "set-icon", "set-read", "set-title", "mv", "fire", "reboot", "fork"
 ];
 
 /// Style command names in help output based on their semantic category
@@ -328,6 +330,116 @@ pub enum Commands {
     #[command(name = "target")]
     Target,
 
+    /// Show the todo/plan list for a Claude session
+    ///
+    /// Extracts the latest todos from the session's JSONL transcript. The todo
+    /// list represents Claude's work plan created via the TodoWrite tool.
+    ///
+    /// Target can be:
+    /// - Window ID: Shows plan for that pane's session
+    /// - ".": Shows plan for current pane (from KITTY_WINDOW_ID)
+    /// - Session ID: Direct lookup by session UUID
+    ///
+    /// Examples:
+    ///   babel plan .           # Current pane's plan
+    ///   babel plan 42          # Plan for window 42
+    ///   babel plan abc123...   # Plan by session ID
+    #[command()]
+    Plan {
+        /// Target: window ID, "." for current, or session ID
+        target: String,
+    },
+
+    /// Browse and resume conversation history
+    ///
+    /// Opens an interactive TUI pager showing sessions from ~/.claude.
+    /// Left panel shows session list, right panel shows transcript preview.
+    /// Tab toggles between current directory and all projects.
+    /// Enter resumes the selected session.
+    ///
+    /// Examples:
+    ///   babel resume              # Browse sessions in current directory
+    ///   babel resume --all        # Browse all sessions
+    ///   babel r                   # Shorthand
+    #[command(visible_alias = "r")]
+    Resume {
+        /// Show all projects (not just current directory)
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    /// Continue the most recent non-running session
+    ///
+    /// Non-interactive: finds the most recent session from history that isn't
+    /// currently open in any pane, then launches `claude --resume`.
+    /// If all recent sessions are running, uses the most recent one.
+    ///
+    /// Examples:
+    ///   babel continue            # Resume most recent idle session
+    ///   babel c                   # Shorthand
+    #[command(visible_alias = "c")]
+    Continue,
+
+    /// Output recent transcript from a session
+    ///
+    /// Shows the last N messages from a Claude session's transcript.
+    /// Useful for reviewing what happened or piping context to other tools.
+    ///
+    /// Target can be:
+    /// - "." → most recent session in current directory (default)
+    /// - Window ID → session from that window
+    /// - Session ID → direct session reference
+    /// - Path → most recent session in that directory
+    ///
+    /// Examples:
+    ///   babel tail                # Last 20 messages from cwd session
+    ///   babel tail . -n 50        # Last 50 messages
+    ///   babel tail 42             # From window 42
+    ///   babel tail abc123         # From session abc123
+    #[command()]
+    Tail {
+        /// Target: ".", window ID, session ID, or path
+        #[arg(default_value = ".")]
+        target: String,
+
+        /// Number of messages to show
+        #[arg(short = 'n', long, default_value = "20")]
+        lines: usize,
+    },
+
+    /// Fork from another session with full context injection
+    ///
+    /// Launches a new Claude session primed with the transcript from the source
+    /// session, enabling "2nd degree mode" - meta-cognitive reflection on another
+    /// Claude's work.
+    ///
+    /// The forked session receives:
+    /// - Recent transcript from the source session
+    /// - Prompt priming for introspection and reflection
+    /// - Awareness of `babel tail` for further exploration
+    ///
+    /// Target can be:
+    /// - "." → most recent session in current directory (default)
+    /// - Window ID → session from that window
+    /// - Session ID → direct session reference
+    ///
+    /// Examples:
+    ///   babel fork                # Fork from cwd session (default)
+    ///   babel fork .              # Same as above
+    ///   babel fork 42             # Fork from window 42
+    ///   babel fork abc123         # Fork from session abc123
+    ///   babel fork . -n 50        # Fork with more context
+    #[command(visible_alias = "f")]
+    Fork {
+        /// Target: ".", window ID, or session ID
+        #[arg(default_value = ".")]
+        target: String,
+
+        /// Number of messages to include in context
+        #[arg(short = 'n', long, default_value = "30")]
+        lines: usize,
+    },
+
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
 
     /// Focus a Claude pane (interactive picker if no ID given)
@@ -460,6 +572,27 @@ pub enum Commands {
         title: Option<String>,
     },
 
+    /// Solo a single pane for debugging (isolate one pane, hide others)
+    ///
+    /// Useful when debugging a specific Claude session - hides all other panes
+    /// from `babel ls` and similar outputs to reduce noise. Use `--off` to restore.
+    ///
+    /// Target can be a window ID or "." for current window.
+    ///
+    /// Examples:
+    ///   babel solo 42       # Solo window 42
+    ///   babel solo .        # Solo current window
+    ///   babel solo --off    # Restore all panes
+    #[command()]
+    Solo {
+        /// Target: window ID or "." for current (omit when using --off)
+        target: Option<Target>,
+
+        /// Disable solo mode (restore all panes)
+        #[arg(long)]
+        off: bool,
+    },
+
     /// Move a directory while preserving Claude conversation history
     ///
     /// When you move a project directory, Claude's conversation history becomes
@@ -538,6 +671,27 @@ pub enum Commands {
     #[command()]
     FireClean,
 
+    /// Reboot Claude pane(s) - close and reopen with same session
+    ///
+    /// Useful for applying new kitty forks, Claude Code updates, recovering from
+    /// frozen conversations, or pre-testing wset configurations. Preserves:
+    /// - Session ID (conversation continues)
+    /// - Working directory
+    /// - Workspace position
+    /// - Window geometry
+    ///
+    /// Target can be a window ID, "*" for all, or "." for current window.
+    ///
+    /// Examples:
+    ///   babel reboot 42       # Reboot window 42
+    ///   babel reboot .        # Reboot current window
+    ///   babel reboot '*'      # Reboot ALL Claude panes
+    #[command()]
+    Reboot {
+        /// Target: window ID, "*" for all, or "." for current
+        target: Target,
+    },
+
     // ─── Namespace Commands (normal = has subcommands or system) ────────────────
 
     /// Debug fingerprint linkage between terminals, sessions, and directories
@@ -589,6 +743,13 @@ pub enum Commands {
         /// Enable verbose trace logging
         #[arg(long)]
         trace: bool,
+
+        /// Disable scrollparse activity detection (hook-only mode)
+        ///
+        /// When enabled, activity state comes solely from Claude Code hooks,
+        /// not from scrollback analysis. Useful for verifying hooks work in isolation.
+        #[arg(long)]
+        no_scrollparse: bool,
     },
 
     /// Launch interactive TUI debug console

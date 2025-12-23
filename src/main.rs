@@ -79,11 +79,11 @@ async fn main() -> Result<()> {
     // Route to appropriate handler based on subcommand
     match cli.command {
         // ─── Daemon Management ───────────────────────────────────────────────────
-        Commands::Daemon { trace } => {
+        Commands::Daemon { trace, no_scrollparse } => {
             if trace {
-                claude_babel::daemon::run_daemon_traced().await
+                claude_babel::daemon::run_daemon_traced(no_scrollparse).await
             } else {
-                claude_babel::daemon::run_daemon().await
+                claude_babel::daemon::run_daemon(no_scrollparse).await
             }
         }
 
@@ -118,6 +118,26 @@ async fn main() -> Result<()> {
 
         Commands::Target => {
             cli::action::cmd_target(cli.json).await
+        }
+
+        Commands::Plan { target } => {
+            cli::query::cmd_plan(&core, &target, cli.json).await
+        }
+
+        Commands::Resume { all } => {
+            cli::resume::cmd_resume(&core, all, cli.json).await
+        }
+
+        Commands::Continue => {
+            cli::resume::cmd_continue(&core).await
+        }
+
+        Commands::Tail { target, lines } => {
+            cli::fork::cmd_tail(&core, &target, lines, cli.json).await
+        }
+
+        Commands::Fork { target, lines } => {
+            cli::fork::cmd_fork(&core, &target, lines).await
         }
 
         // ─── Action Commands (state-changing) ────────────────────────────────────
@@ -157,6 +177,10 @@ async fn main() -> Result<()> {
             cli::action::cmd_set_title(&core, &target, title.as_deref()).await
         }
 
+        Commands::Solo { target, off } => {
+            cli::action::cmd_solo(&core, target.as_ref(), off).await
+        }
+
         // ─── Fire-and-Forget Sessions ────────────────────────────────────────────
         Commands::Fire { prompt, workdir, ambient } => {
             cli::action::cmd_fire(&mut core, &prompt, workdir.as_deref(), ambient).await
@@ -168,6 +192,10 @@ async fn main() -> Result<()> {
 
         Commands::FireClean => {
             cli::action::cmd_fire_clean()
+        }
+
+        Commands::Reboot { target } => {
+            cli::action::cmd_reboot(&mut core, &target).await
         }
 
         // ─── Migration & Diagnostics ─────────────────────────────────────────────
