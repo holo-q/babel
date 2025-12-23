@@ -10,7 +10,6 @@
 //! - Debugging by observing what another Claude did
 //! - Meta-analysis of patterns and decisions
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -226,11 +225,14 @@ What's the situation?"#;
 /// - The transcript from the source session
 /// - The reflection prompt for 2nd degree mode
 /// - Clear annotation of babel commands for further exploration
+///
+/// Location can be: "hsplit", "vsplit", "tab", or "os-window"
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_fork(
     core: &BabelCore,
     target: &str,
     lines: usize,
+    location: &str,
 ) -> Result<()> {
     let session_id = resolve_fork_target(core, target).await?;
     let transcript_path = find_session_transcript(&session_id)?
@@ -276,20 +278,61 @@ pub async fn cmd_fork(
         "Forking session"
     );
 
-    // Print info before exec (won't return on success)
+    let location_label = match location {
+        "hsplit" => "horizontal split",
+        "vsplit" => "vertical split",
+        "tab" => "new tab",
+        _ => "new window",
+    };
+
     eprintln!("🔀 Forking from session {}", &session_id[..8.min(session_id.len())]);
     eprintln!("   Working directory: {}", cwd.display());
     eprintln!("   Context: {} messages", tail_messages.len());
+    eprintln!("   Location: {}", location_label);
 
-    // Launch Claude with the fork prompt, replacing current process
-    let err = std::process::Command::new("claude")
-        .arg("-p")
-        .arg(&full_prompt)
-        .current_dir(&cwd)
-        .exec();
+    // Use kitty @ launch for full control over location
+    // SHELL=bash because Claude Code doesn't support zsh
+    use std::process::{Command, Stdio};
 
-    // If we get here, exec failed
-    Err(anyhow!("Failed to exec claude: {}", err))
+    let mut cmd = Command::new("kitty");
+    cmd.args(["@", "launch"]);
+
+    // --type for window/tab, --location for splits
+    match location {
+        "hsplit" | "vsplit" => {
+            cmd.args(["--location", location]);
+        }
+        "tab" => {
+            cmd.args(["--type", "tab"]);
+        }
+        _ => {
+            cmd.args(["--type", "os-window"]);
+        }
+    }
+
+    cmd.args(["--cwd", &cwd.to_string_lossy()])
+        .args(["--env", "SHELL=/usr/bin/bash"])
+        .arg("claude")
+        .args(["-p", &full_prompt])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Target main socket if available
+    if let Some(socket) = claude_babel::kitty::main_socket() {
+        cmd.args(["--to", &socket]);
+        tracing::debug!(socket, location, "Spawning fork via kitty @");
+    }
+
+    let output = cmd.output().context("Failed to run kitty @ launch")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("kitty @ launch failed: {}", stderr));
+    }
+
+    eprintln!("   ✓ Spawned");
+
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

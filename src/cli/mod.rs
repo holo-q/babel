@@ -429,6 +429,8 @@ pub enum Commands {
     ///   babel fork 42             # Fork from window 42
     ///   babel fork abc123         # Fork from session abc123
     ///   babel fork . -n 50        # Fork with more context
+    ///   babel fork --hsplit       # Fork in horizontal split
+    ///   babel fork --vsplit       # Fork in vertical split
     #[command(visible_alias = "f")]
     Fork {
         /// Target: ".", window ID, or session ID
@@ -438,6 +440,18 @@ pub enum Commands {
         /// Number of messages to include in context
         #[arg(short = 'n', long, default_value = "30")]
         lines: usize,
+
+        /// Launch as horizontal split in current window
+        #[arg(long, conflicts_with_all = ["vsplit", "tab"])]
+        hsplit: bool,
+
+        /// Launch as vertical split in current window
+        #[arg(long, conflicts_with_all = ["hsplit", "tab"])]
+        vsplit: bool,
+
+        /// Launch in new tab
+        #[arg(long, conflicts_with_all = ["hsplit", "vsplit"])]
+        tab: bool,
     },
 
     // ─── Actions (underline = mutation, changes state) ───────────────────────────

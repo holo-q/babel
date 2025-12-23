@@ -136,8 +136,9 @@ async fn main() -> Result<()> {
             cli::fork::cmd_tail(&core, &target, lines, cli.json).await
         }
 
-        Commands::Fork { target, lines } => {
-            cli::fork::cmd_fork(&core, &target, lines).await
+        Commands::Fork { target, lines, hsplit, vsplit, tab } => {
+            let location = if hsplit { "hsplit" } else if vsplit { "vsplit" } else if tab { "tab" } else { "os-window" };
+            cli::fork::cmd_fork(&core, &target, lines, location).await
         }
 
         // ─── Action Commands (state-changing) ────────────────────────────────────
