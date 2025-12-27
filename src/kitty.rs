@@ -36,6 +36,55 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context, bail};
 use tracing::instrument;
+use tokio::time::timeout;
+
+// VTR semantic tracing - boundary markers for kitty IPC crossings
+// - boundary!: External domain crossings (IPC, subprocess calls)
+// - effect!: State-changing operations (mutations, side effects)
+// - trace_error!: Error conditions with semantic context
+use vtr::{boundary, effect, trace_error};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Async Subprocess Helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Problem: kitten @ subprocess calls can block forever if kitty is unresponsive.
+// Solution: Wrap all async subprocess calls with timeouts.
+//
+// Default timeouts:
+// - 5s for quick operations (ls, focus, send-text, set-colors)
+// - 10s for data-heavy operations (get-text scrollback)
+
+const KITTEN_TIMEOUT_SHORT: Duration = Duration::from_secs(5);
+const KITTEN_TIMEOUT_LONG: Duration = Duration::from_secs(10);
+
+/// Run a kitten @ command with timeout protection
+///
+/// This is the foundation for all kitty remote control operations.
+/// If kitty becomes unresponsive (socket exists but process hung), we don't
+/// want babel to block forever waiting for a response.
+async fn run_kitten_with_timeout(
+    socket: &str,
+    args: &[&str],
+    duration: Duration,
+) -> Result<std::process::Output> {
+    // VTR boundary: crossing into kitty's domain via IPC
+    let op = args.first().unwrap_or(&"unknown");
+    boundary!("kitty", op, socket = socket);
+
+    let output = timeout(duration, async {
+        tokio::process::Command::new("kitten")
+            .args(["@", "--to", socket])
+            .args(args)
+            .output()
+            .await
+            .context("kitten subprocess failed")
+    })
+    .await
+    .context("kitten subprocess timed out")??;
+
+    Ok(output)
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Socket Discovery
@@ -432,38 +481,38 @@ impl KittyPane {
     }
 
     /// Focus this pane - bring the vessel into awareness
-    pub fn focus(&self) -> Result<()> {
-        focus_pane_on_socket(&self.socket, self.id)
+    pub async fn focus(&self) -> Result<()> {
+        focus_pane_on_socket(&self.socket, self.id).await
     }
 
     /// Send text to this pane's input - speak into the vessel
-    pub fn send_text(&self, text: &str) -> Result<()> {
-        send_text_on_socket(&self.socket, self.id, text)
+    pub async fn send_text(&self, text: &str) -> Result<()> {
+        send_text_on_socket(&self.socket, self.id, text).await
     }
 
     /// Set a user variable on this pane
-    pub fn set_user_var(&self, key: &str, value: &str) -> Result<()> {
-        set_user_var_on_socket(&self.socket, self.id, key, value)
+    pub async fn set_user_var(&self, key: &str, value: &str) -> Result<()> {
+        set_user_var_on_socket(&self.socket, self.id, key, value).await
     }
 
     /// Set the title of this pane
-    pub fn set_title(&self, title: &str) -> Result<()> {
-        set_title_on_socket(&self.socket, self.id, title)
+    pub async fn set_title(&self, title: &str) -> Result<()> {
+        set_title_on_socket(&self.socket, self.id, title).await
     }
 
     /// Get the full scrollback buffer - read the vessel's memory
-    pub fn scrollback(&self) -> Result<String> {
-        get_scrollback_on_socket(&self.socket, self.id)
+    pub async fn scrollback(&self) -> Result<String> {
+        get_scrollback_on_socket(&self.socket, self.id).await
     }
 
     /// Get the last N lines of scrollback - glimpse recent vessel activity
-    pub fn recent_scrollback(&self, lines: usize) -> Result<String> {
-        get_recent_scrollback_on_socket(&self.socket, self.id, lines)
+    pub async fn recent_scrollback(&self, lines: usize) -> Result<String> {
+        get_recent_scrollback_on_socket(&self.socket, self.id, lines).await
     }
 
     /// Close this pane - dismiss the vessel
-    pub fn close(&self) -> Result<()> {
-        close_pane_on_socket(&self.socket, self.id)
+    pub async fn close(&self) -> Result<()> {
+        close_pane_on_socket(&self.socket, self.id).await
     }
 
     /// Get workspace number for this pane's platform window
@@ -524,6 +573,8 @@ const FOCUS_SETTLE_MS: u64 = 100;
 
 /// Get an xfconf property value
 fn xfconf_get(property: &str) -> Option<String> {
+    boundary!("xfconf", "get", property = property);
+
     let output = Command::new("xfconf-query")
         .args(["-c", XFWM4_CHANNEL, "-p", property])
         .output()
@@ -538,6 +589,8 @@ fn xfconf_get(property: &str) -> Option<String> {
 
 /// Set an xfconf property value
 fn xfconf_set(property: &str, value: &str) -> Result<()> {
+    boundary!("xfconf", "set", property = property, value = value);
+
     let output = Command::new("xfconf-query")
         .args(["-c", XFWM4_CHANNEL, "-p", property, "-s", value])
         .output()
@@ -548,6 +601,7 @@ fn xfconf_set(property: &str, value: &str) -> Result<()> {
         bail!("xfconf-query set failed: {}", stderr);
     }
 
+    effect!("xfconf", "property changed", property = property);
     Ok(())
 }
 
@@ -585,17 +639,17 @@ fn disable_focus_prevention() -> Option<FocusStealingState> {
 
     // Only proceed if we successfully saved state (xfconf available)
     if state.prevent.is_none() && state.action.is_none() {
-        tracing::debug!("xfconf not available, skipping focus prevention bypass");
+        effect!("xfconf", "unavailable");
         return None;
     }
 
     // Disable prevention and set action to "bring"
     if let Err(e) = xfconf_set(PREVENT_STEALING_PROP, "false") {
-        tracing::debug!("Failed to disable focus prevention: {}", e);
+        trace_error!("focus prevention disable failed", error = %e);
         return None;
     }
     if let Err(e) = xfconf_set(ACTIVATE_ACTION_PROP, "bring") {
-        tracing::debug!("Failed to set activate action: {}", e);
+        trace_error!("activate action set failed", error = %e);
     }
 
     Some(state)
@@ -605,11 +659,9 @@ fn disable_focus_prevention() -> Option<FocusStealingState> {
 // Internal: Socket-targeted primitives
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
-    let output = Command::new("kitten")
-        .args(["@", "--to", socket, "ls"])
-        .output()
-        .context("Failed to execute 'kitten @ ls'")?;
+async fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
+    tracing::debug!(socket = socket, "-> list_panes_on_socket");
+    let output = run_kitten_with_timeout(socket, &["ls"], KITTEN_TIMEOUT_SHORT).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -651,22 +703,43 @@ fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
         }
     }
 
+    effect!("kitty", "panes listed", count = panes.len());
     Ok(panes)
 }
 
-pub(crate) fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
+/// Get raw JSON from kitten @ ls (for layout capture)
+///
+/// Returns the unparsed JSON string containing full layout_state info
+/// that isn't captured by our KittyPane struct. Used by layout.rs for
+/// capturing split tree structure.
+pub async fn list_panes_raw_on_socket(socket: &str) -> Result<String> {
+    tracing::debug!(socket = socket, "-> list_panes_raw_on_socket");
+    let output = run_kitten_with_timeout(socket, &["ls"], KITTEN_TIMEOUT_SHORT).await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ ls failed: {}", stderr);
+    }
+
+    String::from_utf8(output.stdout)
+        .context("kitten @ ls output is not valid UTF-8")
+}
+
+pub(crate) async fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     // Temporarily disable XFWM4 focus stealing prevention
     // Reaching into a vessel requires bypassing WM gatekeeping
     let saved_state = disable_focus_prevention();
 
-    let output = Command::new("kitten")
-        .args(["@", "--to", socket, "focus-window", "--match", &format!("id:{}", id)])
-        .output()
-        .context("Failed to execute 'kitten @ focus-window'")?;
+    let match_arg = format!("id:{}", id);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["focus-window", "--match", &match_arg],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     // Wait for WM to process the focus request before restoring prevention
     if saved_state.is_some() {
-        std::thread::sleep(Duration::from_millis(FOCUS_SETTLE_MS));
+        tokio::time::sleep(Duration::from_millis(FOCUS_SETTLE_MS)).await;
     }
 
     // Restore original focus prevention state
@@ -679,68 +752,70 @@ pub(crate) fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
         bail!("kitten @ focus-window failed: {}", stderr);
     }
 
+    effect!("pane", "focused", id = id);
     Ok(())
 }
 
-pub(crate) fn send_text_on_socket(socket: &str, id: u64, text: &str) -> Result<()> {
-    let output = Command::new("kitten")
-        .args([
-            "@", "--to", socket, "send-text",
-            "--match", &format!("id:{}", id),
-            text,
-        ])
-        .output()
-        .context("Failed to execute 'kitten @ send-text'")?;
+pub(crate) async fn send_text_on_socket(socket: &str, id: u64, text: &str) -> Result<()> {
+    let match_arg = format!("id:{}", id);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["send-text", "--match", &match_arg, text],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("kitten @ send-text failed: {}", stderr);
     }
 
+    effect!("pane", "text sent", id = id, len = text.len());
     Ok(())
 }
 
-pub(crate) fn set_user_var_on_socket(socket: &str, id: u64, key: &str, value: &str) -> Result<()> {
-    let output = Command::new("kitten")
-        .args([
-            "@", "--to", socket, "set-user-vars",
-            "--match", &format!("id:{}", id),
-            &format!("{}={}", key, value),
-        ])
-        .output()
-        .context("Failed to execute 'kitten @ set-user-vars'")?;
+pub(crate) async fn set_user_var_on_socket(socket: &str, id: u64, key: &str, value: &str) -> Result<()> {
+    let match_arg = format!("id:{}", id);
+    let var_arg = format!("{}={}", key, value);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["set-user-vars", "--match", &match_arg, &var_arg],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("kitten @ set-user-vars failed: {}", stderr);
     }
 
+    effect!("pane", "user var set", id = id, key = key);
     Ok(())
 }
 
-pub(crate) fn set_title_on_socket(socket: &str, id: u64, title: &str) -> Result<()> {
-    let output = Command::new("kitten")
-        .args([
-            "@", "--to", socket, "set-window-title",
-            "--match", &format!("id:{}", id),
-            title,
-        ])
-        .output()
-        .context("Failed to execute 'kitten @ set-window-title'")?;
+pub(crate) async fn set_title_on_socket(socket: &str, id: u64, title: &str) -> Result<()> {
+    let match_arg = format!("id:{}", id);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["set-window-title", "--match", &match_arg, title],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("kitten @ set-window-title failed: {}", stderr);
     }
 
+    effect!("pane", "title set", id = id, title = title);
     Ok(())
 }
 
-pub(crate) fn get_scrollback_on_socket(socket: &str, id: u64) -> Result<String> {
-    let output = Command::new("kitten")
-        .args(["@", "--to", socket, "get-text", "--match", &format!("id:{}", id), "--extent=all"])
-        .output()
-        .context("Failed to execute 'kitten @ get-text'")?;
+pub(crate) async fn get_scrollback_on_socket(socket: &str, id: u64) -> Result<String> {
+    let match_arg = format!("id:{}", id);
+    // Longer timeout for scrollback - can be large data transfer
+    let output = run_kitten_with_timeout(
+        socket,
+        &["get-text", "--match", &match_arg, "--extent=all"],
+        KITTEN_TIMEOUT_LONG,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -750,15 +825,13 @@ pub(crate) fn get_scrollback_on_socket(socket: &str, id: u64) -> Result<String> 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-pub(crate) fn get_recent_scrollback_on_socket(socket: &str, id: u64, lines: usize) -> Result<String> {
-    let output = Command::new("kitten")
-        .args([
-            "@", "--to", socket, "get-text",
-            "--match", &format!("id:{}", id),
-            "--extent", "screen",
-        ])
-        .output()
-        .context("Failed to execute 'kitten @ get-text'")?;
+pub(crate) async fn get_recent_scrollback_on_socket(socket: &str, id: u64, lines: usize) -> Result<String> {
+    let match_arg = format!("id:{}", id);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["get-text", "--match", &match_arg, "--extent", "screen"],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -780,11 +853,13 @@ pub(crate) fn get_recent_scrollback_on_socket(socket: &str, id: u64, lines: usiz
     Ok(result.join("\n"))
 }
 
-pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
-    let output = Command::new("kitten")
-        .args(["@", "--to", socket, "close-window", "--match", &format!("id:{}", id)])
-        .output()
-        .context("Failed to execute 'kitten @ close-window'")?;
+pub async fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
+    let match_arg = format!("id:{}", id);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["close-window", "--match", &match_arg],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -794,6 +869,7 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
         }
     }
 
+    effect!("pane", "closed", id = id);
     Ok(())
 }
 
@@ -801,27 +877,27 @@ pub(crate) fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 ///
 /// The border is the visual echo of attention: bright when the worker calls,
 /// dim when their voice has been heard.
-pub fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
-    let output = Command::new("kitten")
-        .args([
-            "@", "--to", socket, "set-colors",
-            "--match", &format!("id:{}", id),
-            &format!("active_border_color={}", active_color),
-            &format!("inactive_border_color={}", inactive_color),
-        ])
-        .output()
-        .context("Failed to execute 'kitten @ set-colors'")?;
+pub async fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
+    let match_arg = format!("id:{}", id);
+    let active_arg = format!("active_border_color={}", active_color);
+    let inactive_arg = format!("inactive_border_color={}", inactive_color);
+    let output = run_kitten_with_timeout(
+        socket,
+        &["set-colors", "--match", &match_arg, &active_arg, &inactive_arg],
+        KITTEN_TIMEOUT_SHORT,
+    ).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("kitten @ set-colors failed: {}", stderr);
     }
 
+    effect!("pane", "border color set", id = id, active = active_color);
     Ok(())
 }
 
 /// Reset border colors to theme defaults for a specific pane
-pub fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
+pub async fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
     // Read the active border color from the palette theme
     // Fallback to a sensible default if file isn't readable
     let palette_path = dirs::config_dir()
@@ -844,7 +920,7 @@ pub fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
         ("#9ccfd8".to_string(), "#494748".to_string())
     };
 
-    set_border_color_on_socket(socket, id, &active, &inactive)
+    set_border_color_on_socket(socket, id, &active, &inactive).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -855,8 +931,8 @@ pub fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
 ///
 /// Enumerate vessels in the current tower.
 #[instrument(level = "debug")]
-pub fn list_panes() -> Result<Vec<KittyPane>> {
-    list_panes_on_socket(&default_socket())
+pub async fn list_panes() -> Result<Vec<KittyPane>> {
+    list_panes_on_socket(&default_socket()).await
 }
 
 /// List panes from ALL kitty instances
@@ -864,15 +940,16 @@ pub fn list_panes() -> Result<Vec<KittyPane>> {
 /// Enumerate vessels across all towers. Queries every socket in XDG_RUNTIME_DIR.
 /// Unresponsive towers are skipped.
 #[instrument(level = "debug")]
-pub fn list_all_panes() -> Result<Vec<KittyPane>> {
+pub async fn list_all_panes() -> Result<Vec<KittyPane>> {
+    tracing::debug!("-> list_all_panes");
     let sockets = find_all_sockets();
     let mut all_panes = Vec::new();
 
     for socket in &sockets {
-        match list_panes_on_socket(socket) {
+        match list_panes_on_socket(socket).await {
             Ok(panes) => all_panes.extend(panes),
             Err(e) => {
-                tracing::debug!(socket = %socket, error = %e, "Failed to query kitty instance");
+                trace_error!("kitty query failed", socket = %socket, error = %e);
             }
         }
     }
@@ -881,13 +958,13 @@ pub fn list_all_panes() -> Result<Vec<KittyPane>> {
 }
 
 /// List panes from a specific socket
-pub fn list_panes_from_socket(socket: &str) -> Result<Vec<KittyPane>> {
-    list_panes_on_socket(socket)
+pub async fn list_panes_from_socket(socket: &str) -> Result<Vec<KittyPane>> {
+    list_panes_on_socket(socket).await
 }
 
 /// Get a specific pane by ID from the default instance
-pub fn get_pane(id: u64) -> Result<Option<KittyPane>> {
-    let panes = list_panes()?;
+pub async fn get_pane(id: u64) -> Result<Option<KittyPane>> {
+    let panes = list_panes().await?;
     Ok(panes.into_iter().find(|p| p.id == id))
 }
 
@@ -895,14 +972,14 @@ pub fn get_pane(id: u64) -> Result<Option<KittyPane>> {
 ///
 /// Note: IDs are only unique within an instance. If multiple instances have
 /// the same ID, returns the first match (current instance preferred).
-pub fn get_pane_all(id: u64) -> Result<Option<KittyPane>> {
+pub async fn get_pane_all(id: u64) -> Result<Option<KittyPane>> {
     // Check default instance first
-    if let Some(pane) = get_pane(id)? {
+    if let Some(pane) = get_pane(id).await? {
         return Ok(Some(pane));
     }
 
     // Search other instances
-    let panes = list_all_panes()?;
+    let panes = list_all_panes().await?;
     Ok(panes.into_iter().find(|p| p.id == id))
 }
 
@@ -913,8 +990,8 @@ pub fn get_pane_all(id: u64) -> Result<Option<KittyPane>> {
 /// multiple vessels (splits) across multiple tabs.
 ///
 /// Returns empty Vec if the platform_window_id doesn't match any tower.
-pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane>> {
-    let panes = list_all_panes()?;
+pub async fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane>> {
+    let panes = list_all_panes().await?;
     Ok(panes.into_iter().filter(|p| p.platform_window_id == platform_window_id).collect())
 }
 
@@ -927,7 +1004,8 @@ pub fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<KittyPane
 /// Survey all towers standing in the realm. Returns information about each
 /// instance including whether it's responsive.
 #[instrument(level = "debug")]
-pub fn discover_all_instances() -> Vec<KittyInstance> {
+pub async fn discover_all_instances() -> Vec<KittyInstance> {
+    tracing::debug!("-> discover_all_instances");
     let current_socket = default_socket();
     let all_sockets = find_all_sockets();
 
@@ -937,7 +1015,7 @@ pub fn discover_all_instances() -> Vec<KittyInstance> {
         let pid = socket_pid(&socket);
         let is_current = socket == current_socket;
 
-        match list_panes_on_socket(&socket) {
+        match list_panes_on_socket(&socket).await {
             Ok(panes) => {
                 instances.push(KittyInstance {
                     socket,
@@ -967,6 +1045,8 @@ pub fn discover_all_instances() -> Vec<KittyInstance> {
             .then(a.pid.cmp(&b.pid))
     });
 
+    let responsive = instances.iter().filter(|i| i.is_responsive).count();
+    effect!("kitty", "instances discovered", total = instances.len(), responsive = responsive);
     instances
 }
 
@@ -978,57 +1058,57 @@ pub fn discover_all_instances() -> Vec<KittyInstance> {
 ///
 /// Bring a vessel into awareness.
 #[instrument(level = "debug")]
-pub fn focus_window(id: u64) -> Result<()> {
-    focus_pane_on_socket(&default_socket(), id)
+pub async fn focus_window(id: u64) -> Result<()> {
+    focus_pane_on_socket(&default_socket(), id).await
 }
 
 /// Send text to a pane by ID (default instance)
 ///
 /// Speak into a vessel.
 #[instrument(level = "debug", skip(text))]
-pub fn send_text(id: u64, text: &str) -> Result<()> {
-    send_text_on_socket(&default_socket(), id, text)
+pub async fn send_text(id: u64, text: &str) -> Result<()> {
+    send_text_on_socket(&default_socket(), id, text).await
 }
 
 /// Set a user variable on a pane by ID (default instance)
-pub fn set_user_var(id: u64, key: &str, value: &str) -> Result<()> {
-    set_user_var_on_socket(&default_socket(), id, key, value)
+pub async fn set_user_var(id: u64, key: &str, value: &str) -> Result<()> {
+    set_user_var_on_socket(&default_socket(), id, key, value).await
 }
 
 /// Set title on a pane by ID (default instance)
-pub fn set_window_title(id: u64, title: &str) -> Result<()> {
-    set_title_on_socket(&default_socket(), id, title)
+pub async fn set_window_title(id: u64, title: &str) -> Result<()> {
+    set_title_on_socket(&default_socket(), id, title).await
 }
 
 /// Get full scrollback from a pane by ID (default instance)
 #[instrument(level = "debug")]
-pub fn get_scrollback(id: u64) -> Result<String> {
-    get_scrollback_on_socket(&default_socket(), id)
+pub async fn get_scrollback(id: u64) -> Result<String> {
+    get_scrollback_on_socket(&default_socket(), id).await
 }
 
 /// Get recent scrollback from a pane by ID (default instance)
-pub fn get_recent_scrollback(id: u64, lines: usize) -> Result<String> {
-    get_recent_scrollback_on_socket(&default_socket(), id, lines)
+pub async fn get_recent_scrollback(id: u64, lines: usize) -> Result<String> {
+    get_recent_scrollback_on_socket(&default_socket(), id, lines).await
 }
 
 /// Close a pane by ID (default instance)
-pub fn close_window(id: u64) -> Result<()> {
-    close_pane_on_socket(&default_socket(), id)
+pub async fn close_window(id: u64) -> Result<()> {
+    close_pane_on_socket(&default_socket(), id).await
 }
 
 /// Get the cwd of the focused pane (default instance)
-pub fn get_focused_cwd() -> Result<Option<PathBuf>> {
-    let panes = list_panes()?;
+pub async fn get_focused_cwd() -> Result<Option<PathBuf>> {
+    let panes = list_panes().await?;
     Ok(panes.into_iter().find(|p| p.is_focused).map(|p| p.cwd))
 }
 
 // Legacy aliases
 #[doc(hidden)]
-pub fn list_windows() -> Result<Vec<KittyPane>> { list_panes() }
+pub async fn list_windows() -> Result<Vec<KittyPane>> { list_panes().await }
 #[doc(hidden)]
-pub fn get_window(id: u64) -> Result<Option<KittyPane>> { get_pane(id) }
+pub async fn get_window(id: u64) -> Result<Option<KittyPane>> { get_pane(id).await }
 #[doc(hidden)]
-pub fn list_windows_from_socket(socket: &str) -> Result<Vec<KittyPane>> { list_panes_from_socket(socket) }
+pub async fn list_windows_from_socket(socket: &str) -> Result<Vec<KittyPane>> { list_panes_from_socket(socket).await }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public API: Multi-Socket Operations (search all sockets)
@@ -1063,13 +1143,13 @@ impl<T> MultiSocketResult<T> {
 /// Seek the vessel across all towers and bring it into awareness.
 /// Returns the pane address and whether it was found in a distant tower.
 #[instrument(level = "debug")]
-pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
+pub async fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            pane.focus()?;
+            pane.focus().await?;
             Ok(MultiSocketResult { result: (), addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1078,13 +1158,13 @@ pub fn focus_window_any(id: u64) -> Result<MultiSocketResult<()>> {
 
 /// Send text to a pane by ID, searching all sockets
 #[instrument(level = "debug", skip(text))]
-pub fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
+pub async fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            pane.send_text(text)?;
+            pane.send_text(text).await?;
             Ok(MultiSocketResult { result: (), addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1093,13 +1173,13 @@ pub fn send_text_any(id: u64, text: &str) -> Result<MultiSocketResult<()>> {
 
 /// Get scrollback from a pane by ID, searching all sockets
 #[instrument(level = "debug")]
-pub fn get_scrollback_any(id: u64) -> Result<MultiSocketResult<String>> {
+pub async fn get_scrollback_any(id: u64) -> Result<MultiSocketResult<String>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            let text = pane.scrollback()?;
+            let text = pane.scrollback().await?;
             Ok(MultiSocketResult { result: text, addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1107,13 +1187,13 @@ pub fn get_scrollback_any(id: u64) -> Result<MultiSocketResult<String>> {
 }
 
 /// Set title on a pane by ID, searching all sockets
-pub fn set_title_any(id: u64, title: &str) -> Result<MultiSocketResult<()>> {
+pub async fn set_title_any(id: u64, title: &str) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            pane.set_title(title)?;
+            pane.set_title(title).await?;
             Ok(MultiSocketResult { result: (), addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1121,13 +1201,13 @@ pub fn set_title_any(id: u64, title: &str) -> Result<MultiSocketResult<()>> {
 }
 
 /// Set user var on a pane by ID, searching all sockets
-pub fn set_user_var_any(id: u64, key: &str, value: &str) -> Result<MultiSocketResult<()>> {
+pub async fn set_user_var_any(id: u64, key: &str, value: &str) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            pane.set_user_var(key, value)?;
+            pane.set_user_var(key, value).await?;
             Ok(MultiSocketResult { result: (), addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1135,13 +1215,13 @@ pub fn set_user_var_any(id: u64, key: &str, value: &str) -> Result<MultiSocketRe
 }
 
 /// Close a pane by ID, searching all sockets
-pub fn close_window_any(id: u64) -> Result<MultiSocketResult<()>> {
+pub async fn close_window_any(id: u64) -> Result<MultiSocketResult<()>> {
     let current = default_socket();
-    match get_pane_all(id)? {
+    match get_pane_all(id).await? {
         Some(pane) => {
             let addr = pane.addr();
             let is_non_current = pane.socket != current;
-            pane.close()?;
+            pane.close().await?;
             Ok(MultiSocketResult { result: (), addr, is_non_current })
         }
         None => bail!("Window {} not found in any kitty instance", id),
@@ -1154,6 +1234,8 @@ pub fn close_window_any(id: u64) -> Result<MultiSocketResult<()>> {
 
 /// Get workspace number for a platform window ID
 pub fn get_workspace(platform_window_id: u64) -> Option<i32> {
+    boundary!("wmctrl", "list");
+
     let output = Command::new("wmctrl")
         .args(["-l"])
         .output()
@@ -1178,6 +1260,8 @@ pub fn get_workspace(platform_window_id: u64) -> Option<i32> {
 
 /// Get all workspace mappings in one call
 pub fn get_all_workspaces() -> HashMap<u64, i32> {
+    boundary!("wmctrl", "list-all");
+
     let mut result = HashMap::new();
 
     let output = match Command::new("wmctrl").args(["-l"]).output() {
@@ -1203,6 +1287,8 @@ pub fn get_all_workspaces() -> HashMap<u64, i32> {
 
 /// Move a window to a specific workspace
 pub fn move_window_to_workspace(platform_window_id: u64, workspace: i32) -> Result<()> {
+    boundary!("wmctrl", "move-to-workspace", window = platform_window_id, workspace = workspace);
+
     let hex_id = format!("0x{:08x}", platform_window_id);
 
     let output = Command::new("wmctrl")
@@ -1215,6 +1301,7 @@ pub fn move_window_to_workspace(platform_window_id: u64, workspace: i32) -> Resu
         bail!("wmctrl move failed: {}", stderr);
     }
 
+    effect!("wm", "window moved to workspace", window = platform_window_id, workspace = workspace);
     Ok(())
 }
 
@@ -1229,6 +1316,8 @@ use crate::wset::PaneGeometry;
 /// Returns (x, y, width, height) for precise multi-monitor restoration.
 /// Uses xdotool which handles frame/decoration offsets consistently.
 pub fn get_window_geometry(platform_window_id: u64) -> Result<PaneGeometry> {
+    boundary!("xdotool", "getwindowgeometry", window = platform_window_id);
+
     let hex_id = format!("0x{:x}", platform_window_id);
 
     // Get geometry with xdotool
@@ -1285,6 +1374,8 @@ pub fn get_window_geometry(platform_window_id: u64) -> Result<PaneGeometry> {
 /// Moves and resizes window to exact position. The gravity parameter (first value)
 /// is 0 to use default positioning.
 pub fn set_window_geometry(platform_window_id: u64, geom: &PaneGeometry) -> Result<()> {
+    boundary!("wmctrl", "set-geometry", window = platform_window_id);
+
     let hex_id = format!("0x{:08x}", platform_window_id);
 
     // wmctrl -i -r <id> -e <gravity>,<x>,<y>,<width>,<height>
@@ -1301,13 +1392,7 @@ pub fn set_window_geometry(platform_window_id: u64, geom: &PaneGeometry) -> Resu
         bail!("wmctrl geometry set failed: {}", stderr);
     }
 
-    tracing::debug!(
-        window = hex_id,
-        x = geom.x, y = geom.y,
-        w = geom.width, h = geom.height,
-        "Set window geometry"
-    );
-
+    effect!("wm", "window geometry set", window = platform_window_id, x = geom.x, y = geom.y);
     Ok(())
 }
 
@@ -1316,6 +1401,8 @@ pub fn set_window_geometry(platform_window_id: u64, geom: &PaneGeometry) -> Resu
 /// Parses xrandr output to find which monitor contains the given coordinates.
 /// Returns None if position is outside all monitors or xrandr fails.
 fn get_monitor_at_position(x: i32, y: i32) -> Option<String> {
+    boundary!("xrandr", "query");
+
     let output = Command::new("xrandr")
         .args(["--query"])
         .output()
@@ -1414,10 +1501,10 @@ struct RawForegroundProcess {
 mod tests {
     use super::*;
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_list_panes() {
-        let panes = list_panes().unwrap();
+    async fn test_list_panes() {
+        let panes = list_panes().await.unwrap();
         assert!(!panes.is_empty(), "Should find at least one pane");
 
         for pane in &panes {
@@ -1426,10 +1513,10 @@ mod tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_list_all_panes() {
-        let panes = list_all_panes().unwrap();
+    async fn test_list_all_panes() {
+        let panes = list_all_panes().await.unwrap();
         println!("Found {} panes across all instances", panes.len());
 
         for pane in &panes {
@@ -1437,10 +1524,10 @@ mod tests {
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_discover_instances() {
-        let instances = discover_all_instances();
+    async fn test_discover_instances() {
+        let instances = discover_all_instances().await;
         println!("Found {} kitty instances", instances.len());
 
         for inst in &instances {
