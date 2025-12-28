@@ -160,34 +160,38 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     let buffer_handle = vtr_layer.buffer();
     VTR_BUFFER.set(buffer_handle).expect("VTR_BUFFER already initialized");
 
-    // CompactingStderrLayer provides:
-    // - VTR-style formatting with depth markers, semantic markers, syntax highlighting
-    // - Log compaction: consecutive duplicate entries (same file:line:vtr_kind) show ×N suffix
-    // - Ideal for polling loops like kitty::get-text that fire repeatedly
-    //
-    // Output goes to stderr for visual debugging.
     let is_tty = std::io::stderr().is_terminal();
-    let stderr_layer = CompactingStderrLayer::new()
-        .with_color(is_tty || debug)
-        .with_context_field("kitty_id")  // Display pane ID column when available
-        .with_context_width(4);
 
-    // CompactingJournaldLayer provides:
-    // - Direct structured field emission to journald (VTR_KIND, VTR_DEPTH, VTR_SPAN_ID, VTR_STRUCTURAL_HASH)
-    // - Same compaction logic as stderr layer (×N suffix)
-    // - Emits Enter/Exit events from span lifecycle for view-time collapse
+    // Use exactly ONE output layer - using both creates duplicate entries in journald
+    // (stderr via systemd capture + direct journal_send).
     //
-    // spacejn uses these structured fields to reconstruct span trees and apply block-wide collapse.
-    let journald_layer = CompactingJournaldLayer::new()
-        .expect("Failed to connect to journald")
-        .with_syslog_identifier("babel".to_string());
+    // TTY/debug mode: CompactingStderrLayer for visual output with depth markers and colors
+    // Daemon mode: CompactingJournaldLayer with structured VTR fields for view-time collapse
+    if is_tty || debug {
+        let stderr_layer = CompactingStderrLayer::new()
+            .with_color(true)
+            .with_context_field("kitty_id")
+            .with_context_width(4);
 
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(stderr_layer)
-        .with(journald_layer)
-        .with(vtr_layer)
-        .init();
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(stderr_layer)
+            .with(vtr_layer)
+            .init();
+    } else {
+        // Daemon mode: structured journald fields for view-time collapse
+        // VTR_KIND, VTR_DEPTH, VTR_SPAN_ID, VTR_STRUCTURAL_HASH enable spacejn
+        // to reconstruct span trees and apply block-wide collapse.
+        let journald_layer = CompactingJournaldLayer::new()
+            .expect("Failed to connect to journald")
+            .with_syslog_identifier("babel".to_string());
+
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(journald_layer)
+            .with(vtr_layer)
+            .init();
+    }
 
     // Spawn SIGHUP handler for hot-reload (skip in debug mode - fixed level)
     if !debug {
