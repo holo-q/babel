@@ -23,6 +23,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tracing::instrument;
+use vtr::{checkpoint, boundary, effect, trace_error};
 
 use crate::utility::claude_storage::{find_session_by_summary, SessionInfo};
 use crate::fingerprint::{SessionFingerprint, MatchConfidence};
@@ -113,8 +115,9 @@ pub fn detect_claude_signals(window: &KittyPane) -> ClaudeMarkers {
 ///
 /// Convenience function that fetches scrollback and detects activity state.
 /// Returns Unknown on any error (window not found, kitten failure, etc.)
-pub fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState {
-    match get_recent_scrollback(id, 20) {
+#[instrument(level = "debug", fields(kitty_id = id))]
+pub async fn get_window_activity_state(id: u64) -> scrollparse::claude::ActivityState {
+    match get_recent_scrollback(id, 20).await {
         Ok(scrollback) => scrollparse::claude::detect_activity_state(&scrollback),
         Err(_) => scrollparse::claude::ActivityState::Unknown,
     }
@@ -140,8 +143,9 @@ pub struct ActivityResult {
 ///
 /// NOTE: This uses the default socket. For windows on other sockets, use
 /// `get_activity_with_scrollback_on_socket` instead.
-pub fn get_window_activity_with_scrollback(id: u64) -> ActivityResult {
-    match get_recent_scrollback(id, 50) {
+#[instrument(level = "debug", fields(kitty_id = id))]
+pub async fn get_window_activity_with_scrollback(id: u64) -> ActivityResult {
+    match get_recent_scrollback(id, 50).await {
         Ok(scrollback) => {
             let state = scrollparse::claude::detect_activity_state(&scrollback);
             let asking_question = scrollparse::claude::detect_asking_question(&scrollback);
@@ -161,10 +165,11 @@ pub fn get_window_activity_with_scrollback(id: u64) -> ActivityResult {
 /// Takes a PaneAddr to correctly route the query to the right socket.
 ///
 /// Returns ActivityResult with Unknown state on any error.
-pub fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> ActivityResult {
+#[instrument(level = "debug", skip(addr), fields(kitty_id = addr.id))]
+pub async fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> ActivityResult {
     use crate::kitty::get_recent_scrollback_on_socket;
 
-    match get_recent_scrollback_on_socket(&addr.socket, addr.id, 50) {
+    match get_recent_scrollback_on_socket(&addr.socket, addr.id, 50).await {
         Ok(scrollback) => {
             let state = scrollparse::claude::detect_activity_state(&scrollback);
             let asking_question = scrollparse::claude::detect_asking_question(&scrollback);
@@ -187,8 +192,8 @@ pub fn get_activity_with_scrollback_on_socket(addr: &crate::kitty::PaneAddr) -> 
 ///
 /// This catches sessions that have exited to shell prompt but still have
 /// the ✳ title, or windows that were previously identified and tagged.
-pub fn find_claude_windows() -> Result<Vec<KittyPane>> {
-    let all_windows = list_panes()?;
+pub async fn find_claude_windows() -> Result<Vec<KittyPane>> {
+    let all_windows = list_panes().await?;
 
     let claude_windows = all_windows
         .into_iter()
@@ -223,6 +228,9 @@ pub struct ClaudePane {
     pub platform_window_id: u64,
     /// Workspace number (-1 = sticky/all, 0+ = workspace index)
     pub workspace: Option<i32>,
+    /// Pane screen geometry for spatial sorting (from patched kitty)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen: Option<crate::kitty::ScreenGeometry>,
     /// Current activity state (Idle, Thinking, ToolUse, etc.)
     /// Populated from scrollback analysis when available
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,38 +268,38 @@ impl ClaudePane {
     // ─── Operations ─────────────────────────────────────────────────────────────
 
     /// Focus this window
-    pub fn focus(&self) -> Result<()> {
-        crate::kitty::focus_pane_on_socket(&self.addr.socket, self.addr.id)
+    pub async fn focus(&self) -> Result<()> {
+        crate::kitty::focus_pane_on_socket(&self.addr.socket, self.addr.id).await
     }
 
     /// Send text to this window's input
-    pub fn send_text(&self, text: &str) -> Result<()> {
-        crate::kitty::send_text_on_socket(&self.addr.socket, self.addr.id, text)
+    pub async fn send_text(&self, text: &str) -> Result<()> {
+        crate::kitty::send_text_on_socket(&self.addr.socket, self.addr.id, text).await
     }
 
     /// Set a user variable on this window
-    pub fn set_user_var(&self, key: &str, value: &str) -> Result<()> {
-        crate::kitty::set_user_var_on_socket(&self.addr.socket, self.addr.id, key, value)
+    pub async fn set_user_var(&self, key: &str, value: &str) -> Result<()> {
+        crate::kitty::set_user_var_on_socket(&self.addr.socket, self.addr.id, key, value).await
     }
 
     /// Set the title of this window
-    pub fn set_title(&self, title: &str) -> Result<()> {
-        crate::kitty::set_title_on_socket(&self.addr.socket, self.addr.id, title)
+    pub async fn set_title(&self, title: &str) -> Result<()> {
+        crate::kitty::set_title_on_socket(&self.addr.socket, self.addr.id, title).await
     }
 
     /// Get the full scrollback buffer
-    pub fn scrollback(&self) -> Result<String> {
-        crate::kitty::get_scrollback_on_socket(&self.addr.socket, self.addr.id)
+    pub async fn scrollback(&self) -> Result<String> {
+        crate::kitty::get_scrollback_on_socket(&self.addr.socket, self.addr.id).await
     }
 
     /// Get the last N lines of scrollback
-    pub fn recent_scrollback(&self, lines: usize) -> Result<String> {
-        crate::kitty::get_recent_scrollback_on_socket(&self.addr.socket, self.addr.id, lines)
+    pub async fn recent_scrollback(&self, lines: usize) -> Result<String> {
+        crate::kitty::get_recent_scrollback_on_socket(&self.addr.socket, self.addr.id, lines).await
     }
 
     /// Close this window
-    pub fn close(&self) -> Result<()> {
-        crate::kitty::close_pane_on_socket(&self.addr.socket, self.addr.id)
+    pub async fn close(&self) -> Result<()> {
+        crate::kitty::close_pane_on_socket(&self.addr.socket, self.addr.id).await
     }
 }
 
@@ -299,10 +307,10 @@ impl ClaudePane {
 ///
 /// This is O(1) kitty call + O(1) wmctrl call - no filesystem scanning.
 /// For session info, call `enrich_window` on specific windows.
-pub fn discover_claude_windows() -> Result<Vec<ClaudePane>> {
+pub async fn discover_claude_windows() -> Result<Vec<ClaudePane>> {
     use crate::kitty::get_all_workspaces;
 
-    let claude_windows = find_claude_windows().context("Failed to find claude panes")?;
+    let claude_windows = find_claude_windows().await.context("Failed to find claude panes")?;
 
     // Get workspace mappings in one call
     let workspaces = get_all_workspaces();
@@ -330,6 +338,7 @@ pub fn discover_claude_windows() -> Result<Vec<ClaudePane>> {
                 os_window_id: window.os_window_id,
                 platform_window_id: window.platform_window_id,
                 workspace,
+                screen: window.screen.clone(),
                 activity_state: None, // Populated by daemon from cached scrollback analysis
                 hook_state: None, // Populated by daemon from babel_storage
                 fingerprint: None, // Only populated in daemon with --details
@@ -422,8 +431,9 @@ fn resolve_session(
 ///
 /// Uses kitty's user_vars feature to persistently associate a session ID with a window.
 /// The tag survives as long as the window exists.
-pub fn tag_window(kitty_id: u64, session_id: &str) -> Result<()> {
-    set_user_var(kitty_id, "babel_session_id", session_id)
+#[instrument(level = "debug", fields(kitty_id = kitty_id))]
+pub async fn tag_window(kitty_id: u64, session_id: &str) -> Result<()> {
+    set_user_var(kitty_id, "babel_session_id", session_id).await
         .context("Failed to tag window with session ID")
 }
 
@@ -492,6 +502,7 @@ pub fn load_session_by_id(
 /// delay for the window to appear.
 pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Result<Option<u64>> {
     use std::process::{Command, Stdio};
+    use std::collections::HashSet;
     use tokio::time::{sleep, Duration};
 
     // Verify the session exists in ~/.claude before spawning
@@ -512,9 +523,17 @@ pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Re
     }
 
     if !session_exists {
-        tracing::warn!(session_id, "Session file not found, skipping spawn");
+        trace_error!("session file not found", session_id = session_id);
         return Ok(None);
     }
+
+    // CRITICAL: Capture existing window IDs BEFORE spawning
+    // This prevents false-positive detection of pre-existing windows
+    let existing_ids: HashSet<u64> = find_claude_windows().await?
+        .iter()
+        .map(|w| w.id)
+        .collect();
+    checkpoint!("spawn_prep", existing_count = existing_ids.len());
 
     // Get the main socket (lowest PID) - consolidates to primary kitty instance
     // This ensures wset load always restores to the "real" kitty, not orphan instances
@@ -526,7 +545,8 @@ pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Re
     // the daemon happens to be running from
     let mut cmd = Command::new("kitty-claude");
     cmd.args(["-d", &cwd.to_string_lossy()])
-        .args(["-e", "claude", "-r", session_id])
+        // -r is now a proper flag in kitty-claude (not passed through to claude)
+        .args(["-r", session_id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -534,34 +554,40 @@ pub async fn spawn_claude_session(session_id: &str, cwd: &std::path::Path) -> Re
     // Target main socket explicitly - critical for multi-instance consolidation
     if let Some(socket) = &main_socket {
         cmd.env("KITTY_LISTEN_ON", socket);
-        tracing::debug!(socket, session_id, "Spawning session on main socket");
+        boundary!("kitty", "spawn_session", socket = socket, session_id = session_id);
     }
 
     let _child = cmd.spawn()
         .context("Failed to spawn kitty-claude")?;
 
-    // Wait for window to appear
-    // This is a bit racy but necessary since kitty spawns async
-    sleep(Duration::from_millis(500)).await;
+    // Wait for window to appear with retry
+    // kitty -1 (single-instance) returns immediately, window spawns async
+    // Retry detection a few times with increasing delays
+    for attempt in 1..=5 {
+        let delay = Duration::from_millis(300 * attempt);
+        sleep(delay).await;
 
-    // Find the new window by looking for one with this session in scrollback
-    // or title, or by user_var if we tagged it
-    let windows = find_claude_windows()?;
+        let windows = find_claude_windows().await?;
 
-    // Try to find by title containing session_id or by matching cwd
-    // This is imperfect but usually works
-    for win in &windows {
-        // Check if this is a newly spawned window at the right cwd
-        if win.cwd == cwd {
-            // Tag it for future fast lookups
-            let _ = set_user_var(win.id, "babel_session_id", session_id);
-            return Ok(Some(win.id));
+        for win in &windows {
+            // Skip windows that existed before spawn
+            if existing_ids.contains(&win.id) {
+                continue;
+            }
+            // Found a new window - verify it's at the right cwd
+            if win.cwd == cwd {
+                let _ = set_user_var(win.id, "babel_session_id", session_id).await;
+                checkpoint!("window_detected", window_id = win.id, session_id = session_id);
+                return Ok(Some(win.id));
+            }
         }
+
+        tracing::debug!(attempt, "Window not detected yet, retrying...");
     }
 
-    // If we can't find it, return None but don't fail
-    // The daemon will pick it up on next refresh
-    tracing::info!(session_id, "Spawned session but couldn't find window immediately");
+    // If we can't find a NEW window after retries, return None
+    tracing::warn!(session_id, existing_count = existing_ids.len(),
+        "Spawned session but couldn't find NEW window after 5 attempts");
     Ok(None)
 }
 
@@ -574,9 +600,9 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
     let mut skipped: Vec<String> = Vec::new();
 
     // Step 1: Close all existing claude panes
-    tracing::info!(wset = %wset.meta.name, "Closing existing claude panes");
-    for win in find_claude_windows()? {
-        if let Err(e) = close_window(win.id) {
+    effect!("wset", "close_panes", wset = wset.meta.name.as_str());
+    for win in find_claude_windows().await? {
+        if let Err(e) = close_window(win.id).await {
             tracing::warn!(kitty_id = win.id, error = %e, "Failed to close window");
         }
     }
@@ -586,14 +612,14 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
 
     // Step 2: Spawn windows for each wspace
     for wspace in &wset.wspaces {
-        tracing::info!(workspace = wspace.index, windows = wspace.windows.len(), "Spawning wspace");
+        effect!("wset", "spawn_workspace", workspace = wspace.index, windows = wspace.windows.len());
 
         for window_config in &wspace.windows {
             match spawn_claude_session(&window_config.session_id, &window_config.cwd).await {
                 Ok(Some(kitty_id)) => {
                     // Move to correct workspace and restore geometry
                     // Need to get platform_window_id first
-                    if let Ok(Some(win)) = get_pane(kitty_id) {
+                    if let Ok(Some(win)) = get_pane(kitty_id).await {
                         // Step 1: Move to correct workspace
                         if let Err(e) = move_window_to_workspace(win.platform_window_id, wspace.index) {
                             tracing::warn!(
@@ -649,12 +675,7 @@ pub async fn load_wset(wset: &WSet) -> Result<Vec<String>> {
         }
     }
 
-    tracing::info!(
-        wset = %wset.meta.name,
-        spawned = wset.window_count() - skipped.len(),
-        skipped = skipped.len(),
-        "WSet load complete"
-    );
+    checkpoint!("wset_loaded", total_spawned = wset.window_count() - skipped.len(), failed = skipped.len());
 
     Ok(skipped)
 }

@@ -140,11 +140,13 @@ pub fn vtr_buffer() -> Option<Arc<Mutex<RingBuffer<TraceSnapshot>>>> {
 pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     use std::io::IsTerminal;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, reload};
-    use spaceship_std::CompactingStderrLayer;
+    use vtr::trace::CompactingStderrLayer;
 
     let debug = args.debug;
+    // Enable trace level when debug mode is on so instrumented spans with context fields
+    // (like kitty_id) are created and the context column shows actual values
     let filter_str = if debug {
-        "debug".to_string()
+        "trace".to_string()
     } else {
         spaceship_std::logging::load_level("babel", "claude_babel")
     };
@@ -165,7 +167,9 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     // Output goes to stderr, systemd captures it → journald, spacejn displays it.
     let is_tty = std::io::stderr().is_terminal();
     let stderr_layer = CompactingStderrLayer::new()
-        .with_color(is_tty || debug);
+        .with_color(is_tty || debug)
+        .with_context_field("kitty_id")  // Display pane ID column when available
+        .with_context_width(4);
 
     tracing_subscriber::registry()
         .with(filter_layer)

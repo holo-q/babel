@@ -725,6 +725,7 @@ pub async fn list_panes_raw_on_socket(socket: &str) -> Result<String> {
         .context("kitten @ ls output is not valid UTF-8")
 }
 
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub(crate) async fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     // Temporarily disable XFWM4 focus stealing prevention
     // Reaching into a vessel requires bypassing WM gatekeeping
@@ -756,6 +757,7 @@ pub(crate) async fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "debug", skip(socket, text), fields(kitty_id = id, text_len = text.len()))]
 pub(crate) async fn send_text_on_socket(socket: &str, id: u64, text: &str) -> Result<()> {
     let match_arg = format!("id:{}", id);
     let output = run_kitten_with_timeout(
@@ -773,6 +775,7 @@ pub(crate) async fn send_text_on_socket(socket: &str, id: u64, text: &str) -> Re
     Ok(())
 }
 
+#[instrument(level = "debug", skip(socket, value), fields(kitty_id = id))]
 pub(crate) async fn set_user_var_on_socket(socket: &str, id: u64, key: &str, value: &str) -> Result<()> {
     let match_arg = format!("id:{}", id);
     let var_arg = format!("{}={}", key, value);
@@ -791,6 +794,7 @@ pub(crate) async fn set_user_var_on_socket(socket: &str, id: u64, key: &str, val
     Ok(())
 }
 
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub(crate) async fn set_title_on_socket(socket: &str, id: u64, title: &str) -> Result<()> {
     let match_arg = format!("id:{}", id);
     let output = run_kitten_with_timeout(
@@ -808,6 +812,7 @@ pub(crate) async fn set_title_on_socket(socket: &str, id: u64, title: &str) -> R
     Ok(())
 }
 
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub(crate) async fn get_scrollback_on_socket(socket: &str, id: u64) -> Result<String> {
     let match_arg = format!("id:{}", id);
     // Longer timeout for scrollback - can be large data transfer
@@ -825,6 +830,7 @@ pub(crate) async fn get_scrollback_on_socket(socket: &str, id: u64) -> Result<St
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub(crate) async fn get_recent_scrollback_on_socket(socket: &str, id: u64, lines: usize) -> Result<String> {
     let match_arg = format!("id:{}", id);
     let output = run_kitten_with_timeout(
@@ -853,6 +859,7 @@ pub(crate) async fn get_recent_scrollback_on_socket(socket: &str, id: u64, lines
     Ok(result.join("\n"))
 }
 
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub async fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
     let match_arg = format!("id:{}", id);
     let output = run_kitten_with_timeout(
@@ -877,6 +884,7 @@ pub async fn close_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 ///
 /// The border is the visual echo of attention: bright when the worker calls,
 /// dim when their voice has been heard.
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub async fn set_border_color_on_socket(socket: &str, id: u64, active_color: &str, inactive_color: &str) -> Result<()> {
     let match_arg = format!("id:{}", id);
     let active_arg = format!("active_border_color={}", active_color);
@@ -897,6 +905,7 @@ pub async fn set_border_color_on_socket(socket: &str, id: u64, active_color: &st
 }
 
 /// Reset border colors to theme defaults for a specific pane
+#[instrument(level = "debug", skip(socket), fields(kitty_id = id))]
 pub async fn reset_border_color_on_socket(socket: &str, id: u64) -> Result<()> {
     // Read the active border color from the palette theme
     // Fallback to a sensible default if file isn't readable
