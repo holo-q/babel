@@ -124,11 +124,13 @@ pub fn vtr_buffer() -> Option<Arc<Mutex<RingBuffer<TraceSnapshot>>>> {
 ///
 /// This builds a custom tracing subscriber that includes:
 /// - EnvFilter from spaceship logging.toml config
-/// - VtrFormat for depth-aware stderr output with semantic markers
+/// - CompactingStderrLayer for depth-aware stderr output with log compaction
 /// - VtrLayer for ring buffer event capture (50K events)
 ///
-/// Stderr is always used (no JournaldLayer). Systemd captures stderr → journald,
-/// so `spacejn babel` sees properly formatted VTR output with depth markers.
+/// CompactingStderrLayer consolidates consecutive duplicate entries (same file:line:vtr_kind)
+/// and shows a `×N` suffix. This reduces noise from polling loops like `kitty::get-text`.
+///
+/// Stderr output is captured by systemd → journald, so `spacejn babel` sees it.
 ///
 /// The VtrLayer buffer is stored in VTR_BUFFER for access via vtr_buffer().
 /// On error, the buffer can be drained to inspect the execution history.
@@ -137,8 +139,8 @@ pub fn vtr_buffer() -> Option<Arc<Mutex<RingBuffer<TraceSnapshot>>>> {
 /// * `args` - LoggingArgs with debug flag
 pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     use std::io::IsTerminal;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, fmt, reload};
-    use vtr::trace::VtrFormat;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, reload};
+    use spaceship_std::CompactingStderrLayer;
 
     let debug = args.debug;
     let filter_str = if debug {
@@ -155,26 +157,15 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     let buffer_handle = vtr_layer.buffer();
     VTR_BUFFER.set(buffer_handle).expect("VTR_BUFFER already initialized");
 
-    // VtrFormat provides depth-aware tree visualization with semantic markers:
-    // - Depth tree prefix (│ │ →)
-    // - Semantic markers (◆ state, ? decision, ┃ boundary, ! effect, ● checkpoint)
-    // - Module path + span names + file:line location
-    // - Syntax-highlighted fields (cyan names, green strings, yellow numbers)
+    // CompactingStderrLayer provides:
+    // - VTR-style formatting with depth markers, semantic markers, syntax highlighting
+    // - Log compaction: consecutive duplicate entries (same file:line:vtr_kind) show ×N suffix
+    // - Ideal for polling loops like kitty::get-text that fire repeatedly
     //
-    // ALWAYS output to stderr with VtrFormat. Systemd captures stderr → journald,
-    // so spacejn sees the properly formatted VTR output with depth markers.
-    // This replaces JournaldLayer which had its own format without depth.
+    // Output goes to stderr, systemd captures it → journald, spacejn displays it.
     let is_tty = std::io::stderr().is_terminal();
-    let vtr_format = VtrFormat::new()
-        .with_color(is_tty || debug)  // Color only for TTY or debug mode
-        .with_location(true)
-        .with_span_name(true)
-        .with_timestamp(false);  // Journald adds its own timestamp
-
-    let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(is_tty || debug)
-        .event_format(vtr_format);
+    let stderr_layer = CompactingStderrLayer::new()
+        .with_color(is_tty || debug);
 
     tracing_subscriber::registry()
         .with(filter_layer)
