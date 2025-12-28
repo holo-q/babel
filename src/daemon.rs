@@ -141,6 +141,7 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     use std::io::IsTerminal;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, reload};
     use vtr::trace::CompactingStderrLayer;
+    use spaceship_std::compacting::CompactingJournaldLayer;
 
     let debug = args.debug;
     // Enable trace level when debug mode is on so instrumented spans with context fields
@@ -164,16 +165,27 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     // - Log compaction: consecutive duplicate entries (same file:line:vtr_kind) show ×N suffix
     // - Ideal for polling loops like kitty::get-text that fire repeatedly
     //
-    // Output goes to stderr, systemd captures it → journald, spacejn displays it.
+    // Output goes to stderr for visual debugging.
     let is_tty = std::io::stderr().is_terminal();
     let stderr_layer = CompactingStderrLayer::new()
         .with_color(is_tty || debug)
         .with_context_field("kitty_id")  // Display pane ID column when available
         .with_context_width(4);
 
+    // CompactingJournaldLayer provides:
+    // - Direct structured field emission to journald (VTR_KIND, VTR_DEPTH, VTR_SPAN_ID, VTR_STRUCTURAL_HASH)
+    // - Same compaction logic as stderr layer (×N suffix)
+    // - Emits Enter/Exit events from span lifecycle for view-time collapse
+    //
+    // spacejn uses these structured fields to reconstruct span trees and apply block-wide collapse.
+    let journald_layer = CompactingJournaldLayer::new()
+        .expect("Failed to connect to journald")
+        .with_syslog_identifier("babel".to_string());
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(stderr_layer)
+        .with(journald_layer)
         .with(vtr_layer)
         .init();
 
@@ -1611,6 +1623,10 @@ pub async fn run_daemon() -> Result<()> {
                                     summarize_workspace(ws, &state_clone, &summarizer_clone).await;
                                 }
                             }
+
+                            // Flush marker: signals end of poll cycle for view-time collapse
+                            // spacejn uses this as block boundary hint for pattern alignment
+                            tracing::trace!(vtr_kind = "flush", "poll_cycle_boundary");
                         });
                     }
                     DaemonEvent::FileChange(path) => {
