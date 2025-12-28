@@ -659,8 +659,8 @@ fn disable_focus_prevention() -> Option<FocusStealingState> {
 // Internal: Socket-targeted primitives
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[tracing::instrument(level = "debug")]
 async fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
-    tracing::debug!(socket = socket, "-> list_panes_on_socket");
     let output = run_kitten_with_timeout(socket, &["ls"], KITTEN_TIMEOUT_SHORT).await?;
 
     if !output.status.success() {
@@ -712,8 +712,8 @@ async fn list_panes_on_socket(socket: &str) -> Result<Vec<KittyPane>> {
 /// Returns the unparsed JSON string containing full layout_state info
 /// that isn't captured by our KittyPane struct. Used by layout.rs for
 /// capturing split tree structure.
+#[tracing::instrument(level = "debug")]
 pub async fn list_panes_raw_on_socket(socket: &str) -> Result<String> {
-    tracing::debug!(socket = socket, "-> list_panes_raw_on_socket");
     let output = run_kitten_with_timeout(socket, &["ls"], KITTEN_TIMEOUT_SHORT).await?;
 
     if !output.status.success() {
@@ -941,7 +941,6 @@ pub async fn list_panes() -> Result<Vec<KittyPane>> {
 /// Unresponsive towers are skipped.
 #[instrument(level = "debug")]
 pub async fn list_all_panes() -> Result<Vec<KittyPane>> {
-    tracing::debug!("-> list_all_panes");
     let sockets = find_all_sockets();
     let mut all_panes = Vec::new();
 
@@ -1005,7 +1004,6 @@ pub async fn get_panes_by_platform_id(platform_window_id: u64) -> Result<Vec<Kit
 /// instance including whether it's responsive.
 #[instrument(level = "debug")]
 pub async fn discover_all_instances() -> Vec<KittyInstance> {
-    tracing::debug!("-> discover_all_instances");
     let current_socket = default_socket();
     let all_sockets = find_all_sockets();
 
