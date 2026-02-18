@@ -133,6 +133,29 @@ pub enum Request {
 
     /// Set description for a WSet
     WSetDescribe { name: String, description: Option<String> },
+
+    /// Solo a single pane for debugging (isolate one pane, hide others)
+    /// If window_id is None, disables solo mode (restore all panes)
+    Solo { window_id: Option<u64> },
+
+    // ─── Hook Events (push path from Claude Code hooks) ────────────────────────
+
+    /// Push hook state directly into daemon memory, bypassing poll lag.
+    /// Sent by `babel hook` CLI handlers after writing to sqlite.
+    /// This is the direct neural link: hooks fire → daemon knows immediately.
+    ///
+    /// On SessionStart: also binds kitty_id ↔ session_id, eliminating
+    /// the need for expensive fingerprint matching (Phase 5).
+    HookEvent {
+        /// Claude Code session ID (always known from hooks)
+        session: String,
+        /// Kitty window ID (from $KITTY_WINDOW_ID env var, may be absent)
+        kitty_id: Option<u64>,
+        /// Hook state transition
+        hook_state: crate::babel_storage::HookState,
+        /// Which hook fired (for telemetry: "stop", "prompt", "pre_tool", etc.)
+        hook_type: String,
+    },
 }
 
 /// Response - Knowledge ascending from the tower

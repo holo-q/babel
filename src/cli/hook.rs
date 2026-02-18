@@ -12,6 +12,25 @@ use claude_babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_stat
 use claude_babel::kitty::{
     set_border_color_on_socket, reset_border_color_on_socket, default_socket,
 };
+use claude_babel::utility::ipc::{send_request, Request};
+
+/// Push hook state into daemon memory via IPC (fire-and-forget).
+///
+/// Sends a HookEvent to the daemon so it updates BabelState immediately
+/// instead of waiting for the next poll tick. Falls through silently if
+/// the daemon isn't running — sqlite write is the durable fallback.
+async fn push_to_daemon(session: &str, kitty_id: Option<u64>, hook_state: HookState, hook_type: &str) {
+    let request = Request::HookEvent {
+        session: session.to_string(),
+        kitty_id,
+        hook_state,
+        hook_type: hook_type.to_string(),
+    };
+    match send_request(&request).await {
+        Ok(_) => debug!(session, hook_type, "Hook pushed to daemon"),
+        Err(e) => debug!(session, hook_type, error = %e, "Daemon push failed (sqlite fallback)"),
+    }
+}
 
 /// Unread border colors—amber glow when the worker calls
 const UNREAD_ACTIVE: &str = "#f67400";
@@ -45,12 +64,15 @@ pub async fn handle_stop(
     // Light the ring if we have a kitty window ID
     if let Some(id) = kitty_id {
         let socket = default_socket();
-        if let Err(e) = set_border_color_on_socket(&socket, id, UNREAD_ACTIVE, UNREAD_INACTIVE) {
+        if let Err(e) = set_border_color_on_socket(&socket, id, UNREAD_ACTIVE, UNREAD_INACTIVE).await {
             debug!(error = %e, "Failed to set unread border (ring)");
         } else {
             debug!(id, "Ring lit: amber");
         }
     }
+
+    // Push to daemon memory immediately (bypasses poll lag)
+    push_to_daemon(session, kitty_id, HookState::Idle, "stop").await;
 
     Ok(())
 }
@@ -82,12 +104,15 @@ pub async fn handle_prompt(
     // Dim the ring if we have a kitty window ID
     if let Some(id) = kitty_id {
         let socket = default_socket();
-        if let Err(e) = reset_border_color_on_socket(&socket, id) {
+        if let Err(e) = reset_border_color_on_socket(&socket, id).await {
             debug!(error = %e, "Failed to reset border (ring)");
         } else {
             debug!(id, "Ring dimmed: theme default");
         }
     }
+
+    // Push to daemon memory immediately (bypasses poll lag)
+    push_to_daemon(session, kitty_id, HookState::Working, "prompt").await;
 
     Ok(())
 }
@@ -113,6 +138,8 @@ pub async fn handle_pre_tool(
         }
     }
 
+    push_to_daemon(session, kitty_id, HookState::ToolRunning, "pre_tool").await;
+
     Ok(())
 }
 
@@ -135,6 +162,8 @@ pub async fn handle_post_tool(
             debug!(session, tool = tool_name, "Hook: PostToolUse → Working");
         }
     }
+
+    push_to_daemon(session, kitty_id, HookState::Working, "post_tool").await;
 
     Ok(())
 }
@@ -164,7 +193,10 @@ pub async fn handle_notification(
 
 /// Handle SessionStart hook—session begins or resumes
 ///
-/// Logs session start for telemetry. This is the first hook fired when Claude launches.
+/// This is the most important hook for the daemon: it carries session_id + kitty_id,
+/// enabling instant pane↔session binding without expensive fingerprint matching.
+/// Before this hook existed, Phase 5 had to fetch full scrollback and compare
+/// against 100 JSONL fingerprints to figure out which session a window belongs to.
 pub async fn handle_session_start(
     session: &str,
     kitty_id: Option<u64>,
@@ -179,8 +211,9 @@ pub async fn handle_session_start(
         "Hook: SessionStart received"
     );
 
-    // Session is now known—could initialize state here if needed
-    // Currently just logging for telemetry
+    // Push to daemon — this binds kitty_id ↔ session_id immediately,
+    // bypassing the entire fingerprint matching pipeline (Phase 5)
+    push_to_daemon(session, kitty_id, HookState::Working, "session_start").await;
 
     Ok(())
 }

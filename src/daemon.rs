@@ -12,7 +12,7 @@
 //! - Summary index for fast matching
 //!
 //! It watches:
-//! - Kitty panes (polling every 500ms)
+//! - Kitty panes (polling every 1000ms)
 //! - ~/.claude/projects/ (inotify for new/changed files)
 //!
 //! CLI commands query the daemon over unix socket for instant responses.
@@ -26,12 +26,13 @@
 mod config {
     use std::time::Duration;
 
-    /// Interval between kitty window polls (500ms = 2 Hz)
+    /// Interval between kitty window polls (2000ms = 0.5 Hz)
     ///
-    /// Used for: new windows, session state changes, scrollback activity.
-    /// Workspace changes are instant via wnck signals (not polling).
-    /// 500ms is fine since most changes are caught by wnck.
-    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+    /// Structural heartbeat only — discovers new/closed panes, focus changes,
+    /// and pane↔session binding. Real-time activity state comes from Claude Code
+    /// hooks (Stop/Prompt/PreTool/PostTool), workspace changes from wnck signals.
+    /// 2s latency for window discovery is imperceptible for a monitoring daemon.
+    pub const KITTY_POLL_INTERVAL: Duration = Duration::from_millis(2000);
 
     /// Debounce interval for file watcher events
     ///
@@ -141,7 +142,7 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     use std::io::IsTerminal;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, reload};
     use vtr::trace::CompactingStderrLayer;
-    use spaceship_std::compacting::CompactingJournaldLayer;
+    use spaceship_std::CompactingJournaldLayer;
 
     let debug = args.debug;
     // Enable trace level when debug mode is on so instrumented spans with context fields
@@ -435,6 +436,14 @@ pub struct BabelState {
 	/// Known kitty sockets and their status
 	/// Populated during window refresh to track multi-socket situations
 	pub socket_status: HashMap<String, SocketStatus>,
+
+	/// Cached workspace mappings (platform_window_id → workspace number)
+	/// Invalidated on wnck WorkspaceChange events. Eliminates `wmctrl -l` subprocess
+	/// on every poll tick — workspace mappings only change on window move/workspace switch.
+	pub workspace_cache: HashMap<u64, i32>,
+
+	/// Whether workspace_cache needs refresh (dirty on WorkspaceChange, startup)
+	pub workspace_cache_dirty: bool,
 }
 
 impl Default for BabelState {
@@ -460,6 +469,8 @@ impl BabelState {
 			event_publisher: EventPublisher::new(),
 			workspace_titles: HashMap::new(),
 			socket_status: HashMap::new(),
+			workspace_cache: HashMap::new(),
+			workspace_cache_dirty: true, // Force first poll to populate
 		}
 	}
 
@@ -507,8 +518,16 @@ impl BabelState {
 			.cloned()
 			.collect();
 
-		// Get workspace mappings in one call
-		let workspaces = get_all_workspaces();
+		// Get workspace mappings — use cache unless dirty (invalidated by wnck WorkspaceChange)
+		// Eliminates 1× `wmctrl -l` subprocess per poll tick in steady state
+		let workspaces = if self.workspace_cache_dirty {
+			let ws = get_all_workspaces();
+			self.workspace_cache = ws.clone();
+			self.workspace_cache_dirty = false;
+			ws
+		} else {
+			self.workspace_cache.clone()
+		};
 
 		// ─── Terminal Tracking (ALL kitty windows from ALL sockets) ─────────────────
 		// Build terminal info for all panes and emit terminal events
@@ -1344,17 +1363,17 @@ enum DaemonEvent {
 /// Run the daemon with trace mode enabled
 /// This enables debug-level logging for detailed fingerprint matching traces
 #[vtr::trace_errors]
-pub async fn run_daemon_traced() -> Result<()> {
+pub async fn run_daemon_traced(enable_scrollparse: bool) -> Result<()> {
 	TRACE.store(true, Ordering::Relaxed);
 	checkpoint!("trace_mode_enabled");
-	run_daemon().await
+	run_daemon(enable_scrollparse).await
 }
 
 /// Run the daemon
 #[vtr::trace_errors]
-pub async fn run_daemon() -> Result<()> {
+pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
 	// ─── Startup Banner ─────────────────────────────────────────────────────────
-	checkpoint!("startup", version = env!("CARGO_PKG_VERSION"));
+	checkpoint!("startup", version = env!("CARGO_PKG_VERSION"), scrollparse = enable_scrollparse);
 
 	// ─── Kitty Config Validation ────────────────────────────────────────────────
 	// Babel requires kitty with remote control enabled. Validate config on startup
@@ -1396,7 +1415,7 @@ pub async fn run_daemon() -> Result<()> {
 		let mut s = state.write().await;
 		s.rebuild_summary_index().context("Failed to build summary index")?;
 		s.rebuild_fingerprint_index().context("Failed to build fingerprint index")?;
-		let _ = s.refresh_windows(false).await.context("Failed initial window scan")?;
+		let _ = s.refresh_windows(!enable_scrollparse).await.context("Failed initial window scan")?;
 
 		// Compute meaningful stats
 		let sessions_with_fingerprints = s.fingerprint_index.len();
@@ -1505,6 +1524,11 @@ pub async fn run_daemon() -> Result<()> {
 	// ─── Ready ──────────────────────────────────────────────────────────────────
 	checkpoint!("daemon_ready");
 
+	// Backpressure guard: prevents overlapping background poll tasks.
+	// Without this, slow Phase 2 (scrollback fetch, ~100ms/window) causes
+	// unbounded task accumulation when poll interval < task duration.
+	let poll_bg_running = Arc::new(AtomicBool::new(false));
+
 	// Main event loop
 	loop {
 		tokio::select! {
@@ -1539,46 +1563,59 @@ pub async fn run_daemon() -> Result<()> {
                                     vec![]
                                 }
                             };
-                            let addrs: Vec<_> = s.windows.keys().cloned().collect();
+                            let addrs: Vec<_> = if enable_scrollparse {
+                                s.windows.keys().cloned().collect()
+                            } else {
+                                Vec::new()
+                            };
                             (ws, addrs)
                         }; // Lock released - main loop continues immediately!
 
                         // Spawn background task for slow I/O operations
                         // This keeps the main select! loop responsive to IPC
+                        // Backpressure: skip if previous background task still running
+                        if poll_bg_running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+                            tracing::trace!("poll_bg: previous still running, skipping");
+                            continue;
+                        }
                         let state_clone = Arc::clone(&state);
                         let summarizer_clone = Arc::clone(&summarizer);
                         let bg_trace_id = poll_trace_id.clone();
+                        let bg_flag = Arc::clone(&poll_bg_running);
                         tokio::spawn(async move {
                             let bg_span = tracing::debug_span!("poll_background", trace_id = %bg_trace_id);
                             let _bg_guard = bg_span.enter();
-                            // Phase 2: Fetch activity states (expensive, ~100ms/window)
-                            // Using join_all for concurrent async I/O across all windows
-                            let activity_futures: Vec<_> = window_addrs.iter()
-                                .map(|addr| {
-                                    let addr = addr.clone();
-                                    async move {
-                                        // Use socket-aware function to handle multi-instance kitty
-                                        let activity = get_activity_with_scrollback_on_socket(&addr).await;
-                                        (addr, activity)
-                                    }
-                                })
-                                .collect();
-                            let activity_results = futures::future::join_all(activity_futures).await;
+                            if enable_scrollparse {
+                                // Phase 2: Fetch activity states (expensive, ~100ms/window)
+                                // Using join_all for concurrent async I/O across all windows
+                                let activity_futures: Vec<_> = window_addrs.iter()
+                                    .map(|addr| {
+                                        let addr = addr.clone();
+                                        async move {
+                                            // Use socket-aware function to handle multi-instance kitty
+                                            let activity = get_activity_with_scrollback_on_socket(&addr).await;
+                                            (addr, activity)
+                                        }
+                                    })
+                                    .collect();
+                                let activity_results = futures::future::join_all(activity_futures).await;
 
-                            // Phase 3: Apply activity updates with quick write lock
-                            {
-                                let mut s = state_clone.write().await;
-                                for (addr, activity) in activity_results {
-                                    s.apply_activity_update(&addr, activity.state, activity.asking_question, activity.scrollback).await;
+                                // Phase 3: Apply activity updates with quick write lock
+                                {
+                                    let mut s = state_clone.write().await;
+                                    for (addr, activity) in activity_results {
+                                        s.apply_activity_update(&addr, activity.state, activity.asking_question, activity.scrollback).await;
+                                    }
                                 }
                             }
 
-                            // Phase 4: Get windows needing fingerprints + copy index + claimed sessions
+                            // Phase 4: Get windows needing fingerprints + snapshot index + claimed sessions
+                            // Arc-wrapped to avoid per-window deep clones (audit #2: allocation churn)
                             let (needs_matching, fingerprint_index, claimed_sessions) = {
                                 let s = state_clone.read().await;
                                 let needs = s.get_windows_needing_fingerprints();
-                                let index = s.fingerprint_index.clone();
-                                let claimed = s.get_claimed_sessions();
+                                let index = Arc::new(s.fingerprint_index.clone());
+                                let claimed = Arc::new(s.get_claimed_sessions());
                                 checkpoint!(
                                     "phase_4",
                                     needs_count = needs.len(),
@@ -1598,8 +1635,8 @@ pub async fn run_daemon() -> Result<()> {
                                 .map(|(addr, cwd)| {
                                     let addr = addr.clone();
                                     let cwd = cwd.clone();
-                                    let fingerprint_index = fingerprint_index.clone();
-                                    let claimed_sessions = claimed_sessions.clone();
+                                    let fingerprint_index = Arc::clone(&fingerprint_index);
+                                    let claimed_sessions = Arc::clone(&claimed_sessions);
                                     async move {
                                         BabelState::fingerprint_match_addr(&addr, &cwd, &fingerprint_index, &claimed_sessions).await
                                             .map(|(session_id, confidence, fingerprint)| {
@@ -1631,22 +1668,30 @@ pub async fn run_daemon() -> Result<()> {
                             // Flush marker: signals end of poll cycle for view-time collapse
                             // spacejn uses this as block boundary hint for pattern alignment
                             tracing::trace!(vtr_kind = "flush", "poll_cycle_boundary");
+
+                            // Release backpressure guard — next poll tick can spawn again
+                            bg_flag.store(false, Ordering::Release);
                         });
                     }
                     DaemonEvent::FileChange(path) => {
-                        // Rebuild fingerprint index on JSONL changes
-                        // Note: This could be optimized with a last_rebuild timestamp check
+                        // Rebuild fingerprint index on JSONL changes, debounced
+                        // Multiple active Claude sessions write JSONL concurrently —
+                        // without debounce this fires repeatedly and thrashes the index
                         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                             let mut s = state.write().await;
-                            let _ = s.rebuild_fingerprint_index();
+                            if s.last_fingerprint_rebuild.elapsed() > config::FINGERPRINT_REBUILD_DEBOUNCE {
+                                let _ = s.rebuild_fingerprint_index();
+                                s.last_fingerprint_rebuild = Instant::now();
+                            }
                         }
                     }
                     DaemonEvent::WorkspaceChange { platform_window_id } => {
                         // Instant workspace change from wnck - trigger immediate poll
-                        // Use skip_activity_fetch=true for fast response (activity updates via periodic poll)
+                        // Invalidate workspace cache so refresh_windows re-runs wmctrl
                         tracing::debug!(platform_window_id, "WNCK workspace change detected");
                         let changed_workspaces = {
                             let mut s = state.write().await;
+                            s.workspace_cache_dirty = true;
                             s.refresh_windows(true).await.unwrap_or_default()
                         };
                         // Trigger summarization for affected workspaces
@@ -2405,6 +2450,99 @@ mod handlers {
 			Err(e) => Response::Error { message: format!("Failed to load WSet '{}': {}", name, e) },
 		}
 	}
+
+	/// Handle hook events pushed directly from Claude Code hooks via IPC.
+	///
+	/// This is the direct neural link: instead of hooks writing sqlite and waiting
+	/// for the next poll tick to propagate, they push state here instantly.
+	///
+	/// On SessionStart (with kitty_id): binds kitty_id ↔ session_id in-memory,
+	/// eliminating the need for expensive fingerprint matching (Phase 5).
+	///
+	/// On Stop/Prompt/PreTool/PostTool: updates hook_state on the ClaudePane
+	/// and publishes SessionStateChanged events to subscribers immediately.
+	pub async fn hook_event(
+		state: &Arc<RwLock<BabelState>>,
+		session: &str,
+		kitty_id: Option<u64>,
+		hook_state: crate::babel_storage::HookState,
+		hook_type: &str,
+	) -> Response {
+		use crate::babel_storage::HookState;
+
+		let mut s = state.write().await;
+
+		// Find the ClaudePane by kitty_id first (fast, O(1)), fall back to session_id scan
+		let addr = if let Some(kid) = kitty_id {
+			s.windows.iter()
+				.find(|(a, _)| a.id == kid)
+				.map(|(a, _)| a.clone())
+		} else {
+			s.windows.iter()
+				.find(|(_, w)| w.session_id.as_deref() == Some(session))
+				.map(|(a, _)| a.clone())
+		};
+
+		if let Some(addr) = addr {
+			// Extract workspace before releasing the mutable borrow on windows
+			let workspace = s.windows.get(&addr).and_then(|w| w.workspace);
+
+			// Mutate the window: bind session_id + update hook_state
+			if let Some(window) = s.windows.get_mut(&addr) {
+				if window.session_id.is_none() {
+					tracing::info!(
+						kitty_id = addr.id,
+						session,
+						hook_type,
+						"Hook bound session_id → pane (fingerprinting bypassed)"
+					);
+					window.session_id = Some(session.to_string());
+					let _ = crate::utility::claude_discovery::tag_window(addr.id, session);
+				}
+				window.hook_state = Some(hook_state);
+			}
+			// Mutable borrow on s.windows dropped here
+
+			// Map HookState → scrollparse ActivityState for event compatibility
+			let activity_state = match hook_state {
+				HookState::Idle => scrollparse::claude::ActivityState::AwaitingInput,
+				HookState::Working => scrollparse::claude::ActivityState::Thinking,
+				HookState::ToolRunning => scrollparse::claude::ActivityState::ToolUse,
+			};
+
+			let old_state = s.window_states.get(&addr).copied()
+				.unwrap_or(scrollparse::claude::ActivityState::Unknown);
+
+			if old_state != activity_state {
+				s.window_states.insert(addr.clone(), activity_state);
+				s.event_publisher.publish(crate::events::BabelEvent::SessionStateChanged {
+					kitty_id: addr.id,
+					session_id: Some(session.to_string()),
+					workspace,
+					old_state,
+					new_state: activity_state,
+					asking_question: false, // Hooks don't carry this signal yet
+				});
+			}
+
+			Response::Ok {
+				message: format!("hook_event: {} → {:?} (kitty {})", session, hook_state, addr.id),
+			}
+		} else {
+			// Window not yet discovered by polling — this is normal during startup
+			// or if the hook fires before the first poll tick. The sqlite write
+			// ensures the state is picked up on next poll.
+			tracing::debug!(
+				session,
+				?kitty_id,
+				hook_type,
+				"Hook event for unknown window (will catch on next poll)"
+			);
+			Response::Ok {
+				message: format!("hook_event: {} → {:?} (window not yet tracked)", session, hook_state),
+			}
+		}
+	}
 }
 
 /// Dispatch IPC requests to appropriate handlers
@@ -2466,6 +2604,10 @@ async fn process_request(
 		Request::WSetDelete { name } => handlers::wset_delete(&name),
 		Request::WSetRename { old, new } => handlers::wset_rename(&old, &new),
 		Request::WSetDescribe { name, description } => handlers::wset_describe(&name, description),
+
+		// ─── Hook Event Handler (direct push from Claude Code hooks) ───────────
+		Request::HookEvent { session, kitty_id, hook_state, hook_type } =>
+			handlers::hook_event(state, &session, kitty_id, hook_state, &hook_type).await,
 
 		// ─── System Handlers ────────────────────────────────────────────────────
 		Request::Shutdown => Response::Ok { message: "Shutting down".to_string() },
