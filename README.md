@@ -4,7 +4,7 @@ Unified interface for managing agent sessions across kitty terminal panes.
 
 ## Overview
 
-Babel provides discovery, tracking, and control of agent sessions running in kitty panes. It uses hooks as the live protocol for lifecycle state, kitty as the source of truth for pane presence/focus, and fingerprinting as cold-start recovery when Babel starts after sessions are already in flight.
+Babel provides discovery, tracking, and control of agent sessions running in terminal panes. Today, that means kitty. It uses hooks as the live protocol for lifecycle state, the terminal adapter as the source of truth for pane presence/focus, and fingerprinting as cold-start recovery when Babel starts after sessions are already in flight.
 
 ## Features
 
@@ -14,6 +14,19 @@ Babel provides discovery, tracking, and control of agent sessions running in kit
 - **Overlay Metadata**: Track custom icons, read status, notes (separate from Claude storage)
 - **State Detection**: Identify session state (idle, thinking, tool use, awaiting input)
 - **Fire Mode**: Quick-launch agents with smart working directory detection
+
+## Terminal Support
+
+Kitty is the only supported terminal today. This is a capability boundary, not a preference: Babel needs stable pane identity, pane-local environment/context, remote control for focus/text/scrollback/title/user metadata, and enough socket or instance information to route commands without guessing.
+
+Terminal support should follow the same adapter discipline as harness support. All terminals are considered on equal terms, but an adapter must expose the necessary context honestly before Babel can orchestrate it. In theory, tmux is the nearest candidate because it has explicit pane identity and control primitives. Zellij may also be viable if its action/plugin surface can provide the same stable context. Other terminals are unsupported until they can provide equivalent signals instead of cwd/time/title guessing.
+
+| Terminal | Status | Notes |
+| --- | --- | --- |
+| kitty | Supported | Current reference terminal adapter. Provides remote control, pane ids, sockets, scrollback, titles, user vars/tags, and multi-instance routing. |
+| tmux | Candidate | Likely first non-kitty target if pane identity, scrollback, environment, and command routing can be mapped cleanly. |
+| zellij | Candidate | Potentially viable after proving stable pane identity and control/context APIs. |
+| other terminals | Unsupported | Considered equally, but blocked until they expose the required orchestration context. |
 
 ## Building
 
@@ -191,9 +204,9 @@ These projects are prior art and reference material. Babel's direction is to con
 
 ## Integration Points
 
-### Kitty Protocol
+### Terminal Protocol
 
-Uses `kitten @` commands for remote control:
+The only implemented terminal adapter is kitty, using `kitten @` commands for remote control:
 - `ls` - Query kitty pane/window state
 - `send-text` - Send input to panes
 - `focus-window` - Activate panes
