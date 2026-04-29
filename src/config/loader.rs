@@ -1,7 +1,7 @@
 //! Configuration file loader with graceful fallback to defaults
 
-use std::path::PathBuf;
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 use super::schema::BabelConfig;
@@ -10,8 +10,7 @@ use super::schema::BabelConfig;
 ///
 /// Located at ~/.config/babel/babel.toml
 pub fn config_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .expect("HOME environment variable must be set");
+    let home = std::env::var("HOME").expect("HOME environment variable must be set");
     PathBuf::from(home)
         .join(".config")
         .join("babel")
@@ -85,11 +84,9 @@ mod tests {
     fn test_default_config_serializes() {
         // Ensure defaults can round-trip through TOML
         let config = BabelConfig::default();
-        let toml_str = toml::to_string_pretty(&config)
-            .expect("Should serialize to TOML");
+        let toml_str = toml::to_string_pretty(&config).expect("Should serialize to TOML");
 
-        let parsed: BabelConfig = toml::from_str(&toml_str)
-            .expect("Should parse back from TOML");
+        let parsed: BabelConfig = toml::from_str(&toml_str).expect("Should parse back from TOML");
 
         assert_eq!(parsed.title_policy.enabled, config.title_policy.enabled);
         assert_eq!(parsed.title_policy.rolling_prompts.prompt_count, 4);

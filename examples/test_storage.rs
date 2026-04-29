@@ -1,7 +1,7 @@
 //! Test Claude storage parsing with real data
 
-use claude_babel::claude_storage;
 use anyhow::Result;
+use claude_babel::utility::claude_storage;
 
 fn main() -> Result<()> {
     println!("=== Testing Claude Storage Parser ===\n");

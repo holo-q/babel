@@ -76,8 +76,14 @@ pub struct NoopPolicy;
 
 #[async_trait]
 impl TitlePolicy for NoopPolicy {
-    fn name(&self) -> &'static str { "noop" }
-    fn should_generate(&self, _ctx: &TitleContext) -> bool { false }
-    async fn generate(&self, _ctx: TitleContext) -> Result<Option<GeneratedTitle>> { Ok(None) }
+    fn name(&self) -> &'static str {
+        "noop"
+    }
+    fn should_generate(&self, _ctx: &TitleContext) -> bool {
+        false
+    }
+    async fn generate(&self, _ctx: TitleContext) -> Result<Option<GeneratedTitle>> {
+        Ok(None)
+    }
     fn on_pane_close(&self, _session_id: &str) {}
 }

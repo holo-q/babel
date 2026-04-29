@@ -1,0 +1,9 @@
+{
+  "name": "babel",
+  "version": "0.1.0",
+  "description": "Babel telemetry hooks for Codex — wires Codex panes into babel's session tracker + richmon indicator (cyan dot per pane state). Requires plugin_hooks feature (codex >= PR #19705, merged 2026-04-28).",
+  "author": { "name": "nuck" },
+  "license": "MIT",
+  "keywords": ["codex", "babel", "telemetry", "richmon", "kitty"],
+  "hooks": "./hooks/codex.json"
+}

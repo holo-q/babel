@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::daemon::TerminalInfo;
 use crate::fire::FiredTask;
-use crate::utility::claude_discovery::ClaudePane;
+use crate::utility::agent_discovery::AgentPane;
 use crate::utility::ipc::{self, Request, Response};
 
 use super::ipc_client::{IpcLogEntry, LoggingIpcClient};
@@ -59,7 +59,7 @@ impl Pane {
 /// Content shown in the Details pane
 #[derive(Debug, Clone)]
 pub enum DetailContent {
-    Window(Box<ClaudePane>),
+    Window(Box<AgentPane>),
     Terminal(TerminalInfo),
     FiredTask(FiredTask),
     IpcMessage(super::ipc_client::IpcLogEntry),
@@ -74,9 +74,9 @@ pub struct TuiApp {
     pub daemon_uptime: Duration,
 
     // ─── Data from daemon ───────────────────────────────────────────────────────
-    /// Claude panes from daemon cache
-    pub windows: Vec<ClaudePane>,
-    /// All kitty terminals (including non-Claude) for visibility
+    /// agent panes from daemon cache
+    pub windows: Vec<AgentPane>,
+    /// All kitty terminals (including non-agent) for visibility
     pub terminals: Vec<TerminalInfo>,
     /// Fire-and-forget tasks from filesystem
     pub fired_tasks: Vec<FiredTask>,
@@ -165,7 +165,7 @@ impl TuiApp {
         Ok(())
     }
 
-    /// Refresh terminals list from daemon (all kitty windows, not just Claude)
+    /// Refresh terminals list from daemon (all kitty windows, not just agents)
     pub async fn refresh_terminals(&mut self) -> Result<()> {
         match self.client.send_request(&Request::ListTerminals).await? {
             Response::Terminals { terminals } => {
@@ -191,9 +191,7 @@ impl TuiApp {
 
     /// Refresh daemon uptime
     pub async fn refresh_uptime(&mut self) -> Result<()> {
-        if let Ok(Response::Pong { uptime_secs }) =
-            self.client.send_request(&Request::Ping).await
-        {
+        if let Ok(Response::Pong { uptime_secs }) = self.client.send_request(&Request::Ping).await {
             self.daemon_uptime = Duration::from_secs(uptime_secs);
         }
         Ok(())
@@ -282,8 +280,8 @@ impl TuiApp {
                 if self.ipc_log.is_empty() {
                     return;
                 }
-                let new = (self.ipc_selected as i32 + delta)
-                    .clamp(0, self.ipc_log.len() as i32 - 1) as usize;
+                let new = (self.ipc_selected as i32 + delta).clamp(0, self.ipc_log.len() as i32 - 1)
+                    as usize;
                 self.ipc_selected = new;
                 self.ipc_auto_scroll = false;
             }
@@ -299,8 +297,8 @@ impl TuiApp {
             Pane::Windows => {
                 // Get selected terminal
                 if let Some(term) = self.terminals.get(self.window_selected) {
-                    if term.is_claude {
-                        // For Claude terminals, show full ClaudePane details
+                    if term.is_agent {
+                        // For Claude terminals, show full AgentPane details
                         if let Some(window) = self.windows.iter().find(|w| w.id() == term.addr.id) {
                             self.detail_content = DetailContent::Window(Box::new(window.clone()));
                         } else {
@@ -308,7 +306,7 @@ impl TuiApp {
                             self.detail_content = DetailContent::Terminal(term.clone());
                         }
                     } else {
-                        // For non-Claude terminals, show TerminalInfo
+                        // For non-agent terminals, show TerminalInfo
                         self.detail_content = DetailContent::Terminal(term.clone());
                     }
                 }

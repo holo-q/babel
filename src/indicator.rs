@@ -1,6 +1,6 @@
 //! Panel indicator protocol — how babel speaks to panel widgets
 //!
-//! Typed events for panel indicators (richmon, etc.) to display Claude session state.
+//! Typed events for panel indicators (richmon, etc.) to display agent session state.
 //! Each indicator shows dots representing active sessions, colored by activity state.
 //!
 //! ## Protocol
@@ -48,7 +48,6 @@ pub enum IndicatorEvent {
         x_pos: Option<i32>,
 
         // ═══ Extended visual properties (for cairo renderers) ═══
-
         /// Ring glow intensity (0.0-1.0) — animated aura during token output
         #[serde(default, skip_serializing_if = "is_zero")]
         ring_intensity: f64,
@@ -103,7 +102,13 @@ impl IndicatorBatch {
     }
 
     /// Add a set event with basic properties
-    pub fn set(&mut self, id: impl Into<String>, color: impl Into<String>, workspace: u32, x_pos: Option<i32>) {
+    pub fn set(
+        &mut self,
+        id: impl Into<String>,
+        color: impl Into<String>,
+        workspace: u32,
+        x_pos: Option<i32>,
+    ) {
         self.events.push(IndicatorEvent::Set {
             id: id.into(),
             color: color.into(),

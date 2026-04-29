@@ -27,111 +27,138 @@ use claude_babel::ActivityState;
 /// 3. Calls BabelCore::migrate_project() for the actual work
 /// 4. Formats and displays results
 pub async fn cmd_mv(
-	core: &mut BabelCore,
-	source: PathBuf,
-	dest: PathBuf,
-	dry_run: bool,
-	history_only: bool,
-	anxious: bool,
-	force: bool,
-	json: bool,
+    core: &mut BabelCore,
+    source: PathBuf,
+    dest: PathBuf,
+    dry_run: bool,
+    history_only: bool,
+    anxious: bool,
+    force: bool,
+    json: bool,
 ) -> Result<()> {
-	// Expand ~ in paths
-	let source = expand_tilde(&source);
-	let dest = expand_tilde(&dest);
+    // Expand ~ in paths
+    let source = expand_tilde(&source);
+    let dest = expand_tilde(&dest);
 
-	// Validate source exists (unless history-only mode)
-	let source_exists = source.exists();
-	if !source_exists && !history_only {
-		bail!("Source directory does not exist: {}\nIf you already moved the directory, use --history-only", source.display());
-	}
+    // Validate source exists (unless history-only mode)
+    let source_exists = source.exists();
+    if !source_exists && !history_only {
+        bail!("Source directory does not exist: {}\nIf you already moved the directory, use --history-only", source.display());
+    }
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Step 0: Check for conflicting terminals (preview before migration)
-	// ─────────────────────────────────────────────────────────────────────────────
-	let conflicts = core.find_windows_in_path(&source).await?;
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Step 0: Check for conflicting terminals (preview before migration)
+    // ─────────────────────────────────────────────────────────────────────────────
+    let conflicts = core.find_panes_in_path(&source).await?;
 
-	if !conflicts.is_empty() {
-		display_conflicts(&conflicts, &source);
+    if !conflicts.is_empty() {
+        display_conflicts(&conflicts, &source);
 
-		// Check for blocking active windows (BackgroundTask counts as active - has work in progress)
-		let active_count = conflicts
-			.iter()
-			.filter(|c| matches!(c.state, ActivityState::Thinking | ActivityState::ToolUse | ActivityState::BackgroundTask))
-			.count();
+        // Check for blocking active panes (BackgroundTask counts as active - has work in progress)
+        let active_count = conflicts
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.state,
+                    ActivityState::Thinking
+                        | ActivityState::ToolUse
+                        | ActivityState::BackgroundTask
+                )
+            })
+            .count();
 
-		if active_count > 0 && !force {
-			println!("{} active window(s) detected - cannot safely migrate.", active_count);
-			println!();
-			println!("Options:");
-			println!("  • Wait for active sessions to finish and retry");
-			println!("  • Use --force to move anyway (active sessions will break)");
-			bail!("Active Claude terminals in source path");
-		}
+        if active_count > 0 && !force {
+            println!(
+                "{} active pane(s) detected - cannot safely migrate.",
+                active_count
+            );
+            println!();
+            println!("Options:");
+            println!("  • Wait for active sessions to finish and retry");
+            println!("  • Use --force to move anyway (active sessions will break)");
+            bail!("Active Claude terminals in source path");
+        }
 
-		if active_count > 0 && force {
-			println!("⚠ Warning: {} active terminal(s) will break after move.", active_count);
-			println!("  Proceeding anyway due to --force flag.\n");
-		}
-	}
+        if active_count > 0 && force {
+            println!(
+                "⚠ Warning: {} active terminal(s) will break after move.",
+                active_count
+            );
+            println!("  Proceeding anyway due to --force flag.\n");
+        }
+    }
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Anxious mode: step-by-step confirmation
-	// ─────────────────────────────────────────────────────────────────────────────
-	if anxious {
-		// Preview what will happen
-		println!("Migration plan:");
-		println!();
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Anxious mode: step-by-step confirmation
+    // ─────────────────────────────────────────────────────────────────────────────
+    if anxious {
+        // Preview what will happen
+        println!("Migration plan:");
+        println!();
 
-		if !history_only && source_exists {
-			println!("Step 1: Move directory");
-			println!("  FROM: {}", source.display());
-			println!("  TO:   {}", dest.display());
-			println!();
-		}
+        if !history_only && source_exists {
+            println!("Step 1: Move directory");
+            println!("  FROM: {}", source.display());
+            println!("  TO:   {}", dest.display());
+            println!();
+        }
 
-		let migratable = conflicts
-			.iter()
-			.filter(|c| matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval | ActivityState::Unknown))
-			.count();
-		if migratable > 0 {
-			println!("Step 2: Migrate {} idle terminal(s)", migratable);
-			for c in &conflicts {
-				if matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval | ActivityState::Unknown) {
-					let new_cwd = dest.join(&c.relative_path);
-					println!("  id:{} → cd {}", c.window.id(), new_cwd.display());
-				}
-			}
-			println!();
-		}
+        let migratable = conflicts
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.state,
+                    ActivityState::Idle
+                        | ActivityState::AwaitingInput
+                        | ActivityState::PlanApproval
+                        | ActivityState::Unknown
+                )
+            })
+            .count();
+        if migratable > 0 {
+            println!("Step 2: Migrate {} idle terminal(s)", migratable);
+            for c in &conflicts {
+                if matches!(
+                    c.state,
+                    ActivityState::Idle
+                        | ActivityState::AwaitingInput
+                        | ActivityState::PlanApproval
+                        | ActivityState::Unknown
+                ) {
+                    let new_cwd = dest.join(&c.relative_path);
+                    println!("  id:{} → cd {}", c.pane.id(), new_cwd.display());
+                }
+            }
+            println!();
+        }
 
-		println!("Step 3: Update Claude history");
-		println!("  Update ~/.claude/projects/ folder name");
-		println!("  Update ~/.claude/history.jsonl paths");
-		println!();
+        println!("Step 3: Update Claude history");
+        println!("  Update ~/.claude/projects/ folder name");
+        println!("  Update ~/.claude/history.jsonl paths");
+        println!();
 
-		if !dry_run && !confirm("Proceed with migration?")? {
-			bail!("Aborted by user");
-		}
-	}
+        if !dry_run && !confirm("Proceed with migration?")? {
+            bail!("Aborted by user");
+        }
+    }
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Execute migration through BabelCore
-	// ─────────────────────────────────────────────────────────────────────────────
-	let options = MigrateOptions {
-		dry_run,
-		move_directory: !history_only && source_exists,
-		migrate_terminals: true,
-		force,
-	};
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Execute migration through BabelCore
+    // ─────────────────────────────────────────────────────────────────────────────
+    let options = MigrateOptions {
+        dry_run,
+        move_directory: !history_only && source_exists,
+        migrate_terminals: true,
+        force,
+    };
 
-	let outcome = core.migrate_project(&source, &dest, options).await?;
+    let outcome = core.migrate_project(&source, &dest, options).await?;
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Display results
-	// ─────────────────────────────────────────────────────────────────────────────
-	if json {
-		let result = serde_json::json!({
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Display results
+    // ─────────────────────────────────────────────────────────────────────────────
+    if json {
+        let result = serde_json::json!({
             "dry_run": outcome.dry_run,
             "directory_moved": outcome.directory_moved,
             "terminals_migrated": outcome.terminals_migrated,
@@ -140,66 +167,85 @@ pub async fn cmd_mv(
             "sessions_preserved": outcome.storage.sessions_preserved,
             "history_entries_updated": outcome.storage.history_entries_updated,
         });
-		println!("{}", serde_json::to_string_pretty(&result)?);
-		return Ok(());
-	}
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
 
-	let prefix = if dry_run { "[DRY RUN] " } else { "" };
+    let prefix = if dry_run { "[DRY RUN] " } else { "" };
 
-	if outcome.directory_moved {
-		println!("{}✓ Directory moved", prefix);
-	}
+    if outcome.directory_moved {
+        println!("{}✓ Directory moved", prefix);
+    }
 
-	if !outcome.terminals_migrated.is_empty() {
-		println!("{}✓ Migrated {} terminal(s): {:?}", prefix, outcome.terminals_migrated.len(), outcome.terminals_migrated);
-	}
+    if !outcome.terminals_migrated.is_empty() {
+        println!(
+            "{}✓ Migrated {} terminal(s): {:?}",
+            prefix,
+            outcome.terminals_migrated.len(),
+            outcome.terminals_migrated
+        );
+    }
 
-	if outcome.storage.project_folder_renamed {
-		println!("{}✓ Renamed project folder ({} sessions)", prefix, outcome.storage.sessions_preserved);
-	}
+    if outcome.storage.project_folder_renamed {
+        println!(
+            "{}✓ Renamed project folder ({} sessions)",
+            prefix, outcome.storage.sessions_preserved
+        );
+    }
 
-	if outcome.storage.history_entries_updated > 0 {
-		println!("{}✓ Updated {} history entries", prefix, outcome.storage.history_entries_updated);
-	}
+    if outcome.storage.history_entries_updated > 0 {
+        println!(
+            "{}✓ Updated {} history entries",
+            prefix, outcome.storage.history_entries_updated
+        );
+    }
 
-	if !outcome.active_terminals.is_empty() {
-		println!("⚠ {} active terminal(s) not migrated: {:?}", outcome.active_terminals.len(), outcome.active_terminals);
-	}
+    if !outcome.active_terminals.is_empty() {
+        println!(
+            "⚠ {} active terminal(s) not migrated: {:?}",
+            outcome.active_terminals.len(),
+            outcome.active_terminals
+        );
+    }
 
-	println!();
-	if dry_run {
-		println!("Dry run complete. No changes were made.");
-	} else {
-		println!("Done! Conversation history maintained.");
-	}
+    println!();
+    if dry_run {
+        println!("Dry run complete. No changes were made.");
+    } else {
+        println!("Done! Conversation history maintained.");
+    }
 
-	Ok(())
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Display Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Display conflicting windows in a user-friendly format
+/// Display conflicting panes in a user-friendly format.
 fn display_conflicts(conflicts: &[ConflictingPane], source: &Path) {
-	println!("Found {} Claude pane(s) in {}:\n", conflicts.len(), source.display());
+    println!(
+        "Found {} agent pane(s) in {}:\n",
+        conflicts.len(),
+        source.display()
+    );
 
-	for c in conflicts {
-		// Reading the worker's breath before migration
-		let state_str = match c.state {
-			ActivityState::Idle => "[IDLE]  ",                    // resting, safe to move
-			ActivityState::AwaitingInput => "[AWAIT] ",           // awaiting the user's voice, safe to move
-			ActivityState::PlanApproval => "[PLAN]  ",            // awaiting blessing, safe to move
-			ActivityState::Thinking => "[ACTIVE: Thinking]",      // soul processing—cannot migrate
-			ActivityState::ToolUse => "[ACTIVE: Tool Use]",       // hands moving—cannot migrate
-			ActivityState::BackgroundTask => "[ACTIVE: Background]", // working in shadow—cannot migrate
-			ActivityState::Unknown => "[UNKNOWN]",                // breath obscured
-		};
-		let title = c.window.title.strip_prefix("✳ ").unwrap_or(&c.window.title);
-		let title_short: String = title.chars().take(40).collect();
-		println!("  {} id:{:<4} \"{}\"", state_str, c.window.id(), title_short);
-	}
-	println!();
+    for c in conflicts {
+        // Reading the worker's breath before migration
+        let state_str = match c.state {
+            ActivityState::Idle => "[IDLE]  ", // resting, safe to move
+            ActivityState::AwaitingInput => "[AWAIT] ", // awaiting the user's voice, safe to move
+            ActivityState::PlanApproval => "[PLAN]  ", // awaiting blessing, safe to move
+            ActivityState::Thinking => "[ACTIVE: Thinking]", // soul processing—cannot migrate
+            ActivityState::ToolUse => "[ACTIVE: Tool Use]", // hands moving—cannot migrate
+            ActivityState::BackgroundTask => "[ACTIVE: Background]", // working in shadow—cannot migrate
+            ActivityState::Unknown => "[UNKNOWN]",                   // breath obscured
+        };
+        let title = c.pane.title.strip_prefix("✳ ").unwrap_or(&c.pane.title);
+        let title_short: String = title.chars().take(40).collect();
+        println!("  {} id:{:<4} \"{}\"", state_str, c.pane.id(), title_short);
+    }
+    println!();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -208,14 +254,14 @@ fn display_conflicts(conflicts: &[ConflictingPane], source: &Path) {
 
 /// Ask user for y/n confirmation (for --anxious mode)
 pub fn confirm(prompt: &str) -> Result<bool> {
-	print!("{} [y/N] ", prompt);
-	std::io::stdout().flush()?;
+    print!("{} [y/N] ", prompt);
+    std::io::stdout().flush()?;
 
-	let mut input = String::new();
-	std::io::stdin().read_line(&mut input)?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
 
-	let response = input.trim().to_lowercase();
-	Ok(response == "y" || response == "yes")
+    let response = input.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -224,10 +270,10 @@ pub fn confirm(prompt: &str) -> Result<bool> {
 
 /// Expand ~ to home directory
 pub fn expand_tilde(path: &Path) -> PathBuf {
-	if let Ok(stripped) = path.strip_prefix("~") {
-		if let Some(home) = dirs::home_dir() {
-			return home.join(stripped);
-		}
-	}
-	path.to_path_buf()
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path.to_path_buf()
 }

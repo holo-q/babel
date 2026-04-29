@@ -3,8 +3,8 @@
 //! Loads configuration from ~/.config/babel/babel.toml with sensible defaults.
 //! Supports hot-reload via file watching.
 
-mod schema;
 mod loader;
+mod schema;
 
-pub use schema::*;
 pub use loader::*;
+pub use schema::*;

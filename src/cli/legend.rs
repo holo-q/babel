@@ -23,7 +23,7 @@
 //! - `●` yellow = unread (new activity since last view)
 //! - `*`        = focused pane (in raw pane listings)
 //!
-//! ## Activity State (what Claude is doing)
+//! ## Activity State (what the agent is doing)
 //!
 //! Hook state (ground truth from Claude Code lifecycle) determines Working/Idle.
 //! Activity state (from scrollback) provides granularity when working.
@@ -55,14 +55,14 @@ pub enum LegendSymbol {
     FocusedPane,
 
     // Activity state
-    ActivityWorking,         // Hook says working, no granular state
+    ActivityWorking, // Hook says working, no granular state
     ActivityThinking,
     ActivityToolUse,
     ActivityPlanApproval,
     ActivityAwaitingInput,
     ActivityBackgroundTask,
     ActivityIdle,
-    ActivityUnknown,         // No hook data available
+    ActivityUnknown, // No hook data available
 }
 
 impl LegendSymbol {

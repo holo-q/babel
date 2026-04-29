@@ -1,6 +1,6 @@
 //! Workspace title summarization via Haiku
 //!
-//! Generates ambient workspace titles by summarizing active Claude sessions.
+//! Generates ambient workspace titles by summarizing active agent sessions.
 //! Uses Claude Haiku for fast, cheap summarization with caching and debouncing.
 //!
 //! ## Usage
@@ -96,7 +96,10 @@ impl WorkspaceSummarizer {
         let api_key = match &self.api_key {
             Some(k) => k,
             None => {
-                tracing::debug!(workspace, "Summarization skipped: ANTHROPIC_API_KEY not set");
+                tracing::debug!(
+                    workspace,
+                    "Summarization skipped: ANTHROPIC_API_KEY not set"
+                );
                 return Ok(self.fallback_title(&sessions));
             }
         };
@@ -134,22 +137,21 @@ impl WorkspaceSummarizer {
         // Update cache
         {
             let mut cache = self.cache.write().await;
-            cache.insert(workspace, CachedTitle {
-                title: title.clone(),
-                generated_at: Instant::now(),
-                input_hash,
-            });
+            cache.insert(
+                workspace,
+                CachedTitle {
+                    title: title.clone(),
+                    generated_at: Instant::now(),
+                    input_hash,
+                },
+            );
         }
 
         Ok(title)
     }
 
     /// Call Haiku API for summarization
-    async fn call_haiku(
-        &self,
-        api_key: &str,
-        sessions: &[SessionSummaryInput],
-    ) -> Result<String> {
+    async fn call_haiku(&self, api_key: &str, sessions: &[SessionSummaryInput]) -> Result<String> {
         // Build session descriptions
         let session_descriptions: Vec<String> = sessions
             .iter()
@@ -232,7 +234,7 @@ Title:"#,
             name.to_string()
         } else {
             // Count for multiple sessions
-            format!("{} claude sessions", sessions.len())
+            format!("{} agent sessions", sessions.len())
         }
     }
 

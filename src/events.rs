@@ -1,14 +1,14 @@
 //! Event notification system for claude-babel daemon
 //!
 //! The nervous system of Babel—how the tower knows what its workers are doing.
-//! Events flow upward from individual Claude panes, carrying news of state changes,
+//! Events flow upward from individual agent panes, carrying news of state changes,
 //! activity pulses, and session discoveries. Each worker (anima—receptive, soul-holding)
 //! whispers their state through this channel. GUI frontends subscribe to this stream,
 //! but the true purpose awaits: a Captain (animus—directive, will-force) will listen here,
 //! receiving whispers from each worker and sending commands back down through the tower.
 //!
 //! Provides pub/sub event broadcasting for GUI frontends (like treasure-panel)
-//! to receive push notifications about Claude session state changes.
+//! to receive push notifications about agent session state changes.
 //!
 //! ## Architecture
 //!
@@ -52,6 +52,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
+use vtr::{effect, state};
+
+use crate::agent_kind::AgentKind;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Pulse Trigger Types
@@ -76,6 +79,10 @@ pub enum PulseTrigger {
     UserInput,
     /// ActivityState transition occurred
     StateTransition,
+    /// Harness hook emitted a lifecycle edge. Used when hooks carry pulse
+    /// semantics even if the harness does not emit enough events for a full
+    /// state transition.
+    HookLifecycle,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -85,17 +92,17 @@ pub enum PulseTrigger {
 /// Events emitted by the babel daemon
 ///
 /// Whispers ascending the tower—each worker's breath carries news upward.
-/// These represent state changes in the Claude session tracking system.
+/// These represent state changes in the agent session tracking system.
 /// All events are broadcast to subscribers via tokio broadcast channels.
 /// The Captain, when they arrive, will listen here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum BabelEvent {
-    /// New Claude pane discovered
+    /// New agent pane discovered
     ///
     /// A new worker joins the tower—their voice now heard among the chorus.
-    /// Emitted when kitty window polling detects a new window matching
-    /// the Claude Code title pattern (contains "claude" case-insensitive).
+    /// Emitted when kitty polling detects a new pane matching a recognized
+    /// agent process or provider-specific title marker.
     WindowAdded {
         /// Kitty window ID
         kitty_id: u64,
@@ -103,9 +110,14 @@ pub enum BabelEvent {
         title: String,
         /// XFCE workspace number (1-indexed), None if not on XFCE
         workspace: Option<i32>,
+        /// Which harness owns this pane. Drives panel-color dispatch
+        /// (Claude orange / Codex cyan) without forcing subscribers to
+        /// re-query the daemon for the agent kind.
+        #[serde(default)]
+        agent_kind: AgentKind,
     },
 
-    /// Claude pane closed
+    /// Agent pane closed
     ///
     /// A worker departs—their whisper fades from the tower's chorus.
     /// Emitted when a previously tracked window no longer appears in kitty ls.
@@ -117,7 +129,7 @@ pub enum BabelEvent {
     /// Pane gained focus
     ///
     /// A worker steps forward—their voice now clearest in the chorus.
-    /// Emitted when a Claude pane becomes the focused kitty pane.
+    /// Emitted when an agent pane becomes the focused kitty pane.
     /// Includes session_id if the pane has been matched to a session.
     PaneFocused {
         /// Kitty pane ID now focused
@@ -129,7 +141,7 @@ pub enum BabelEvent {
     /// Pane lost focus
     ///
     /// A worker recedes—their voice returns to the background murmur.
-    /// Emitted when a Claude pane loses focus (another pane gained it).
+    /// Emitted when an agent pane loses focus (another pane gained it).
     /// Paired with PaneFocused for complete focus tracking.
     PaneUnfocused {
         /// Kitty pane ID that lost focus
@@ -140,7 +152,7 @@ pub enum BabelEvent {
 
     /// Window moved to different workspace
     ///
-    /// Emitted when a Claude pane's XFCE workspace changes.
+    /// Emitted when an agent pane's XFCE workspace changes.
     /// Used by richspace-babel to track per-workspace dot state.
     WindowWorkspaceChanged {
         /// Kitty window ID that moved
@@ -151,13 +163,12 @@ pub enum BabelEvent {
         new_workspace: Option<i32>,
     },
 
-    // ─── Terminal Events (all kitty windows, not just Claude) ───────────────────
-
+    // ─── Terminal Events (all kitty windows, not just agents) ───────────────────
     /// Any kitty terminal opened
     ///
     /// Emitted when kitty window polling detects a new terminal, regardless of
-    /// whether it's running Claude. Useful for seeing the terminal flow and
-    /// watching windows transition to Claude sessions.
+    /// whether it's running an agent. Useful for seeing the terminal flow and
+    /// watching panes transition to agent sessions.
     TerminalOpened {
         /// Kitty window ID
         kitty_id: u64,
@@ -172,31 +183,31 @@ pub enum BabelEvent {
     /// Any kitty terminal closed
     ///
     /// Emitted when a terminal is no longer present in kitty ls,
-    /// regardless of whether it was a Claude session.
+    /// regardless of whether it was an agent session.
     TerminalClosed {
         /// Kitty window ID that was closed
         kitty_id: u64,
     },
 
-    /// Terminal became a Claude session
+    /// Terminal became an agent session
     ///
-    /// Emitted when a previously non-Claude terminal is now detected as
-    /// running Claude (user ran `claude` in it). This bridges the gap
+    /// Emitted when a previously non-agent terminal is now detected as
+    /// running an agent. This bridges the gap
     /// between TerminalOpened and WindowAdded.
-    TerminalBecameClaude {
+    #[serde(alias = "terminal_became_claude")]
+    TerminalBecameAgent {
         /// Kitty window ID
         kitty_id: u64,
         /// New title (likely "✳ ...")
         title: String,
     },
 
-    // ─── Claude Session Events ──────────────────────────────────────────────────
-
+    // ─── Agent Session Events ───────────────────────────────────────────────────
     /// Session successfully matched to window via fingerprint
     ///
     /// A worker's identity revealed—their scrollback whispers matched to their soul.
     /// Emitted when the daemon successfully matches a kitty window to a
-    /// Claude session by comparing scrollback content fingerprints.
+    /// agent session by comparing scrollback content fingerprints.
     SessionMatched {
         /// Kitty window ID that was matched
         kitty_id: u64,
@@ -221,8 +232,8 @@ pub enum BabelEvent {
     /// Session activity state changed (Idle → Thinking → ToolUse → AwaitingInput)
     ///
     /// The worker's breath shifts—from stillness to contemplation to action.
-    /// Emitted when a Claude pane's activity state changes. Enables
-    /// external tools (like richspace-babel) to track Claude's activity
+    /// Emitted when an agent pane's activity state changes. Enables
+    /// external tools (like richspace-babel) to track agent activity
     /// and update visual indicators accordingly.
     ///
     /// State detection is based on scrollback pattern analysis and may
@@ -238,9 +249,12 @@ pub enum BabelEvent {
         old_state: scrollparse::claude::ActivityState,
         /// New state — what the worker has become
         new_state: scrollparse::claude::ActivityState,
-        /// True if Claude's last message ended with a question
+        /// True if the agent's last message ended with a question
         /// Dialogue state indicator for visual styling (ring + stripes when Idle)
         asking_question: bool,
+        /// Which harness owns this pane — same purpose as on WindowAdded.
+        #[serde(default)]
+        agent_kind: AgentKind,
     },
 
     /// Fine-grained activity pulse for reactive UI animations
@@ -256,7 +270,7 @@ pub enum BabelEvent {
     ///
     /// Frontends can use this for:
     /// - Dot blink/pulse animations on token output
-    /// - Activity indicators during Claude thinking
+    /// - Activity indicators while an agent is thinking
     /// - Visual feedback that work is happening
     ActivityPulse {
         /// Kitty window ID
@@ -276,7 +290,7 @@ pub enum BabelEvent {
 
     /// Workspace ambient title updated via Haiku summarization
     ///
-    /// Emitted when a workspace's Claude sessions are summarized into
+    /// Emitted when a workspace's agent sessions are summarized into
     /// a human-readable title. Triggered by window add/remove or session match.
     /// Titles are cached (5min TTL) and debounced (10s min between calls).
     WorkspaceTitleUpdated {
@@ -284,7 +298,7 @@ pub enum BabelEvent {
         workspace: i32,
         /// LLM-generated title (2-5 words, e.g. "refactoring auth system")
         title: String,
-        /// Number of Claude panes on this workspace
+        /// Number of agent panes on this workspace
         window_count: usize,
         /// Session ID of most recently active session, if any
         primary_session: Option<String>,
@@ -300,7 +314,6 @@ pub enum BabelEvent {
     // ─── Claude Code Hook Events ────────────────────────────────────────────────
     // These events are emitted by hook handlers—direct signals from Claude Code's
     // neural interface. Ground truth lifecycle events, not scrollback heuristics.
-
     /// Tool execution started (PreToolUse hook)
     ///
     /// Fired when Claude begins executing a tool (Bash, Edit, Write, etc.).
@@ -382,7 +395,6 @@ pub enum BabelEvent {
     },
 
     // ─── Title Policy Events ────────────────────────────────────────────────────
-
     /// Session title generated by title policy
     ///
     /// Emitted when a title policy (e.g., rolling_prompts) generates a new
@@ -413,7 +425,6 @@ pub enum BabelEvent {
     },
 
     // ─── WSet Events ────────────────────────────────────────────────────────────
-
     /// WSet saved to disk
     ///
     /// Emitted when a WSet is saved via `babel save`.
@@ -450,6 +461,42 @@ pub enum BabelEvent {
         /// New WSet name
         to: String,
     },
+}
+
+impl BabelEvent {
+    /// Get the snake_case name of this event variant
+    ///
+    /// Used for VTR tracing and event filtering. Returns the same names
+    /// as the serde serialization (e.g., "window_added", "session_state_changed").
+    pub fn name(&self) -> &'static str {
+        match self {
+            BabelEvent::WindowAdded { .. } => "window_added",
+            BabelEvent::WindowRemoved { .. } => "window_removed",
+            BabelEvent::PaneFocused { .. } => "pane_focused",
+            BabelEvent::PaneUnfocused { .. } => "pane_unfocused",
+            BabelEvent::WindowWorkspaceChanged { .. } => "window_workspace_changed",
+            BabelEvent::TerminalOpened { .. } => "terminal_opened",
+            BabelEvent::TerminalClosed { .. } => "terminal_closed",
+            BabelEvent::TerminalBecameAgent { .. } => "terminal_became_agent",
+            BabelEvent::SessionMatched { .. } => "session_matched",
+            BabelEvent::SessionUpdated { .. } => "session_updated",
+            BabelEvent::SessionStateChanged { .. } => "session_state_changed",
+            BabelEvent::ActivityPulse { .. } => "activity_pulse",
+            BabelEvent::WorkspaceTitleUpdated { .. } => "workspace_title_updated",
+            BabelEvent::DaemonShutdown => "daemon_shutdown",
+            BabelEvent::WSetSaved { .. } => "wset_saved",
+            BabelEvent::WSetLoaded { .. } => "wset_loaded",
+            BabelEvent::WSetSwitched { .. } => "wset_switched",
+            BabelEvent::TitleGenerated { .. } => "title_generated",
+            BabelEvent::TitleSpliced { .. } => "title_spliced",
+            BabelEvent::ToolStarted { .. } => "tool_started",
+            BabelEvent::ToolCompleted { .. } => "tool_completed",
+            BabelEvent::NotificationReceived { .. } => "notification_received",
+            BabelEvent::SessionStarted { .. } => "session_started",
+            BabelEvent::SubagentCompleted { .. } => "subagent_completed",
+            BabelEvent::TranscriptCompacting { .. } => "transcript_compacting",
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -539,6 +586,27 @@ impl EventPublisher {
     /// println!("Event sent to {} subscribers", count);
     /// ```
     pub fn publish(&self, event: BabelEvent) -> usize {
+        // VTR semantic trace: event publication (→)
+        // Each whisper carries its name upward through the tower
+        let event_name = event.name();
+        effect!("event", "publish", name = event_name);
+
+        // Special state trace for session state transitions (◆)
+        // The worker's breath shifting—captured at the moment of emission
+        if let BabelEvent::SessionStateChanged {
+            old_state,
+            new_state,
+            kitty_id,
+            session_id,
+            ..
+        } = &event
+        {
+            state!("session", format!("{:?}", old_state) => format!("{:?}", new_state),
+                kitty_id = *kitty_id,
+                session_id = session_id.clone().unwrap_or_default()
+            );
+        }
+
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let msg = EventMessage::new(event, seq);
 
@@ -631,36 +699,7 @@ impl EventFilter {
             return true;
         }
 
-        let event_name = match event {
-            BabelEvent::WindowAdded { .. } => "window_added",
-            BabelEvent::WindowRemoved { .. } => "window_removed",
-            BabelEvent::PaneFocused { .. } => "pane_focused",
-            BabelEvent::PaneUnfocused { .. } => "pane_unfocused",
-            BabelEvent::WindowWorkspaceChanged { .. } => "window_workspace_changed",
-            BabelEvent::TerminalOpened { .. } => "terminal_opened",
-            BabelEvent::TerminalClosed { .. } => "terminal_closed",
-            BabelEvent::TerminalBecameClaude { .. } => "terminal_became_claude",
-            BabelEvent::SessionMatched { .. } => "session_matched",
-            BabelEvent::SessionUpdated { .. } => "session_updated",
-            BabelEvent::SessionStateChanged { .. } => "session_state_changed",
-            BabelEvent::ActivityPulse { .. } => "activity_pulse",
-            BabelEvent::WorkspaceTitleUpdated { .. } => "workspace_title_updated",
-            BabelEvent::DaemonShutdown => "daemon_shutdown",
-            BabelEvent::WSetSaved { .. } => "wset_saved",
-            BabelEvent::WSetLoaded { .. } => "wset_loaded",
-            BabelEvent::WSetSwitched { .. } => "wset_switched",
-            BabelEvent::TitleGenerated { .. } => "title_generated",
-            BabelEvent::TitleSpliced { .. } => "title_spliced",
-            // Claude Code hook events
-            BabelEvent::ToolStarted { .. } => "tool_started",
-            BabelEvent::ToolCompleted { .. } => "tool_completed",
-            BabelEvent::NotificationReceived { .. } => "notification_received",
-            BabelEvent::SessionStarted { .. } => "session_started",
-            BabelEvent::SubagentCompleted { .. } => "subagent_completed",
-            BabelEvent::TranscriptCompacting { .. } => "transcript_compacting",
-        };
-
-        self.include.iter().any(|e| e == event_name)
+        self.include.iter().any(|e| e == event.name())
     }
 }
 
@@ -710,6 +749,7 @@ mod tests {
             kitty_id: 42,
             title: "Test Window".to_string(),
             workspace: Some(1),
+            agent_kind: AgentKind::Claude,
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -744,6 +784,7 @@ mod tests {
             kitty_id: 1,
             title: "".to_string(),
             workspace: None,
+            agent_kind: AgentKind::Claude,
         };
         let removed = BabelEvent::WindowRemoved { kitty_id: 1 };
         let shutdown = BabelEvent::DaemonShutdown;
@@ -765,6 +806,7 @@ mod tests {
             kitty_id: 1,
             title: "".to_string(),
             workspace: None,
+            agent_kind: AgentKind::Claude,
         };
         let removed = BabelEvent::WindowRemoved { kitty_id: 1 };
         let focused = BabelEvent::PaneFocused {
@@ -816,6 +858,7 @@ mod tests {
             kitty_id: 999,
             title: "Test".to_string(),
             workspace: Some(3),
+            agent_kind: AgentKind::Claude,
         });
 
         assert_eq!(count, 1);
@@ -875,6 +918,7 @@ mod tests {
                 kitty_id: 1,
                 title: "test".to_string(),
                 workspace: None,
+                agent_kind: AgentKind::Claude,
             },
             BabelEvent::WindowRemoved { kitty_id: 2 },
             BabelEvent::PaneFocused {
@@ -897,6 +941,7 @@ mod tests {
                 old_state: ActivityState::Idle,
                 new_state: ActivityState::Thinking,
                 asking_question: false,
+                agent_kind: AgentKind::Claude,
             },
             BabelEvent::ActivityPulse {
                 kitty_id: 6,
@@ -931,7 +976,13 @@ mod tests {
 
         // Round-trip test
         let deserialized: BabelEvent = serde_json::from_str(&json).unwrap();
-        if let BabelEvent::ActivityPulse { kitty_id, intensity, trigger, .. } = deserialized {
+        if let BabelEvent::ActivityPulse {
+            kitty_id,
+            intensity,
+            trigger,
+            ..
+        } = deserialized
+        {
             assert_eq!(kitty_id, 42);
             assert!((intensity - 0.85).abs() < 0.001);
             assert_eq!(trigger, PulseTrigger::ToolStart);
@@ -955,6 +1006,7 @@ mod tests {
             kitty_id: 1,
             title: "".to_string(),
             workspace: None,
+            agent_kind: AgentKind::Claude,
         };
 
         assert!(filter.matches(&pulse));
@@ -963,9 +1015,7 @@ mod tests {
 
     #[test]
     fn test_session_state_changed_filter() {
-        let filter = EventFilter::with_events(vec![
-            "session_state_changed".to_string(),
-        ]);
+        let filter = EventFilter::with_events(vec!["session_state_changed".to_string()]);
 
         use scrollparse::claude::ActivityState;
 
@@ -976,11 +1026,13 @@ mod tests {
             old_state: ActivityState::Idle,
             new_state: ActivityState::AwaitingInput,
             asking_question: true,
+            agent_kind: AgentKind::Claude,
         };
         let window_added = BabelEvent::WindowAdded {
             kitty_id: 1,
             title: "".to_string(),
             workspace: None,
+            agent_kind: AgentKind::Claude,
         };
 
         assert!(filter.matches(&state_changed));

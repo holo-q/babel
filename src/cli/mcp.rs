@@ -1,16 +1,16 @@
-//! MCP Server for Claude session management
+//! MCP Server for agent session management
 //!
-//! Exposes babel's Claude session management via the Model Context Protocol.
+//! Exposes babel's agent session management via the Model Context Protocol.
 //! This enables Claude Code (or any MCP client) to query sessions, send prompts,
-//! and manage Claude panes programmatically.
+//! and manage agent panes programmatically.
 //!
 //! ## Tools
 //!
-//! - `claude_sessions`: List all active Claude sessions (fire tasks + terminal windows)
+//! - `claude_sessions`: List all active agent sessions (fire tasks + terminal windows)
 //! - `claude_history`: Query conversation history from ~/.claude
-//! - `claude_send`: Send text to a Claude pane
-//! - `claude_fire`: Fire a prompt to Claude in background
-//! - `claude_focus`: Focus a Claude pane by ID
+//! - `claude_send`: Send text to an agent pane
+//! - `claude_fire`: Fire a prompt to an agent in background
+//! - `claude_focus`: Focus an agent pane by ID
 //!
 //! ## Usage
 //!
@@ -22,15 +22,15 @@
 
 use anyhow::Result;
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
-    ServiceExt,
+    ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
+use vtr::{checkpoint, effect, trace_error};
 
 use claude_babel::core::BabelCore;
 
@@ -40,12 +40,13 @@ use claude_babel::core::BabelCore;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendRequest {
-    /// Target window ID
-    #[schemars(description = "Kitty window ID to send text to")]
-    pub window_id: u64,
+    /// Target pane ID.
+    #[serde(alias = "window_id")]
+    #[schemars(description = "Kitty pane ID to send text to")]
+    pub pane_id: u64,
 
     /// Text to send (will be followed by Enter)
-    #[schemars(description = "Text to send to the Claude pane (presses Enter after)")]
+    #[schemars(description = "Text to send to the agent pane (presses Enter after)")]
     pub text: String,
 
     /// Force send even if there's pending input
@@ -56,19 +57,20 @@ pub struct SendRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FocusRequest {
-    /// Window ID to focus
-    #[schemars(description = "Kitty window ID to focus")]
-    pub window_id: u64,
+    /// Pane ID to focus.
+    #[serde(alias = "window_id")]
+    #[schemars(description = "Kitty pane ID to focus")]
+    pub pane_id: u64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FireRequest {
-    /// The prompt to send to Claude
-    #[schemars(description = "The prompt to fire to a new Claude session")]
+    /// The prompt to send to the agent
+    #[schemars(description = "The prompt to fire to a new agent session")]
     pub prompt: String,
 
     /// Working directory (uses cwd if omitted)
-    #[schemars(description = "Working directory for the Claude session (auto-detected if omitted)")]
+    #[schemars(description = "Working directory for the agent session (auto-detected if omitted)")]
     pub workdir: Option<String>,
 }
 
@@ -87,7 +89,7 @@ pub struct HistoryRequest {
 // MCP Server Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Babel MCP Server - Claude session management tools
+/// Babel MCP Server - agent session management tools
 ///
 /// Runs in ephemeral mode (no daemon required). Each tool call creates
 /// a fresh BabelCore instance for the operation.
@@ -99,20 +101,22 @@ pub struct BabelMcp {
 #[tool_router]
 impl BabelMcp {
     pub fn new() -> Self {
-        tracing::debug!("Initializing BabelMcp tool router");
+        checkpoint!("mcp_init");
         Self {
             tool_router: Self::tool_router(),
         }
     }
 
-    /// List all active Claude sessions
+    /// List all active agent sessions
     ///
     /// Returns both:
-    /// - Fire tasks (background Claude sessions)
-    /// - Terminal windows (kitty panes running Claude)
-    #[tool(description = "List all active Claude sessions - fire tasks and terminal windows with their IDs, titles, states, and workspaces")]
+    /// - Fire tasks (background agent sessions)
+    /// - Terminal windows (kitty panes running an agent)
+    #[tool(
+        description = "List all active agent sessions - fire tasks and terminal windows with their IDs, titles, states, and workspaces"
+    )]
     fn claude_sessions(&self) -> String {
-        tracing::info!("Listing Claude sessions");
+        checkpoint!("mcp_list_sessions");
 
         // Create ephemeral BabelCore for this query
         let rt = match tokio::runtime::Handle::try_current() {
@@ -124,13 +128,13 @@ impl BabelMcp {
 
         let result = rt.block_on(async {
             let core = BabelCore::connect().await;
-            core.windows().await
+            core.panes().await
         });
 
         match result {
             Ok(windows) => {
                 if windows.is_empty() {
-                    return "No active Claude sessions found".to_string();
+                    return "No active agent sessions found".to_string();
                 }
 
                 // Format windows as JSON for structured consumption
@@ -146,9 +150,15 @@ impl BabelMcp {
     /// Query Claude conversation history from ~/.claude
     ///
     /// Returns recent conversations with their session IDs, names, and summaries.
-    #[tool(description = "Query Claude conversation history - returns session IDs, names, project paths, and message summaries")]
+    #[tool(
+        description = "Query Claude conversation history - returns session IDs, names, project paths, and message summaries"
+    )]
     fn claude_history(&self, Parameters(req): Parameters<HistoryRequest>) -> String {
-        tracing::info!(limit = ?req.limit, session_ids = ?req.session_ids, "Querying history");
+        checkpoint!(
+            "mcp_query_history",
+            limit = format!("{:?}", req.limit),
+            session_ids = format!("{:?}", req.session_ids)
+        );
 
         let rt = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
@@ -192,13 +202,19 @@ impl BabelMcp {
         }
     }
 
-    /// Send text to a Claude pane
+    /// Send text to an agent pane
     ///
-    /// Sends text followed by Enter to submit to Claude. Checks for pending
+    /// Sends text followed by Enter to submit to the agent. Checks for pending
     /// input unless force=true.
-    #[tool(description = "Send text to a Claude pane - types the text and presses Enter to submit")]
+    #[tool(description = "Send text to an agent pane - types the text and presses Enter to submit")]
     fn claude_send(&self, Parameters(req): Parameters<SendRequest>) -> String {
-        tracing::info!(window_id = req.window_id, text_len = req.text.len(), force = req.force, "Sending text");
+        effect!(
+            "kitty",
+            "send_text",
+            pane_id = format!("{}", req.pane_id),
+            len = format!("{}", req.text.len()),
+            force = format!("{}", req.force)
+        );
 
         let rt = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
@@ -210,7 +226,7 @@ impl BabelMcp {
 
             // Check for pending input unless force
             if !req.force {
-                match core.has_pending_input(req.window_id).await {
+                match core.has_pending_input(req.pane_id).await {
                     Ok((true, text)) => {
                         let preview = text.map(|t| {
                             if t.len() > 40 {
@@ -220,38 +236,47 @@ impl BabelMcp {
                             }
                         });
                         return Err(format!(
-                            "Window {} has unsent text in input area{}. Use force=true to override.",
-                            req.window_id,
+                            "Pane {} has unsent text in input area{}. Use force=true to override.",
+                            req.pane_id,
                             preview.map(|t| format!(": \"{}\"", t)).unwrap_or_default()
                         ));
                     }
                     Ok((false, _)) => {}
                     Err(e) => {
-                        tracing::debug!(error = %e, "Failed to check pending input, proceeding");
+                        trace_error!("pending_input_check_failed", error = format!("{}", e));
                     }
                 }
             }
 
-            core.send(req.window_id, &req.text).await
+            core.send(req.pane_id, &req.text)
+                .await
                 .map_err(|e| format!("Failed to send: {}", e))
         });
 
         match result {
-            Ok(()) => format!("Sent text to window {}", req.window_id),
+            Ok(()) => format!("Sent text to pane {}", req.pane_id),
             Err(e) => e,
         }
     }
 
-    /// Fire a prompt to Claude in a background session
+    /// Fire a prompt to an agent in a background session
     ///
-    /// Launches Claude with the prompt in a new detached terminal.
+    /// Launches the current provider with the prompt in a new detached terminal.
     /// The working directory is auto-detected or can be explicitly provided.
-    #[tool(description = "Fire a prompt to Claude in a new background session - launches a detached terminal")]
+    #[tool(
+        description = "Fire a prompt to an agent in a new background session - launches a detached terminal"
+    )]
     fn claude_fire(&self, Parameters(req): Parameters<FireRequest>) -> String {
-        tracing::info!(prompt_len = req.prompt.len(), workdir = ?req.workdir, "Firing prompt");
+        effect!(
+            "claude",
+            "fire_prompt",
+            len = format!("{}", req.prompt.len()),
+            workdir = format!("{:?}", req.workdir)
+        );
 
         // Determine working directory
-        let workdir = req.workdir
+        let workdir = req
+            .workdir
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
@@ -279,12 +304,14 @@ impl BabelMcp {
         }
     }
 
-    /// Focus a Claude pane by ID
+    /// Focus an agent pane by ID
     ///
-    /// Brings the specified window to the foreground and switches to its workspace.
-    #[tool(description = "Focus a Claude pane - brings it to foreground and switches to its workspace")]
+    /// Brings the specified pane to the foreground and switches to its workspace.
+    #[tool(
+        description = "Focus an agent pane - brings it to foreground and switches to its workspace"
+    )]
     fn claude_focus(&self, Parameters(req): Parameters<FocusRequest>) -> String {
-        tracing::info!(window_id = req.window_id, "Focusing window");
+        effect!("kitty", "focus_pane", pane_id = format!("{}", req.pane_id));
 
         let rt = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
@@ -293,12 +320,12 @@ impl BabelMcp {
 
         let result = rt.block_on(async {
             let core = BabelCore::connect().await;
-            core.focus(req.window_id).await
+            core.focus(req.pane_id).await
         });
 
         match result {
-            Ok(()) => format!("Focused window {}", req.window_id),
-            Err(e) => format!("Failed to focus window {}: {}", req.window_id, e),
+            Ok(()) => format!("Focused pane {}", req.pane_id),
+            Err(e) => format!("Failed to focus pane {}: {}", req.pane_id, e),
         }
     }
 }
@@ -308,10 +335,10 @@ impl ServerHandler for BabelMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Babel MCP - Claude session management tools. Use claude_sessions to list \
-                 active Claude panes and fire tasks. Use claude_history to query conversation \
+                "Babel MCP - agent session management tools. Use claude_sessions to list \
+                 active agent panes and fire tasks. Use claude_history to query conversation \
                  history. Use claude_send to send prompts to specific windows. Use claude_fire \
-                 to start new background Claude sessions. Use claude_focus to bring a window \
+                 to start new background agent sessions. Use claude_focus to bring a pane \
                  to the foreground."
                     .to_string(),
             ),
@@ -327,13 +354,13 @@ impl ServerHandler for BabelMcp {
 
 /// Run the babel MCP server on stdio transport
 pub async fn run_mcp() -> Result<()> {
-    tracing::info!("Babel MCP server starting");
+    checkpoint!("mcp_starting");
 
     let service = BabelMcp::new().serve(stdio()).await?;
 
-    tracing::info!("MCP server ready, awaiting commands");
+    checkpoint!("mcp_ready");
     service.waiting().await?;
 
-    tracing::info!("Babel MCP server shutting down");
+    checkpoint!("mcp_shutdown");
     Ok(())
 }

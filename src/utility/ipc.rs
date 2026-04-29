@@ -18,12 +18,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::instrument;
 
-use crate::utility::claude_storage::SessionInfo;
-use crate::utility::claude_discovery::ClaudePane;
-use crate::daemon::{TerminalInfo, SocketStatus};
-use crate::kitty::KittyPane;
+use crate::daemon::{SocketStatus, TerminalInfo};
 use crate::events::EventMessage;
+use crate::kitty::{KittyPane, PaneAddr};
+use crate::paint::PaintEvent;
+use crate::utility::agent_discovery::AgentPane;
+use crate::utility::claude_storage::SessionInfo;
 use crate::wset::WSetSummary;
+use crate::{AgentKind, PulseEffect};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Protocol Messages
@@ -34,12 +36,19 @@ use crate::wset::WSetSummary;
 /// These messages flow from the outside world down to the daemon's receptive workers.
 /// Each request seeks knowledge or action from the collective below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TitleTarget {
+    PlatformWindow { platform_window_id: u64 },
+    Pane { os_window_id: u64, pane_id: u64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    /// List all Claude panes (fast - from cache)
+    /// List all agent panes (fast - from cache)
     List,
 
-    /// List all kitty terminals (not just Claude)
+    /// List all kitty terminals (not just agents)
     /// Useful for seeing the full terminal flow and watching transitions
     ListTerminals,
 
@@ -50,37 +59,67 @@ pub enum Request {
     /// List kitty socket status (multi-instance awareness)
     ListSockets,
 
-    /// List all Claude panes with fingerprint data (slow - extracts scrollback)
+    /// List all agent panes with fingerprint data (slow - extracts scrollback)
     ListWithFingerprints,
 
-    /// Get status of specific window (or focused if None)
-    Status { window_id: Option<u64> },
+    /// Get status of specific pane (or focused if None)
+    Status {
+        #[serde(default, alias = "window_id")]
+        pane_id: Option<u64>,
+    },
 
-    /// Get full session info for a window (triggers enrichment if needed)
-    Enrich { window_id: u64 },
+    /// Get full session info for a pane (triggers enrichment if needed)
+    Enrich {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+    },
 
-    /// Focus a window
-    Focus { window_id: u64 },
+    /// Focus a pane
+    Focus {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+    },
 
-    /// Get scrollback from window
-    Scroll { window_id: u64 },
+    /// Get scrollback from pane
+    Scroll {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+    },
 
-    /// Send text to window (with Enter/CR at end)
-    Send { window_id: u64, text: String },
+    /// Send text to pane (with Enter/CR at end)
+    Send {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+        text: String,
+    },
 
-    /// Type text to window (without Enter/CR at end)
+    /// Type text to pane (without Enter/CR at end)
     /// Useful for composing prompts incrementally
-    Type { window_id: u64, text: String },
+    Type {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+        text: String,
+    },
 
-    /// Check if a window has pending (unsent) input in the textbox
+    /// Check if a pane has pending (unsent) input in the textbox
     /// Returns true if there's text typed but not yet submitted
-    HasPendingInput { window_id: u64 },
+    HasPendingInput {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+    },
 
-    /// Tag window with icon
-    Tag { window_id: u64, icon: String },
+    /// Tag pane with icon
+    Tag {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+        icon: String,
+    },
 
-    /// Mark window as read
-    MarkRead { window_id: u64 },
+    /// Mark pane as read
+    MarkRead {
+        #[serde(alias = "window_id")]
+        pane_id: u64,
+    },
 
     /// Get recent history from ~/.claude
     History { limit: usize },
@@ -101,15 +140,30 @@ pub enum Request {
         events: Vec<String>,
     },
 
+    /// Subscribe to the paint stream (connection stays open for streaming).
+    ///
+    /// Parallel to Subscribe, but the stream carries `PaintEvent`s — UX-level
+    /// commands ready to render. Babel is authoritative over color, ring,
+    /// scale, outline, workspace CSS class, urgent flag — clients
+    /// (richmon-babel, richspace-babel) forward verbatim to their renderers.
+    ///
+    /// On connect: full state replay so panel restarts converge instantly.
+    /// No filter — the paint stream is the contract; clients ignore strands
+    /// they don't care about (richmon ignores Workspace, richspace ignores
+    /// Window).
+    SubscribePaint,
+
     /// Get current workspace titles (from authoritative cache)
     Titles,
 
+    /// Resolve the best available title for a window or pane.
+    GetTitle { target: TitleTarget },
+
     /// Force refresh titles for workspace(s)
-    /// If workspace is None, refreshes all workspaces with Claude panes
+    /// If workspace is None, refreshes all workspaces with agent panes
     TitleRefresh { workspace: Option<i32> },
 
     // ─── WSet Operations ────────────────────────────────────────────────────────
-
     /// Save current state to a WSet
     /// If name is None, saves to current WSet (from _current file)
     WSetSave { name: Option<String> },
@@ -132,14 +186,19 @@ pub enum Request {
     WSetRename { old: String, new: String },
 
     /// Set description for a WSet
-    WSetDescribe { name: String, description: Option<String> },
+    WSetDescribe {
+        name: String,
+        description: Option<String>,
+    },
 
     /// Solo a single pane for debugging (isolate one pane, hide others)
-    /// If window_id is None, disables solo mode (restore all panes)
-    Solo { window_id: Option<u64> },
+    /// If pane_id is None, disables solo mode (restore all panes)
+    Solo {
+        #[serde(default, alias = "window_id")]
+        pane_id: Option<u64>,
+    },
 
     // ─── Hook Events (push path from Claude Code hooks) ────────────────────────
-
     /// Push hook state directly into daemon memory, bypassing poll lag.
     /// Sent by `babel hook` CLI handlers after writing to sqlite.
     /// This is the direct neural link: hooks fire → daemon knows immediately.
@@ -147,12 +206,23 @@ pub enum Request {
     /// On SessionStart: also binds kitty_id ↔ session_id, eliminating
     /// the need for expensive fingerprint matching (Phase 5).
     HookEvent {
-        /// Claude Code session ID (always known from hooks)
+        /// Babel session key, namespaced as harness:native_id.
         session: String,
-        /// Kitty window ID (from $KITTY_WINDOW_ID env var, may be absent)
+        /// Kitty pane ID (from $KITTY_WINDOW_ID env var, may be absent)
         kitty_id: Option<u64>,
+        /// Full pane address (from $KITTY_LISTEN_ON + $KITTY_WINDOW_ID).
+        /// Prefer this over kitty_id whenever present.
+        #[serde(default)]
+        pane_addr: Option<PaneAddr>,
+        /// Harness that emitted the hook.
+        #[serde(default)]
+        agent_kind: AgentKind,
         /// Hook state transition
-        hook_state: crate::babel_storage::HookState,
+        #[serde(default)]
+        hook_state: Option<crate::babel_storage::HookState>,
+        /// Visual pulse requested by the harness flow.
+        #[serde(default)]
+        pulse: PulseEffect,
         /// Which hook fired (for telemetry: "stop", "prompt", "pre_tool", etc.)
         hook_type: String,
     },
@@ -166,9 +236,9 @@ pub enum Request {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     /// Success with window list
-    Windows { windows: Vec<ClaudePane> },
+    Windows { windows: Vec<AgentPane> },
 
-    /// Success with all terminal list (not just Claude)
+    /// Success with all terminal list (not just agents)
     Terminals { terminals: Vec<TerminalInfo> },
 
     /// Success with raw kitty panes from all sockets
@@ -176,11 +246,13 @@ pub enum Response {
 
     /// Success with socket status information
     /// Keys are socket paths (e.g., "unix:/run/user/1000/kitty.sock-12345")
-    Sockets { sockets: std::collections::HashMap<String, SocketStatus> },
+    Sockets {
+        sockets: std::collections::HashMap<String, SocketStatus>,
+    },
 
     /// Success with single window
-    /// Boxed to reduce enum size (ClaudePane is 432 bytes)
-    Window { window: Box<Option<ClaudePane>> },
+    /// Boxed to reduce enum size (AgentPane is 432 bytes)
+    Window { window: Box<Option<AgentPane>> },
 
     /// Success with session history
     History { sessions: Vec<SessionInfo> },
@@ -214,12 +286,22 @@ pub enum Response {
     /// Event notification (sent to subscribers)
     Event { event: EventMessage },
 
+    /// Paint event notification (sent to SubscribePaint subscribers).
+    ///
+    /// Carries a fully-resolved `PaintEvent` — color hex, ring intensity,
+    /// CSS class, etc. Subscribers forward verbatim to their renderers.
+    PaintEvent { event: PaintEvent },
+
     /// Workspace titles response
     /// Keys are workspace numbers as strings (JSON doesn't support integer map keys)
-    Titles { titles: std::collections::HashMap<String, String> },
+    Titles {
+        titles: std::collections::HashMap<String, String>,
+    },
+
+    /// Title lookup response for a specific window or pane
+    Title { title: Option<String> },
 
     // ─── WSet Responses ─────────────────────────────────────────────────────────
-
     /// WSet saved successfully (full data)
     WSet { wset: crate::wset::WSet },
 
@@ -248,9 +330,7 @@ pub enum Response {
     },
 
     /// Current WSet name
-    WSetCurrent {
-        name: Option<String>,
-    },
+    WSetCurrent { name: Option<String> },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -295,8 +375,8 @@ pub async fn send_request(request: &Request) -> Result<Response> {
     let mut response_line = String::new();
     reader.read_line(&mut response_line).await?;
 
-    let response: Response = serde_json::from_str(&response_line)
-        .context("Failed to parse daemon response")?;
+    let response: Response =
+        serde_json::from_str(&response_line).context("Failed to parse daemon response")?;
 
     Ok(response)
 }
@@ -365,8 +445,7 @@ pub async fn read_request(stream: &mut BufReader<UnixStream>) -> Result<Option<R
         return Ok(None); // Connection closed
     }
 
-    let request: Request = serde_json::from_str(&line)
-        .context("Failed to parse client request")?;
+    let request: Request = serde_json::from_str(&line).context("Failed to parse client request")?;
 
     Ok(Some(request))
 }

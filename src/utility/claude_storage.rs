@@ -10,11 +10,12 @@
 //! - Window title prefixes (✳ ) stripped before matching
 //! - Session info cached without full conversation parse
 
-use std::path::{Path, PathBuf};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context, bail};
+use std::path::{Path, PathBuf};
+use vtr::checkpoint;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -95,8 +96,7 @@ pub fn claude_base() -> PathBuf {
 /// Convert absolute path to Claude's project directory naming scheme
 /// /home/user/project → -home-user-project
 pub fn path_to_encoded(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "-")
+    path.to_string_lossy().replace('/', "-")
 }
 
 /// Get project directory from absolute path
@@ -119,9 +119,7 @@ pub fn list_projects() -> Result<Vec<PathBuf>> {
     }
 
     let mut projects = Vec::new();
-    for entry in fs::read_dir(&projects_dir)
-        .context("Failed to read projects directory")?
-    {
+    for entry in fs::read_dir(&projects_dir).context("Failed to read projects directory")? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
@@ -167,9 +165,13 @@ pub fn get_session_summaries(session_path: &Path) -> Result<Vec<Summary>> {
 
     // Summaries are at the top - read first 20 lines max
     for (line_num, line) in reader.lines().take(20).enumerate() {
-        let line = line.with_context(||
-            format!("Failed to read line {} from {}", line_num + 1, session_path.display())
-        )?;
+        let line = line.with_context(|| {
+            format!(
+                "Failed to read line {} from {}",
+                line_num + 1,
+                session_path.display()
+            )
+        })?;
 
         if line.trim().is_empty() {
             continue;
@@ -212,10 +214,7 @@ pub fn get_session_info(session_path: &Path) -> Result<SessionInfo> {
     // Determine project path from parent directory
     let project = if let Some(parent) = session_path.parent() {
         // Convert -home-user-project back to /home/user/project
-        let project_name = parent
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let project_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let restored_path = project_name.replace('-', "/");
         PathBuf::from(restored_path)
     } else {
@@ -224,9 +223,13 @@ pub fn get_session_info(session_path: &Path) -> Result<SessionInfo> {
 
     // Stream parse JSONL - summaries at top, metadata throughout
     for (line_num, line) in reader.lines().enumerate() {
-        let line = line.with_context(||
-            format!("Failed to read line {} from {}", line_num + 1, session_path.display())
-        )?;
+        let line = line.with_context(|| {
+            format!(
+                "Failed to read line {} from {}",
+                line_num + 1,
+                session_path.display()
+            )
+        })?;
 
         if line.trim().is_empty() {
             continue;
@@ -343,8 +346,7 @@ pub fn get_recent_sessions(limit: usize) -> Result<Vec<SessionInfo>> {
         return Ok(Vec::new());
     }
 
-    let file = File::open(&history_path)
-        .context("Failed to open history.jsonl")?;
+    let file = File::open(&history_path).context("Failed to open history.jsonl")?;
 
     let reader = BufReader::new(file);
     let mut entries: Vec<HistoryEntry> = Vec::new();
@@ -368,7 +370,8 @@ pub fn get_recent_sessions(limit: usize) -> Result<Vec<SessionInfo>> {
     let mut seen = std::collections::HashSet::new();
     let mut sessions = Vec::new();
 
-    for entry in entries.into_iter().take(limit * 3) { // Over-fetch to handle duplicates
+    for entry in entries.into_iter().take(limit * 3) {
+        // Over-fetch to handle duplicates
         // Skip entries without session ID
         let session_id = match entry.session_id {
             Some(id) if !id.is_empty() => id,
@@ -502,11 +505,17 @@ pub fn encoded_to_path(encoded: &str) -> PathBuf {
 /// - If new_path is nested inside old_path
 /// - If a project folder already exists at the new path (conflict)
 pub fn migrate_project(old_path: &Path, new_path: &Path, dry_run: bool) -> Result<MigrateResult> {
-    tracing::debug!(?old_path, ?new_path, dry_run, "starting project migration");
+    checkpoint!(
+        "migration_start",
+        old = old_path.to_string_lossy().as_ref(),
+        new = new_path.to_string_lossy().as_ref(),
+        dry_run = dry_run
+    );
 
     // Canonicalize paths for comparison (resolve symlinks, remove trailing slashes)
     // Old path must exist - canonicalize it
-    let old_canonical = old_path.canonicalize()
+    let old_canonical = old_path
+        .canonicalize()
         .unwrap_or_else(|_| old_path.to_path_buf());
     // New path may not exist yet - make it absolute without requiring existence
     let new_canonical = new_path.canonicalize().unwrap_or_else(|_| {
@@ -531,8 +540,11 @@ pub fn migrate_project(old_path: &Path, new_path: &Path, dry_run: bool) -> Resul
     // Validation: new path cannot be nested inside old path
     if new_canonical.starts_with(&old_canonical) {
         tracing::debug!("new path is nested inside old path, aborting");
-        bail!("Destination cannot be nested inside source: {} is inside {}",
-            new_path.display(), old_path.display());
+        bail!(
+            "Destination cannot be nested inside source: {} is inside {}",
+            new_path.display(),
+            old_path.display()
+        );
     }
 
     let old_encoded = path_to_encoded(&old_canonical);
@@ -554,10 +566,12 @@ pub fn migrate_project(old_path: &Path, new_path: &Path, dry_run: bool) -> Resul
     // Check for conflicts at destination
     if new_project_dir.exists() && !dry_run {
         tracing::debug!("destination project folder already exists, aborting");
-        bail!("Project folder already exists at destination: {}\n\
+        bail!(
+            "Project folder already exists at destination: {}\n\
                This would overwrite existing conversation history.\n\
                Either delete the destination folder or use a different path.",
-            new_project_dir.display());
+            new_project_dir.display()
+        );
     }
 
     let mut result = MigrateResult {
@@ -584,42 +598,60 @@ pub fn migrate_project(old_path: &Path, new_path: &Path, dry_run: bool) -> Resul
                 tracing::debug!(session_file = ?session.path(), "found session file");
             }
         }
-        tracing::debug!(sessions_count = result.sessions_preserved, "counted session files");
+        tracing::debug!(
+            sessions_count = result.sessions_preserved,
+            "counted session files"
+        );
 
         if !dry_run {
-            tracing::debug!(?old_project_dir, ?new_project_dir, "renaming project folder");
-            fs::rename(&old_project_dir, &new_project_dir)
-                .with_context(|| format!(
+            tracing::debug!(
+                ?old_project_dir,
+                ?new_project_dir,
+                "renaming project folder"
+            );
+            fs::rename(&old_project_dir, &new_project_dir).with_context(|| {
+                format!(
                     "Failed to rename project folder: {} → {}",
                     old_project_dir.display(),
                     new_project_dir.display()
-                ))?;
+                )
+            })?;
             tracing::debug!("project folder renamed successfully");
         } else {
             tracing::debug!("dry run: would rename project folder");
         }
         result.project_folder_renamed = true;
     } else {
-        tracing::debug!(?old_project_dir, "project folder does not exist, skipping rename");
+        tracing::debug!(
+            ?old_project_dir,
+            "project folder does not exist, skipping rename"
+        );
     }
 
     // Step 2: Update history.jsonl
     let history_path = claude_base().join("history.jsonl");
-    tracing::debug!(?history_path, exists = history_path.exists(), "checking history.jsonl");
+    tracing::debug!(
+        ?history_path,
+        exists = history_path.exists(),
+        "checking history.jsonl"
+    );
 
     if history_path.exists() {
-        result.history_entries_updated = update_history_paths(
-            &history_path,
-            &old_canonical,
-            &new_canonical,
-            dry_run,
-        )?;
-        tracing::debug!(entries_updated = result.history_entries_updated, "history.jsonl processed");
+        result.history_entries_updated =
+            update_history_paths(&history_path, &old_canonical, &new_canonical, dry_run)?;
+        tracing::debug!(
+            entries_updated = result.history_entries_updated,
+            "history.jsonl processed"
+        );
     } else {
         tracing::debug!("history.jsonl does not exist, skipping");
     }
 
-    tracing::debug!(?result, "migration complete");
+    checkpoint!(
+        "migration_complete",
+        folders_renamed = result.project_folder_renamed,
+        history_updated = result.history_entries_updated
+    );
     Ok(result)
 }
 
@@ -642,10 +674,15 @@ fn update_history_paths(
     new_path: &Path,
     dry_run: bool,
 ) -> Result<usize> {
-    tracing::debug!(?history_path, ?old_path, ?new_path, dry_run, "updating history paths");
+    tracing::debug!(
+        ?history_path,
+        ?old_path,
+        ?new_path,
+        dry_run,
+        "updating history paths"
+    );
 
-    let file = File::open(history_path)
-        .context("Failed to open history.jsonl")?;
+    let file = File::open(history_path).context("Failed to open history.jsonl")?;
 
     let reader = BufReader::new(file);
     let mut updated_lines = Vec::new();
@@ -721,8 +758,7 @@ fn update_history_paths(
         let temp_path = history_path.with_extension("jsonl.tmp");
         tracing::debug!(?temp_path, "writing updated history to temp file");
 
-        let temp_file = File::create(&temp_path)
-            .context("Failed to create temp history file")?;
+        let temp_file = File::create(&temp_path).context("Failed to create temp history file")?;
         let mut writer = BufWriter::new(temp_file);
 
         for line in &updated_lines {
@@ -730,17 +766,93 @@ fn update_history_paths(
         }
         writer.flush()?;
 
-        tracing::debug!(?temp_path, ?history_path, "atomically replacing history.jsonl");
-        fs::rename(&temp_path, history_path)
-            .context("Failed to replace history.jsonl")?;
+        tracing::debug!(
+            ?temp_path,
+            ?history_path,
+            "atomically replacing history.jsonl"
+        );
+        fs::rename(&temp_path, history_path).context("Failed to replace history.jsonl")?;
         tracing::debug!("history.jsonl updated successfully");
     } else if dry_run && update_count > 0 {
-        tracing::debug!(update_count, "dry run: would update {} entries", update_count);
+        tracing::debug!(
+            update_count,
+            "dry run: would update {} entries",
+            update_count
+        );
     } else {
         tracing::debug!("no entries to update");
     }
 
     Ok(update_count)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Plan/Todo Extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Todo item from Claude Code's internal state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: String,
+    #[serde(rename = "activeForm")]
+    pub active_form: Option<String>,
+}
+
+/// Find the JSONL transcript path for a given session ID
+///
+/// Searches all project directories for a matching session file.
+pub fn find_session_transcript(session_id: &str) -> Result<Option<PathBuf>> {
+    for project_dir in list_projects()? {
+        let session_path = project_dir.join(format!("{}.jsonl", session_id));
+        if session_path.exists() {
+            return Ok(Some(session_path));
+        }
+    }
+    Ok(None)
+}
+
+/// Extract the latest todos from a session transcript
+///
+/// Reads the JSONL file and returns the most recent `todos` field found.
+/// Returns empty vec if no todos exist in the transcript.
+pub fn get_session_todos(transcript_path: &Path) -> Result<Vec<TodoItem>> {
+    let file = File::open(transcript_path)
+        .with_context(|| format!("Failed to open transcript: {}", transcript_path.display()))?;
+
+    let reader = BufReader::new(file);
+    let mut latest_todos: Vec<TodoItem> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse as generic value to check for todos field
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(todos) = entry.get("todos") {
+                if let Ok(items) = serde_json::from_value::<Vec<TodoItem>>(todos.clone()) {
+                    // Keep the most recent todos (later in file = more recent)
+                    if !items.is_empty() {
+                        latest_todos = items;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(latest_todos)
+}
+
+/// Get todos for a session by ID
+///
+/// Convenience function that finds the transcript and extracts todos.
+pub fn get_todos_by_session_id(session_id: &str) -> Result<Vec<TodoItem>> {
+    match find_session_transcript(session_id)? {
+        Some(path) => get_session_todos(&path),
+        None => bail!("Session not found: {}", session_id),
+    }
 }
 
 #[cfg(test)]

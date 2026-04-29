@@ -1,0 +1,9 @@
+{
+  "name": "babel",
+  "version": "0.1.0",
+  "description": "Babel telemetry hooks — wires Claude Code panes into babel's session tracker + richmon indicator (orange dot per pane state)",
+  "author": { "name": "nuck" },
+  "license": "MIT",
+  "keywords": ["claude-code", "babel", "telemetry", "richmon", "kitty"],
+  "hooks": "./hooks/claude.json"
+}

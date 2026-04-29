@@ -7,11 +7,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use tracing::instrument;
+use vtr::trace_error;
 
 use claude_babel::core::BabelCore;
-use claude_babel::utility::claude_discovery::enrich_window;
+use claude_babel::utility::agent_discovery::enrich_pane;
 
-use super::{Target, resolve_target};
+use super::{resolve_target, Target};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Title Management
@@ -24,17 +25,17 @@ use super::{Target, resolve_target};
 /// (the "✳ Summary" format that Claude Code uses).
 #[instrument(level = "debug", skip(core, title))]
 pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str>) -> Result<()> {
-    let window_ids = resolve_target(core, target).await?;
+    let pane_ids = resolve_target(core, target).await?;
 
-    if window_ids.is_empty() {
-        println!("No Claude panes found");
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
         return Ok(());
     }
 
-    let mut windows = core.windows().await?;
+    let mut windows = core.panes().await?;
 
-    for window_id in window_ids {
-        let window = windows.iter_mut().find(|w| w.id() == window_id);
+    for pane_id in pane_ids {
+        let window = windows.iter_mut().find(|w| w.id() == pane_id);
 
         let new_title = if let Some(custom) = title {
             // Use custom title as-is
@@ -43,11 +44,12 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
             // Auto-determine from session
             if let Some(win) = window {
                 // Enrich to get session info if not already loaded
-                let _ = enrich_window(win);
+                let _ = enrich_pane(win);
 
                 if let Some(ref info) = win.session_info {
                     // Use first summary from session
-                    info.summaries.first()
+                    info.summaries
+                        .first()
                         .map(|s| format!("✳ {}", s.summary))
                         .unwrap_or_else(|| win.title.clone())
                 } else {
@@ -55,16 +57,17 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
                     continue;
                 }
             } else {
-                println!("Window {} not found", window_id);
+                println!("Window {} not found", pane_id);
                 continue;
             }
         };
 
         // Set the title via BabelCore
-        core.set_title(window_id, &new_title).await
-            .with_context(|| format!("Failed to set title for window {}", window_id))?;
+        core.set_title(pane_id, &new_title)
+            .await
+            .with_context(|| format!("Failed to set title for window {}", pane_id))?;
 
-        println!("Set title for window {}: {}", window_id, new_title);
+        println!("Set title for window {}: {}", pane_id, new_title);
     }
 
     Ok(())
@@ -74,26 +77,26 @@ pub async fn cmd_set_title(core: &BabelCore, target: &Target, title: Option<&str
 // Window Focus
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Focus a Claude pane - by ID or interactive scrollparse-pager picker
+/// Focus an agent pane - by ID or interactive scrollparse-pager picker
 ///
 /// With --content flag, enables searching window scrollback content.
 /// Without it, searches window titles only (faster).
 #[instrument(level = "debug", skip(core))]
-pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: bool) -> Result<()> {
+pub async fn cmd_focus(core: &BabelCore, pane_id: Option<u64>, content_mode: bool) -> Result<()> {
     // Direct focus if ID provided
-    if let Some(id) = window_id {
+    if let Some(id) = pane_id {
         return focus_by_id(core, id).await;
     }
 
-    // Get all Claude panes
-    let windows = core.windows().await?;
+    // Get all agent panes
+    let windows = core.panes().await?;
     if windows.is_empty() {
-        println!("No Claude panes found");
+        println!("No agent panes found");
         return Ok(());
     }
 
     // Format windows for pager consumption
-    let input = format_windows_for_pager(&windows, content_mode)?;
+    let input = format_windows_for_pager(&windows, content_mode).await?;
 
     // Launch scrollparse-pager in window selection mode
     let mut child = std::process::Command::new("scrollparse-pager")
@@ -134,14 +137,14 @@ pub async fn cmd_focus(core: &BabelCore, window_id: Option<u64>, content_mode: b
     focus_by_id(core, selected_id).await
 }
 
-/// Format ClaudePane list for scrollparse-pager consumption
+/// Format AgentPane list for scrollparse-pager consumption
 ///
 /// Output format is JSONL with __window__ wrapper:
 /// {"__window__": {"id": 42, "title": "...", "ws": 1, "cwd": "...", "focused": false}}
 ///
 /// If include_content=true, also fetches scrollback for each window (slow).
-fn format_windows_for_pager(
-    windows: &[claude_babel::utility::claude_discovery::ClaudePane],
+async fn format_windows_for_pager(
+    windows: &[claude_babel::utility::agent_discovery::AgentPane],
     include_content: bool,
 ) -> Result<String> {
     use serde_json::json;
@@ -163,7 +166,7 @@ fn format_windows_for_pager(
         // NOTE: This fetches scrollback for EVERY window, making it slower.
         // Trade-off: slower startup vs. ability to search content.
         if include_content {
-            if let Ok(scrollback) = win.scrollback() {
+            if let Ok(scrollback) = win.scrollback().await {
                 obj["__window__"]["content"] = json!(scrollback);
             }
         }
@@ -176,10 +179,11 @@ fn format_windows_for_pager(
 
 /// Focus a window by its kitty ID (via BabelCore)
 #[instrument(level = "debug", skip(core))]
-async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
-    core.focus(window_id).await
+async fn focus_by_id(core: &BabelCore, pane_id: u64) -> Result<()> {
+    core.focus(pane_id)
+        .await
         .context("Failed to focus window")?;
-    println!("Focused window {}", window_id);
+    println!("Focused window {}", pane_id);
     Ok(())
 }
 
@@ -192,8 +196,12 @@ async fn focus_by_id(core: &BabelCore, window_id: u64) -> Result<()> {
 /// Target can be a window ID or "." for current window.
 /// "*" (all) is not supported - use a specific target.
 #[instrument(level = "debug", skip(core))]
-pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option<usize>) -> Result<()> {
-    let window_id = match target {
+pub async fn cmd_get_scrollback(
+    core: &BabelCore,
+    target: &Target,
+    lines: Option<usize>,
+) -> Result<()> {
+    let pane_id = match target {
         Target::Window(id) => *id,
         Target::Current => {
             let (id, _socket) = super::current_pane_info()?;
@@ -204,7 +212,9 @@ pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option
         }
     };
 
-    let scrollback = core.scrollback(window_id, lines).await
+    let scrollback = core
+        .scrollback(pane_id, lines)
+        .await
         .context("Failed to get scrollback")?;
     print!("{}", scrollback);
     Ok(())
@@ -225,18 +235,21 @@ pub async fn cmd_get_scrollback(core: &BabelCore, target: &Target, lines: Option
 /// - This enables broadcast without losing in-progress inputs
 #[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
-    let window_ids = resolve_target(core, target).await?;
+    let pane_ids = resolve_target(core, target).await?;
 
-    if window_ids.is_empty() {
-        println!("No Claude panes found");
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
         return Ok(());
     }
 
     // Check for pending input unless --force
     if !force {
-        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        let windows_with_pending = check_pending_inputs(core, &pane_ids).await?;
         if !windows_with_pending.is_empty() {
-            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            println!(
+                "⚠ Aborted: {} window(s) have unsent text in the input area:",
+                windows_with_pending.len()
+            );
             for (id, text) in &windows_with_pending {
                 if let Some(t) = text {
                     println!("  Window {}: \"{}\"", id, truncate(t, 40));
@@ -251,10 +264,11 @@ pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool
         }
     }
 
-    for window_id in window_ids {
-        core.send(window_id, text).await
-            .with_context(|| format!("Failed to send text to window {}", window_id))?;
-        println!("Sent to window {}", window_id);
+    for pane_id in pane_ids {
+        core.send(pane_id, text)
+            .await
+            .with_context(|| format!("Failed to send text to window {}", pane_id))?;
+        println!("Sent to window {}", pane_id);
     }
     Ok(())
 }
@@ -265,18 +279,21 @@ pub async fn cmd_send(core: &BabelCore, target: &Target, text: &str, force: bool
 /// has pending input, the operation is aborted unless force=true.
 #[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool) -> Result<()> {
-    let window_ids = resolve_target(core, target).await?;
+    let pane_ids = resolve_target(core, target).await?;
 
-    if window_ids.is_empty() {
-        println!("No Claude panes found");
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
         return Ok(());
     }
 
     // Check for pending input unless --force
     if !force {
-        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        let windows_with_pending = check_pending_inputs(core, &pane_ids).await?;
         if !windows_with_pending.is_empty() {
-            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            println!(
+                "⚠ Aborted: {} window(s) have unsent text in the input area:",
+                windows_with_pending.len()
+            );
             for (id, text) in &windows_with_pending {
                 if let Some(t) = text {
                     println!("  Window {}: \"{}\"", id, truncate(t, 40));
@@ -289,15 +306,16 @@ pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool
         }
     }
 
-    for window_id in window_ids {
-        core.type_text(window_id, text).await
-            .with_context(|| format!("Failed to type text to window {}", window_id))?;
-        println!("Typed to window {}", window_id);
+    for pane_id in pane_ids {
+        core.type_text(pane_id, text)
+            .await
+            .with_context(|| format!("Failed to type text to window {}", pane_id))?;
+        println!("Typed to window {}", pane_id);
     }
     Ok(())
 }
 
-/// Broadcast text to all Claude panes with Enter
+/// Broadcast text to all agent panes with Enter
 ///
 /// This is a convenience wrapper around send with target=*.
 /// If any window has pending input, the broadcast is aborted unless force=true.
@@ -309,30 +327,43 @@ pub async fn cmd_type(core: &BabelCore, target: &Target, text: &str, force: bool
 /// - This enables safe broadcast without losing work-in-progress
 #[instrument(level = "debug", skip(core, text))]
 pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<()> {
-    let windows = core.windows().await?;
+    let windows = core.panes().await?;
 
     if windows.is_empty() {
-        println!("No Claude panes found");
+        println!("No agent panes found");
         return Ok(());
     }
 
-    let window_ids: Vec<u64> = windows.iter().map(|w| w.id()).collect();
-    println!("Broadcasting to {} window(s)...", window_ids.len());
+    let pane_ids: Vec<u64> = windows.iter().map(|w| w.id()).collect();
+    println!("Broadcasting to {} window(s)...", pane_ids.len());
 
     // Check for pending input unless --force
     if !force {
-        let windows_with_pending = check_pending_inputs(core, &window_ids).await?;
+        let windows_with_pending = check_pending_inputs(core, &pane_ids).await?;
         if !windows_with_pending.is_empty() {
-            println!("⚠ Aborted: {} window(s) have unsent text in the input area:", windows_with_pending.len());
+            println!(
+                "⚠ Aborted: {} window(s) have unsent text in the input area:",
+                windows_with_pending.len()
+            );
             for (id, pending_text) in &windows_with_pending {
-                let title = windows.iter()
+                let title = windows
+                    .iter()
                     .find(|w| w.id() == *id)
                     .map(|w| w.title.as_str())
                     .unwrap_or("Unknown");
                 if let Some(t) = pending_text {
-                    println!("  {} ({}): \"{}\"", id, truncate(title, 20), truncate(t, 30));
+                    println!(
+                        "  {} ({}): \"{}\"",
+                        id,
+                        truncate(title, 20),
+                        truncate(t, 30)
+                    );
                 } else {
-                    println!("  {} ({}): (pending input detected)", id, truncate(title, 20));
+                    println!(
+                        "  {} ({}): (pending input detected)",
+                        id,
+                        truncate(title, 20)
+                    );
                 }
             }
             println!("\nUse --force to broadcast anyway (will overwrite pending input)");
@@ -343,36 +374,46 @@ pub async fn cmd_broadcast(core: &BabelCore, text: &str, force: bool) -> Result<
     let mut success_count = 0;
     let mut fail_count = 0;
 
-    for window_id in window_ids {
-        match core.send(window_id, text).await {
+    for pane_id in pane_ids {
+        match core.send(pane_id, text).await {
             Ok(()) => {
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  Failed window {}: {}", window_id, e);
+                eprintln!("  Failed window {}: {}", pane_id, e);
                 fail_count += 1;
             }
         }
     }
 
-    println!("Broadcast complete: {} succeeded, {} failed", success_count, fail_count);
+    println!(
+        "Broadcast complete: {} succeeded, {} failed",
+        success_count, fail_count
+    );
     Ok(())
 }
 
 /// Check which windows have pending input
 ///
-/// Returns a list of (window_id, pending_text) for windows with unsent input.
+/// Returns a list of (pane_id, pending_text) for windows with unsent input.
 #[instrument(level = "debug", skip(core))]
-async fn check_pending_inputs(core: &BabelCore, window_ids: &[u64]) -> Result<Vec<(u64, Option<String>)>> {
+async fn check_pending_inputs(
+    core: &BabelCore,
+    pane_ids: &[u64],
+) -> Result<Vec<(u64, Option<String>)>> {
     let mut pending = Vec::new();
 
-    for &window_id in window_ids {
-        match core.has_pending_input(window_id).await {
-            Ok((true, text)) => pending.push((window_id, text)),
+    for &pane_id in pane_ids {
+        match core.has_pending_input(pane_id).await {
+            Ok((true, text)) => pending.push((pane_id, text)),
             Ok((false, _)) => {}
             Err(e) => {
                 // Log but don't fail - we'll allow the operation if we can't check
-                tracing::debug!(window_id, error = %e, "Failed to check pending input");
+                trace_error!(
+                    "pending_input_check_failed",
+                    pane_id = format!("{}", pane_id),
+                    error = format!("{}", e)
+                );
             }
         }
     }
@@ -380,12 +421,19 @@ async fn check_pending_inputs(core: &BabelCore, window_ids: &[u64]) -> Result<Ve
     Ok(pending)
 }
 
-/// Truncate a string for display
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+/// Truncate a string for display (UTF-8 safe)
+fn truncate(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
+        // Find byte boundary at max_chars - 1 characters
+        let boundary = s
+            .char_indices()
+            .nth(max_chars.saturating_sub(1))
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}…", &s[..boundary])
     }
 }
 
@@ -396,17 +444,18 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// Set icon (emoji tag) for window(s) (via BabelCore)
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Result<()> {
-    let window_ids = resolve_target(core, target).await?;
+    let pane_ids = resolve_target(core, target).await?;
 
-    if window_ids.is_empty() {
-        println!("No Claude panes found");
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
         return Ok(());
     }
 
-    for window_id in window_ids {
-        core.set_icon(window_id, icon).await
-            .with_context(|| format!("Failed to set icon for window {}", window_id))?;
-        println!("Set icon for window {}: {}", window_id, icon);
+    for pane_id in pane_ids {
+        core.set_icon(pane_id, icon)
+            .await
+            .with_context(|| format!("Failed to set icon for window {}", pane_id))?;
+        println!("Set icon for window {}: {}", pane_id, icon);
     }
     Ok(())
 }
@@ -414,17 +463,18 @@ pub async fn cmd_set_icon(core: &BabelCore, target: &Target, icon: &str) -> Resu
 /// Mark window(s) as read (via BabelCore)
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
-    let window_ids = resolve_target(core, target).await?;
+    let pane_ids = resolve_target(core, target).await?;
 
-    if window_ids.is_empty() {
-        println!("No Claude panes found");
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
         return Ok(());
     }
 
-    for window_id in window_ids {
-        core.mark_read(window_id).await
-            .with_context(|| format!("Failed to mark window {} as read", window_id))?;
-        println!("Marked window {} as read", window_id);
+    for pane_id in pane_ids {
+        core.mark_read(pane_id)
+            .await
+            .with_context(|| format!("Failed to mark window {} as read", pane_id))?;
+        println!("Marked window {} as read", pane_id);
     }
     Ok(())
 }
@@ -433,7 +483,7 @@ pub async fn cmd_set_read(core: &BabelCore, target: &Target) -> Result<()> {
 // Fire-and-Forget Sessions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fire a prompt to Claude in a detached background session
+/// Fire a prompt to an agent in a detached background session
 #[instrument(level = "debug", skip(core, prompt))]
 pub async fn cmd_fire(
     core: &mut BabelCore,
@@ -441,8 +491,10 @@ pub async fn cmd_fire(
     workdir: Option<&Path>,
     ambient: Option<String>,
 ) -> Result<()> {
-    let task = core.fire(prompt, workdir, ambient).await
-        .context("Failed to fire Claude session")?;
+    let task = core
+        .fire(prompt, workdir, ambient)
+        .await
+        .context("Failed to fire agent session")?;
 
     println!("⚡ Fired: {}", task.prompt_preview);
     println!("   Task ID: {}", task.task_id);
@@ -458,8 +510,7 @@ pub async fn cmd_fire(
 /// List running fire-and-forget tasks
 #[instrument(level = "debug")]
 pub fn cmd_fire_ls(json: bool) -> Result<()> {
-    let tasks = BabelCore::fired_tasks()
-        .context("Failed to list fired tasks")?;
+    let tasks = BabelCore::fired_tasks().context("Failed to list fired tasks")?;
 
     if tasks.is_empty() {
         if !json {
@@ -476,7 +527,10 @@ pub fn cmd_fire_ls(json: bool) -> Result<()> {
         println!("Running fire tasks:\n");
         for task in &tasks {
             let alive = if task.is_alive() { "🟢" } else { "⚫" };
-            println!("{} [{}] PID {} - {}", alive, task.task_id, task.pid, task.prompt_preview);
+            println!(
+                "{} [{}] PID {} - {}",
+                alive, task.task_id, task.pid, task.prompt_preview
+            );
             println!("     {}", task.workdir.display());
             if let Some(ref sound) = task.ambient_sound {
                 println!("     🔊 {}", sound);
@@ -490,8 +544,7 @@ pub fn cmd_fire_ls(json: bool) -> Result<()> {
 /// Clean up finished fire tasks
 #[instrument(level = "debug")]
 pub fn cmd_fire_clean() -> Result<()> {
-    let cleaned = BabelCore::cleanup_fired()
-        .context("Failed to clean up fired tasks")?;
+    let cleaned = BabelCore::cleanup_fired().context("Failed to clean up fired tasks")?;
 
     if cleaned == 0 {
         println!("No finished tasks to clean up");
@@ -512,9 +565,9 @@ pub fn cmd_fire_clean() -> Result<()> {
 /// Connection stays open until Ctrl+C or daemon shutdown.
 #[instrument(level = "debug", skip(filter))]
 pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
+    use claude_babel::utility::ipc::{socket_path, Request, Response};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
-    use claude_babel::utility::ipc::{socket_path, Request, Response};
 
     let sock_path = socket_path();
 
@@ -525,7 +578,9 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
         .with_context(|| format!("Failed to connect to daemon at {}", sock_path.display()))?;
 
     // Send Subscribe request
-    let request = Request::Subscribe { events: filter.clone() };
+    let request = Request::Subscribe {
+        events: filter.clone(),
+    };
     let mut request_json = serde_json::to_string(&request)?;
     request_json.push('\n');
     stream.write_all(request_json.as_bytes()).await?;
@@ -536,15 +591,21 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let response: Response = serde_json::from_str(&line)
-        .context("Failed to parse subscription response")?;
+    let response: Response =
+        serde_json::from_str(&line).context("Failed to parse subscription response")?;
 
     match response {
         Response::Subscribed { subscriber_id } => {
             if filter.is_empty() {
-                eprintln!("Subscribed (id: {}) - streaming all events...", subscriber_id);
+                eprintln!(
+                    "Subscribed (id: {}) - streaming all events...",
+                    subscriber_id
+                );
             } else {
-                eprintln!("Subscribed (id: {}) - filtering: {:?}", subscriber_id, filter);
+                eprintln!(
+                    "Subscribed (id: {}) - filtering: {:?}",
+                    subscriber_id, filter
+                );
             }
             eprintln!("Press Ctrl+C to stop\n");
         }
@@ -602,8 +663,8 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
 /// - JSON: array of {id, title, socket} objects
 #[instrument(level = "debug")]
 pub async fn cmd_target(json: bool) -> Result<()> {
-    use std::process::Command;
     use claude_babel::kitty::get_panes_by_platform_id;
+    use std::process::Command;
 
     // Run slop to get X11 window ID from user click
     // -t 999999: force window selection (not region), disable drag tolerance
@@ -630,7 +691,7 @@ pub async fn cmd_target(json: bool) -> Result<()> {
         .context("Failed to parse X11 window ID from slop")?;
 
     // Map X11 window ID to kitty panes
-    let panes = get_panes_by_platform_id(x11_window_id)?;
+    let panes = get_panes_by_platform_id(x11_window_id).await?;
 
     if panes.is_empty() {
         eprintln!("No kitty panes found in window {}", x11_window_id);
@@ -640,12 +701,17 @@ pub async fn cmd_target(json: bool) -> Result<()> {
 
     if json {
         // JSON output: array of pane info
-        let output: Vec<_> = panes.iter().map(|p| serde_json::json!({
-            "id": p.id,
-            "title": p.title,
-            "socket": p.socket,
-            "cwd": p.cwd,
-        })).collect();
+        let output: Vec<_> = panes
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "socket": p.socket,
+                    "cwd": p.cwd,
+                })
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         // Plain output: space-separated IDs for command substitution
@@ -655,7 +721,11 @@ pub async fn cmd_target(json: bool) -> Result<()> {
 
         // Info on stderr so it doesn't interfere with command substitution
         if panes.len() == 1 {
-            eprintln!("Selected pane {} ({})", panes[0].id, truncate(&panes[0].title, 40));
+            eprintln!(
+                "Selected pane {} ({})",
+                panes[0].id,
+                truncate(&panes[0].title, 40)
+            );
         } else {
             eprintln!("Selected {} panes:", panes.len());
             for p in &panes {
@@ -664,5 +734,177 @@ pub async fn cmd_target(json: bool) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Solo Mode - Isolate Single Pane for Debugging
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Solo a single pane for debugging (isolate one pane, hide others)
+///
+/// When solo mode is enabled, only the specified pane is returned by `babel ls`
+/// and similar commands. This reduces noise when debugging a specific session.
+///
+/// Use `babel solo --off` to restore all panes.
+#[instrument(level = "debug", skip(core))]
+pub async fn cmd_solo(core: &BabelCore, target: Option<&Target>, off: bool) -> Result<()> {
+    if off {
+        // Disable solo mode
+        core.solo(None).await?;
+        println!("Solo mode disabled - all panes restored");
+        Ok(())
+    } else {
+        // Enable solo mode for target
+        let target =
+            target.ok_or_else(|| anyhow::anyhow!("Target required when not using --off"))?;
+
+        let pane_ids = resolve_target(core, target).await?;
+
+        if pane_ids.is_empty() {
+            anyhow::bail!("No agent panes found");
+        }
+
+        if pane_ids.len() > 1 {
+            anyhow::bail!("Solo mode requires a single window. Use a specific window ID or '.' for current window.");
+        }
+
+        let pane_id = pane_ids[0];
+
+        core.solo(Some(pane_id)).await?;
+        println!("Solo mode enabled for window {}", pane_id);
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pane Reboot - Close and Reopen with Same Session (Layout-Preserving)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Reboot agent pane(s) - close and reopen with same session
+///
+/// Holistic reboot that preserves:
+/// - Session ID (conversation continues via `claude -r`)
+/// - Working directory
+/// - Split layout (pane arrangement within OS window)
+/// - Workspace position
+/// - Window geometry
+///
+/// Algorithm:
+/// 1. Capture layout snapshots for all affected OS windows
+/// 2. Group panes by OS window
+/// 3. For each OS window, rebuild the entire split tree:
+///    - Close all panes (OS window closes)
+///    - Spawn first session (creates new OS window)
+///    - Recreate splits with proper --location and --next-to
+/// 4. Restore workspace and geometry
+///
+/// Target can be:
+/// - Window ID (42): reboot specific window
+/// - "*": reboot ALL agent panes
+/// - ".": reboot current window (from KITTY_WINDOW_ID)
+#[instrument(level = "debug", skip(core))]
+pub async fn cmd_reboot(core: &mut BabelCore, target: &Target) -> Result<()> {
+    use claude_babel::layout::{capture_all_layouts, rebuild_os_window_layout};
+
+    let pane_ids = resolve_target(core, target).await?;
+
+    if pane_ids.is_empty() {
+        println!("No agent panes found");
+        return Ok(());
+    }
+
+    // Get all agent panes for metadata lookup
+    let windows = core.panes().await?;
+
+    // Filter to windows that have session IDs (can be rebooted)
+    let rebootable_ids: Vec<u64> = pane_ids
+        .iter()
+        .filter(|&&id| {
+            windows
+                .iter()
+                .find(|w| w.id() == id)
+                .and_then(|w| w.session_id.as_ref())
+                .is_some()
+        })
+        .copied()
+        .collect();
+
+    let skipped = pane_ids.len() - rebootable_ids.len();
+    if skipped > 0 {
+        eprintln!("⚠ Skipping {} pane(s) without session IDs", skipped);
+    }
+
+    if rebootable_ids.is_empty() {
+        println!("No rebootable panes found (all lack session IDs)");
+        return Ok(());
+    }
+
+    // Capture layout snapshots for all affected OS windows
+    println!("Capturing {} pane layout(s)...", rebootable_ids.len());
+    let snapshots = capture_all_layouts(&rebootable_ids, &windows)
+        .await
+        .context("Failed to capture layout snapshots")?;
+
+    if snapshots.is_empty() {
+        println!("No layouts captured - panes may have already closed");
+        return Ok(());
+    }
+
+    println!(
+        "Rebooting {} OS window(s) with {} total pane(s)...",
+        snapshots.len(),
+        snapshots.iter().map(|s| s.panes.len()).sum::<usize>()
+    );
+
+    let mut total_restored = 0;
+    let mut total_failed = 0;
+
+    // Rebuild each OS window
+    for snapshot in &snapshots {
+        let pane_count = snapshot.panes.len();
+        println!(
+            "\n  OS window {} ({} pane{}):",
+            snapshot.os_window_id,
+            pane_count,
+            if pane_count == 1 { "" } else { "s" }
+        );
+
+        match rebuild_os_window_layout(snapshot).await {
+            Ok(result) => {
+                total_restored += result.restored;
+                total_failed += result.failed.len();
+
+                // Print mappings
+                for (old_id, new_id) in &result.id_mapping {
+                    let title = snapshot
+                        .panes
+                        .get(old_id)
+                        .map(|p| truncate(&p.title, 25))
+                        .unwrap_or_else(|| "?".to_string());
+                    println!("    ✓ {} → {} ({})", old_id, new_id, title);
+                }
+
+                // Print failures
+                for err in &result.failed {
+                    eprintln!("    ✗ {}", err);
+                }
+            }
+            Err(e) => {
+                total_failed += pane_count;
+                eprintln!("    ✗ Failed to rebuild: {}", e);
+            }
+        }
+    }
+
+    // Refresh state after all reboots
+    if let Err(e) = core.refresh().await {
+        trace_error!("refresh_after_reboot_failed", error = format!("{}", e));
+    }
+
+    println!(
+        "\nReboot complete: {} restored, {} failed",
+        total_restored, total_failed
+    );
     Ok(())
 }

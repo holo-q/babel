@@ -16,7 +16,7 @@
 //! Claude's conversation files to keep the memories clean and independently preservable.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
 /// The worker's current state—derived from Claude Code hooks
@@ -125,8 +125,7 @@ impl BabelStorage {
 
         // Ensure parent directory exists (~/.local/share/babel)
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create babel data directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create babel data directory")?;
         }
 
         let conn = Connection::open(&db_path)
@@ -143,8 +142,8 @@ impl BabelStorage {
     ///
     /// Uses XDG conventions: ~/.local/share/babel/overlay.db on Linux
     fn db_path() -> Result<PathBuf> {
-        let data_dir = dirs::data_dir()
-            .context("Could not determine user data directory (~/.local/share)")?;
+        let data_dir =
+            dirs::data_dir().context("Could not determine user data directory (~/.local/share)")?;
         Ok(data_dir.join("babel").join("overlay.db"))
     }
 
@@ -156,22 +155,25 @@ impl BabelStorage {
     /// - chapter_history stored as JSON array for flexible list handling
     /// - All metadata fields are nullable except session_id (primary key)
     fn init_schema(&self) -> Result<()> {
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS session_metadata (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS session_metadata (
                 session_id TEXT PRIMARY KEY,
                 icon TEXT,
                 is_read INTEGER DEFAULT 0,
                 chapter_history TEXT,
                 notes TEXT
             )",
-            [],
-        ).context("Failed to create session_metadata table")?;
+                [],
+            )
+            .context("Failed to create session_metadata table")?;
 
         // The tower's ledger of file interactions—which souls touched which paths
         // Built from scrollback parsing of tool invocations (Read, Write, Edit, etc.)
         // Enables institutional memory queries: "who worked on this?" and "what did they touch?"
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS file_touches (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS file_touches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
@@ -181,46 +183,55 @@ impl BabelStorage {
                 touch_count INTEGER DEFAULT 1,
                 UNIQUE(session_id, file_path, operation)
             )",
-            [],
-        ).context("Failed to create file_touches table")?;
+                [],
+            )
+            .context("Failed to create file_touches table")?;
 
         // Index for fast lookup by file path (most common query)
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_file_touches_path ON file_touches(file_path)",
-            [],
-        ).context("Failed to create file_touches path index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_file_touches_path ON file_touches(file_path)",
+                [],
+            )
+            .context("Failed to create file_touches path index")?;
 
         // Index for session queries
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_file_touches_session ON file_touches(session_id)",
-            [],
-        ).context("Failed to create file_touches session index")?;
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_file_touches_session ON file_touches(session_id)",
+                [],
+            )
+            .context("Failed to create file_touches session index")?;
 
         // Scrollback cursor: tracks incremental reading position per window
         // Uses kitty's logical offset system (monotonic, never resets)
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS scrollback_cursors (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS scrollback_cursors (
                 pane_addr TEXT PRIMARY KEY,
                 cursor INTEGER NOT NULL DEFAULT 0,
                 session_id TEXT,
                 last_updated INTEGER NOT NULL
             )",
-            [],
-        ).context("Failed to create scrollback_cursors table")?;
+                [],
+            )
+            .context("Failed to create scrollback_cursors table")?;
 
         // Generated titles: tracks which sessions have babel-generated haiku titles
         // This is how we distinguish "proper" titles from procedural fallbacks.
         // Claude Code may discard extended fields on reserialization, so we maintain
         // our own cache keyed by session_id.
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS generated_titles (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS generated_titles (
                 session_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 generated_at INTEGER NOT NULL,
                 source TEXT NOT NULL DEFAULT 'haiku'
             )",
-            [],
-        ).context("Failed to create generated_titles table")?;
+                [],
+            )
+            .context("Failed to create generated_titles table")?;
 
         // Migration: add hook_state and last_hook_at columns if they don't exist
         // These columns track state from the neural interface (Claude Code hooks)
@@ -241,15 +252,19 @@ impl BabelStorage {
         ).unwrap_or(0) > 0;
 
         if !has_hook_state {
-            self.conn.execute(
-                "ALTER TABLE session_metadata ADD COLUMN hook_state TEXT DEFAULT 'idle'",
-                [],
-            ).context("Failed to add hook_state column")?;
+            self.conn
+                .execute(
+                    "ALTER TABLE session_metadata ADD COLUMN hook_state TEXT DEFAULT 'idle'",
+                    [],
+                )
+                .context("Failed to add hook_state column")?;
 
-            self.conn.execute(
-                "ALTER TABLE session_metadata ADD COLUMN last_hook_at INTEGER",
-                [],
-            ).context("Failed to add last_hook_at column")?;
+            self.conn
+                .execute(
+                    "ALTER TABLE session_metadata ADD COLUMN last_hook_at INTEGER",
+                    [],
+                )
+                .context("Failed to add last_hook_at column")?;
 
             tracing::info!("Migrated session_metadata: added hook_state and last_hook_at columns");
         }
@@ -266,7 +281,7 @@ impl BabelStorage {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
              FROM session_metadata
-             WHERE session_id = ?1"
+             WHERE session_id = ?1",
         )?;
 
         let mut rows = stmt.query(params![session_id])?;
@@ -287,7 +302,7 @@ impl BabelStorage {
             Ok(Some(SessionMetadata {
                 session_id: row.get(0)?,
                 icon: row.get(1)?,
-                is_read: row.get::<_, i32>(2)? != 0,  // SQLite INTEGER to bool
+                is_read: row.get::<_, i32>(2)? != 0, // SQLite INTEGER to bool
                 chapter_history,
                 notes: row.get(4)?,
                 hook_state,
@@ -306,12 +321,14 @@ impl BabelStorage {
     ///
     /// This is how the Captain marks important work, urgent threads, or thematic categories.
     pub fn set_icon(&self, session_id: &str, icon: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO session_metadata (session_id, icon)
+        self.conn
+            .execute(
+                "INSERT INTO session_metadata (session_id, icon)
              VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET icon = ?2",
-            params![session_id, icon],
-        ).context("Failed to set icon")?;
+                params![session_id, icon],
+            )
+            .context("Failed to set icon")?;
         Ok(())
     }
 
@@ -323,12 +340,14 @@ impl BabelStorage {
     ///
     /// Creates a memory record if this soul is not yet known to the tower.
     pub fn mark_read(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO session_metadata (session_id, is_read)
+        self.conn
+            .execute(
+                "INSERT INTO session_metadata (session_id, is_read)
              VALUES (?1, 1)
              ON CONFLICT(session_id) DO UPDATE SET is_read = 1",
-            params![session_id],
-        ).context("Failed to mark session as read")?;
+                params![session_id],
+            )
+            .context("Failed to mark session as read")?;
         Ok(())
     }
 
@@ -338,12 +357,14 @@ impl BabelStorage {
     /// that re-review is needed. Perhaps the work has continued, or discoveries warrant
     /// another pass. The institutional memory reflects that this soul's work is unfinished.
     pub fn mark_unread(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO session_metadata (session_id, is_read)
+        self.conn
+            .execute(
+                "INSERT INTO session_metadata (session_id, is_read)
              VALUES (?1, 0)
              ON CONFLICT(session_id) DO UPDATE SET is_read = 0",
-            params![session_id],
-        ).context("Failed to mark session as unread")?;
+                params![session_id],
+            )
+            .context("Failed to mark session as unread")?;
         Ok(())
     }
 
@@ -367,15 +388,17 @@ impl BabelStorage {
         history.push(chapter.to_string());
 
         // Serialize and update
-        let history_json = serde_json::to_string(&history)
-            .context("Failed to serialize chapter history")?;
+        let history_json =
+            serde_json::to_string(&history).context("Failed to serialize chapter history")?;
 
-        self.conn.execute(
-            "INSERT INTO session_metadata (session_id, chapter_history)
+        self.conn
+            .execute(
+                "INSERT INTO session_metadata (session_id, chapter_history)
              VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET chapter_history = ?2",
-            params![session_id, history_json],
-        ).context("Failed to add chapter to history")?;
+                params![session_id, history_json],
+            )
+            .context("Failed to add chapter to history")?;
 
         Ok(())
     }
@@ -388,12 +411,14 @@ impl BabelStorage {
     /// - "Blocked on API bug #1234"
     /// - "Ready for review"
     pub fn set_notes(&self, session_id: &str, notes: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO session_metadata (session_id, notes)
+        self.conn
+            .execute(
+                "INSERT INTO session_metadata (session_id, notes)
              VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET notes = ?2",
-            params![session_id, notes],
-        ).context("Failed to set notes")?;
+                params![session_id, notes],
+            )
+            .context("Failed to set notes")?;
         Ok(())
     }
 
@@ -436,12 +461,15 @@ impl BabelStorage {
     /// Query institutional memory for all workers who interacted with this path.
     /// Returns (session_id, operation, touch_count, last_seen_at) ordered by recency—
     /// most recent touches first. The tower's ledger of who has handled what.
-    pub fn get_sessions_for_file(&self, file_path: &str) -> Result<Vec<(String, String, i64, i64)>> {
+    pub fn get_sessions_for_file(
+        &self,
+        file_path: &str,
+    ) -> Result<Vec<(String, String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, operation, touch_count, last_seen_at
              FROM file_touches
              WHERE file_path = ?1
-             ORDER BY last_seen_at DESC"
+             ORDER BY last_seen_at DESC",
         )?;
 
         let rows = stmt.query_map(params![file_path], |row| {
@@ -462,12 +490,15 @@ impl BabelStorage {
     /// Query institutional memory for all paths this worker has interacted with.
     /// Returns (file_path, operation, touch_count, last_seen_at) ordered by recency—
     /// most recent touches first. The tower's record of what this soul has handled.
-    pub fn get_files_for_session(&self, session_id: &str) -> Result<Vec<(String, String, i64, i64)>> {
+    pub fn get_files_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(String, String, i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT file_path, operation, touch_count, last_seen_at
              FROM file_touches
              WHERE session_id = ?1
-             ORDER BY last_seen_at DESC"
+             ORDER BY last_seen_at DESC",
         )?;
 
         let rows = stmt.query_map(params![session_id], |row| {
@@ -491,9 +522,9 @@ impl BabelStorage {
     ///
     /// Returns (cursor, session_id) or None if not tracked yet.
     pub fn get_scrollback_cursor(&self, pane_addr: &str) -> Result<Option<(u64, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT cursor, session_id FROM scrollback_cursors WHERE pane_addr = ?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT cursor, session_id FROM scrollback_cursors WHERE pane_addr = ?1")?;
 
         let mut rows = stmt.query(params![pane_addr])?;
 
@@ -519,22 +550,26 @@ impl BabelStorage {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        self.conn.execute(
-            "INSERT INTO scrollback_cursors (pane_addr, cursor, session_id, last_updated)
+        self.conn
+            .execute(
+                "INSERT INTO scrollback_cursors (pane_addr, cursor, session_id, last_updated)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(pane_addr)
              DO UPDATE SET cursor = ?2, session_id = ?3, last_updated = ?4",
-            params![pane_addr, cursor as i64, session_id, now],
-        ).context("Failed to set scrollback cursor")?;
+                params![pane_addr, cursor as i64, session_id, now],
+            )
+            .context("Failed to set scrollback cursor")?;
         Ok(())
     }
 
     /// Remove scrollback cursor for a closed pane
     pub fn remove_scrollback_cursor(&self, pane_addr: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM scrollback_cursors WHERE pane_addr = ?1",
-            params![pane_addr],
-        ).context("Failed to remove scrollback cursor")?;
+        self.conn
+            .execute(
+                "DELETE FROM scrollback_cursors WHERE pane_addr = ?1",
+                params![pane_addr],
+            )
+            .context("Failed to remove scrollback cursor")?;
         Ok(())
     }
 
@@ -552,12 +587,14 @@ impl BabelStorage {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        self.conn.execute(
-            "INSERT INTO generated_titles (session_id, title, generated_at, source)
+        self.conn
+            .execute(
+                "INSERT INTO generated_titles (session_id, title, generated_at, source)
              VALUES (?1, ?2, ?3, 'haiku')
              ON CONFLICT(session_id) DO UPDATE SET title = ?2, generated_at = ?3",
-            params![session_id, title, now],
-        ).context("Failed to set generated title")?;
+                params![session_id, title, now],
+            )
+            .context("Failed to set generated title")?;
         Ok(())
     }
 
@@ -566,9 +603,9 @@ impl BabelStorage {
     /// Returns the title if this session has a babel-generated title,
     /// None if it's using a procedural fallback.
     pub fn get_generated_title(&self, session_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT title FROM generated_titles WHERE session_id = ?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT title FROM generated_titles WHERE session_id = ?1")?;
 
         let mut rows = stmt.query(params![session_id])?;
 
@@ -597,7 +634,7 @@ impl BabelStorage {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
              FROM session_metadata
-             ORDER BY session_id"
+             ORDER BY session_id",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -646,7 +683,7 @@ pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<Sessio
     let mut stmt = conn.prepare(
         "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
          FROM session_metadata
-         WHERE session_id = ?1"
+         WHERE session_id = ?1",
     )?;
 
     let mut rows = stmt.query(params![session_id])?;
@@ -685,7 +722,8 @@ pub fn set_icon(conn: &Connection, session_id: &str, icon: &str) -> Result<()> {
          VALUES (?1, ?2)
          ON CONFLICT(session_id) DO UPDATE SET icon = ?2",
         params![session_id, icon],
-    ).context("Failed to set icon")?;
+    )
+    .context("Failed to set icon")?;
     Ok(())
 }
 
@@ -696,7 +734,8 @@ pub fn mark_read(conn: &Connection, session_id: &str) -> Result<()> {
          VALUES (?1, 1)
          ON CONFLICT(session_id) DO UPDATE SET is_read = 1",
         params![session_id],
-    ).context("Failed to mark session as read")?;
+    )
+    .context("Failed to mark session as read")?;
     Ok(())
 }
 
@@ -707,7 +746,8 @@ pub fn mark_unread(conn: &Connection, session_id: &str) -> Result<()> {
          VALUES (?1, 0)
          ON CONFLICT(session_id) DO UPDATE SET is_read = 0",
         params![session_id],
-    ).context("Failed to mark session as unread")?;
+    )
+    .context("Failed to mark session as unread")?;
     Ok(())
 }
 
@@ -726,17 +766,20 @@ pub fn set_hook_state(conn: &Connection, session_id: &str, state: HookState) -> 
          VALUES (?1, ?2, ?3)
          ON CONFLICT(session_id) DO UPDATE SET hook_state = ?2, last_hook_at = ?3",
         params![session_id, state.as_str(), now],
-    ).context("Failed to set hook state")?;
+    )
+    .context("Failed to set hook state")?;
     Ok(())
 }
 
 /// Get the hook state for a session
 pub fn get_hook_state(conn: &Connection, session_id: &str) -> Result<Option<HookState>> {
-    let result: Option<String> = conn.query_row(
-        "SELECT hook_state FROM session_metadata WHERE session_id = ?1",
-        params![session_id],
-        |row| row.get(0),
-    ).ok();
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT hook_state FROM session_metadata WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .ok();
 
     Ok(result.map(|s| HookState::from_str(&s)))
 }
@@ -753,15 +796,14 @@ pub fn set_generated_title(conn: &Connection, session_id: &str, title: &str) -> 
          VALUES (?1, ?2, ?3, 'haiku')
          ON CONFLICT(session_id) DO UPDATE SET title = ?2, generated_at = ?3",
         params![session_id, title, now],
-    ).context("Failed to set generated title")?;
+    )
+    .context("Failed to set generated title")?;
     Ok(())
 }
 
 /// Check if babel has a haiku-generated title for this session (standalone function)
 pub fn get_generated_title(conn: &Connection, session_id: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT title FROM generated_titles WHERE session_id = ?1"
-    )?;
+    let mut stmt = conn.prepare("SELECT title FROM generated_titles WHERE session_id = ?1")?;
 
     let mut rows = stmt.query(params![session_id])?;
 
@@ -818,7 +860,10 @@ mod tests {
         db.add_chapter(session_id, "Chapter 3").unwrap();
 
         let meta = db.get_metadata(session_id).unwrap().unwrap();
-        assert_eq!(meta.chapter_history, vec!["Chapter 1", "Chapter 2", "Chapter 3"]);
+        assert_eq!(
+            meta.chapter_history,
+            vec!["Chapter 1", "Chapter 2", "Chapter 3"]
+        );
     }
 
     #[test]
@@ -826,10 +871,14 @@ mod tests {
         let db = test_db();
         let session_id = "test-session-4";
 
-        db.set_notes(session_id, "Important session for auth refactor").unwrap();
+        db.set_notes(session_id, "Important session for auth refactor")
+            .unwrap();
 
         let meta = db.get_metadata(session_id).unwrap().unwrap();
-        assert_eq!(meta.notes, Some("Important session for auth refactor".to_string()));
+        assert_eq!(
+            meta.notes,
+            Some("Important session for auth refactor".to_string())
+        );
     }
 
     #[test]
@@ -863,14 +912,16 @@ mod tests {
         assert!(db.get_generated_title(session_id).unwrap().is_none());
 
         // Set a haiku-generated title
-        db.set_generated_title(session_id, "babel: refactoring auth").unwrap();
+        db.set_generated_title(session_id, "babel: refactoring auth")
+            .unwrap();
 
         // Now we should get it back
         let title = db.get_generated_title(session_id).unwrap();
         assert_eq!(title, Some("babel: refactoring auth".to_string()));
 
         // Update the title
-        db.set_generated_title(session_id, "babel: auth complete").unwrap();
+        db.set_generated_title(session_id, "babel: auth complete")
+            .unwrap();
         let title = db.get_generated_title(session_id).unwrap();
         assert_eq!(title, Some("babel: auth complete".to_string()));
     }

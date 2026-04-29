@@ -1,29 +1,110 @@
-//! Hook handlers—the neural interface between Claude Code and Babel
+//! Hook handlers - the normalized lifecycle interface between harnesses and Babel.
 //!
-//! These commands are called by Claude Code hooks to signal lifecycle events.
-//! They receive session_id directly from Claude Code, bypassing fingerprint matching.
-//!
-//! The hooks are the direct neural link: Claude Code whispers, Babel listens.
+//! Harness-specific facts live in the roster (`AgentKind::spec()`): identity
+//! fields, native event names, state transitions, read/unread effects, and
+//! pulse semantics. This module executes those facts. Missing hooks are handled
+//! by the spec being partial, not by scattering special cases through the
+//! daemon or panel clients.
 
-use anyhow::{Result, Context};
-use tracing::{info, debug, warn};
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use tracing::{debug, info, warn};
 
 use claude_babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
 use claude_babel::kitty::{
-    set_border_color_on_socket, reset_border_color_on_socket, default_socket,
+    default_socket, reset_border_color_on_socket, set_border_color_on_socket, PaneAddr,
 };
+use claude_babel::utility::agent_discovery::tag_pane_addr;
+use claude_babel::utility::claude_storage::path_to_encoded;
 use claude_babel::utility::ipc::{send_request, Request};
+use claude_babel::{
+    AgentKind, HarnessSupport, HookEventSpec, HookStateEffect, InstallStrategy, PulseEffect,
+    ReadEffect,
+};
 
-/// Push hook state into daemon memory via IPC (fire-and-forget).
-///
-/// Sends a HookEvent to the daemon so it updates BabelState immediately
-/// instead of waiting for the next poll tick. Falls through silently if
-/// the daemon isn't running — sqlite write is the durable fallback.
-async fn push_to_daemon(session: &str, kitty_id: Option<u64>, hook_state: HookState, hook_type: &str) {
+/// Convert roster-level state effects into persisted hook state.
+fn hook_state_from_effect(effect: HookStateEffect) -> HookState {
+    match effect {
+        HookStateEffect::Working => HookState::Working,
+        HookStateEffect::Idle => HookState::Idle,
+        HookStateEffect::ToolRunning => HookState::ToolRunning,
+    }
+}
+
+/// Current pane address from kitty's hook environment.
+fn current_pane_addr() -> Option<PaneAddr> {
+    let id = std::env::var("KITTY_WINDOW_ID")
+        .ok()
+        .and_then(|v| v.parse().ok())?;
+    let socket = std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| default_socket());
+    Some(PaneAddr::new(socket, id))
+}
+
+fn current_working_dir() -> PathBuf {
+    if let Ok(pwd) = std::env::var("PWD") {
+        PathBuf::from(pwd)
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+}
+
+fn codex_notify_native_key(kitty_id: Option<u64>, cwd: &Path) -> String {
+    let scope = path_to_encoded(cwd);
+    match kitty_id {
+        Some(id) => format!("{}:kitty-{}", scope, id),
+        None => format!("{}:detached", scope),
+    }
+}
+
+fn namespaced_session(agent_kind: AgentKind, native_id: &str) -> String {
+    let expected = format!("{}:", agent_kind.slug());
+    if native_id.starts_with(&expected) {
+        native_id.to_string()
+    } else {
+        agent_kind.session_key(native_id)
+    }
+}
+
+async fn ensure_pane_tag(session: &str, pane_addr: Option<&PaneAddr>) {
+    if let Some(addr) = pane_addr {
+        match tag_pane_addr(addr, session).await {
+            Ok(()) => debug!(
+                session,
+                kitty_id = addr.id,
+                socket = %addr.socket,
+                "Tagged kitty pane for fast future discovery"
+            ),
+            Err(e) => debug!(
+                session,
+                kitty_id = addr.id,
+                socket = %addr.socket,
+                error = %e,
+                "Failed to tag kitty pane"
+            ),
+        }
+    }
+}
+
+/// Push hook flow into daemon memory via IPC.
+async fn push_to_daemon(
+    session: &str,
+    pane_addr: Option<&PaneAddr>,
+    agent_kind: AgentKind,
+    hook_state: Option<HookState>,
+    pulse: PulseEffect,
+    hook_type: &str,
+) {
     let request = Request::HookEvent {
         session: session.to_string(),
-        kitty_id,
+        kitty_id: pane_addr.map(|addr| addr.id),
+        pane_addr: pane_addr.cloned(),
+        agent_kind,
         hook_state,
+        pulse,
         hook_type: hook_type.to_string(),
     };
     match send_request(&request).await {
@@ -32,145 +113,186 @@ async fn push_to_daemon(session: &str, kitty_id: Option<u64>, hook_state: HookSt
     }
 }
 
-/// Unread border colors—amber glow when the worker calls
-const UNREAD_ACTIVE: &str = "#f67400";
-const UNREAD_INACTIVE: &str = "#7a3a00";
+async fn apply_read_effect(
+    session: &str,
+    agent_kind: AgentKind,
+    pane_addr: Option<&PaneAddr>,
+    read: ReadEffect,
+) {
+    let Ok(conn) = init_db() else {
+        return;
+    };
 
-/// Handle Stop hook—worker has finished speaking
-///
-/// Marks session as unread, sets state to Idle, and lights the ring (amber border).
+    match read {
+        ReadEffect::Preserve => {}
+        ReadEffect::MarkRead => {
+            if let Err(e) = mark_read(&conn, session) {
+                warn!(session, error = %e, "Failed to mark session read");
+            }
+            if let Some(addr) = pane_addr {
+                if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id).await {
+                    debug!(error = %e, "Failed to reset unread border");
+                }
+            }
+        }
+        ReadEffect::MarkUnread => {
+            if let Err(e) = mark_unread(&conn, session) {
+                warn!(session, error = %e, "Failed to mark session unread");
+            }
+            if let Some(addr) = pane_addr {
+                let color = agent_kind.accent_color();
+                if let Err(e) =
+                    set_border_color_on_socket(&addr.socket, addr.id, color, color).await
+                {
+                    debug!(error = %e, "Failed to set unread border");
+                }
+            }
+        }
+    }
+}
+
+/// Execute one normalized hook flow.
+async fn execute_hook_flow(
+    session: &str,
+    agent_kind: AgentKind,
+    pane_addr: Option<PaneAddr>,
+    event: &HookEventSpec,
+) -> Result<()> {
+    debug!(
+        agent = %agent_kind,
+        session,
+        native = event.native,
+        canonical = event.canonical,
+        state = ?event.state,
+        read = ?event.read,
+        pulse = ?event.pulse,
+        "Hook flow dispatch"
+    );
+
+    ensure_pane_tag(session, pane_addr.as_ref()).await;
+
+    let hook_state = event.state.map(hook_state_from_effect);
+    if let Some(state) = hook_state {
+        if let Ok(conn) = init_db() {
+            if let Err(e) = set_hook_state(&conn, session, state) {
+                warn!(session, error = %e, "Failed to set hook state");
+            }
+        }
+    }
+
+    apply_read_effect(session, agent_kind, pane_addr.as_ref(), event.read).await;
+    push_to_daemon(
+        session,
+        pane_addr.as_ref(),
+        agent_kind,
+        hook_state,
+        event.pulse,
+        event.canonical,
+    )
+    .await;
+
+    Ok(())
+}
+
+fn synthetic_event(
+    native: &'static str,
+    canonical: &'static str,
+    state: Option<HookStateEffect>,
+    read: ReadEffect,
+    pulse: PulseEffect,
+) -> HookEventSpec {
+    HookEventSpec {
+        native,
+        canonical,
+        state,
+        read,
+        pulse,
+    }
+}
+
+/// Handle Stop hook - worker has finished speaking.
 pub async fn handle_stop(
     session: &str,
     kitty_id: Option<u64>,
     _transcript: Option<&str>,
 ) -> Result<()> {
-    debug!(session, kitty_id, "Hook: Stop received");
-
-    // Update state and read status in one transaction
-    if let Ok(conn) = init_db() {
-        // Set hook state to Idle (worker finished, awaiting input)
-        if let Err(e) = set_hook_state(&conn, session, HookState::Idle) {
-            warn!(session, error = %e, "Failed to set hook state to Idle");
-        }
-
-        // Mark session as unread
-        if let Err(e) = mark_unread(&conn, session) {
-            warn!(session, error = %e, "Failed to mark session unread");
-        } else {
-            info!(session, "Hook: Stop → Idle, unread");
-        }
-    }
-
-    // Light the ring if we have a kitty window ID
-    if let Some(id) = kitty_id {
-        let socket = default_socket();
-        if let Err(e) = set_border_color_on_socket(&socket, id, UNREAD_ACTIVE, UNREAD_INACTIVE).await {
-            debug!(error = %e, "Failed to set unread border (ring)");
-        } else {
-            debug!(id, "Ring lit: amber");
-        }
-    }
-
-    // Push to daemon memory immediately (bypasses poll lag)
-    push_to_daemon(session, kitty_id, HookState::Idle, "stop").await;
-
-    Ok(())
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "Stop",
+        "stop",
+        Some(HookStateEffect::Idle),
+        ReadEffect::MarkUnread,
+        PulseEffect::Finished,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle UserPromptSubmit hook—the Captain speaks
-///
-/// Marks session as read, sets state to Working, and dims the ring (restore theme border).
-pub async fn handle_prompt(
-    session: &str,
-    kitty_id: Option<u64>,
-) -> Result<()> {
-    debug!(session, kitty_id, "Hook: Prompt received");
-
-    // Update state and read status in one transaction
-    if let Ok(conn) = init_db() {
-        // Set hook state to Working (user submitted, Claude processing)
-        if let Err(e) = set_hook_state(&conn, session, HookState::Working) {
-            warn!(session, error = %e, "Failed to set hook state to Working");
-        }
-
-        // Mark session as read
-        if let Err(e) = mark_read(&conn, session) {
-            warn!(session, error = %e, "Failed to mark session read");
-        } else {
-            info!(session, "Hook: Prompt → Working, read");
-        }
-    }
-
-    // Dim the ring if we have a kitty window ID
-    if let Some(id) = kitty_id {
-        let socket = default_socket();
-        if let Err(e) = reset_border_color_on_socket(&socket, id).await {
-            debug!(error = %e, "Failed to reset border (ring)");
-        } else {
-            debug!(id, "Ring dimmed: theme default");
-        }
-    }
-
-    // Push to daemon memory immediately (bypasses poll lag)
-    push_to_daemon(session, kitty_id, HookState::Working, "prompt").await;
-
-    Ok(())
+/// Handle UserPromptSubmit hook.
+pub async fn handle_prompt(session: &str, kitty_id: Option<u64>) -> Result<()> {
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "UserPromptSubmit",
+        "prompt",
+        Some(HookStateEffect::Working),
+        ReadEffect::MarkRead,
+        PulseEffect::Prompt,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle PreToolUse hook—tool execution begins
-///
-/// Sets state to ToolRunning for finer-grained activity tracking.
-/// Logs tool invocations for telemetry.
+/// Handle PreToolUse hook.
 pub async fn handle_pre_tool(
     session: &str,
     kitty_id: Option<u64>,
     tool_name: &str,
     _tool_input: Option<&str>,
 ) -> Result<()> {
-    debug!(session, kitty_id, tool = tool_name, "Hook: PreToolUse received");
-
-    if let Ok(conn) = init_db() {
-        // Set hook state to ToolRunning
-        if let Err(e) = set_hook_state(&conn, session, HookState::ToolRunning) {
-            warn!(session, error = %e, "Failed to set hook state to ToolRunning");
-        } else {
-            debug!(session, tool = tool_name, "Hook: PreToolUse → ToolRunning");
-        }
-    }
-
-    push_to_daemon(session, kitty_id, HookState::ToolRunning, "pre_tool").await;
-
-    Ok(())
+    debug!(
+        session,
+        kitty_id,
+        tool = tool_name,
+        "Hook: PreToolUse received"
+    );
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "PreToolUse",
+        "pre-tool",
+        Some(HookStateEffect::ToolRunning),
+        ReadEffect::Preserve,
+        PulseEffect::Tool,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle PostToolUse hook—tool execution completed
-///
-/// Returns state to Working after tool completes.
+/// Handle PostToolUse hook.
 pub async fn handle_post_tool(
     session: &str,
     kitty_id: Option<u64>,
     tool_name: &str,
     _tool_output: Option<&str>,
 ) -> Result<()> {
-    debug!(session, kitty_id, tool = tool_name, "Hook: PostToolUse received");
-
-    if let Ok(conn) = init_db() {
-        // Return to Working state
-        if let Err(e) = set_hook_state(&conn, session, HookState::Working) {
-            warn!(session, error = %e, "Failed to set hook state to Working");
-        } else {
-            debug!(session, tool = tool_name, "Hook: PostToolUse → Working");
-        }
-    }
-
-    push_to_daemon(session, kitty_id, HookState::Working, "post_tool").await;
-
-    Ok(())
+    debug!(
+        session,
+        kitty_id,
+        tool = tool_name,
+        "Hook: PostToolUse received"
+    );
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "PostToolUse",
+        "post-tool",
+        Some(HookStateEffect::Working),
+        ReadEffect::Preserve,
+        PulseEffect::Tool,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle Notification hook—system alerts
-///
-/// Logs notifications for visibility. Permission notifications may flash the ring.
+/// Handle Notification hook.
 pub async fn handle_notification(
     session: &str,
     kitty_id: Option<u64>,
@@ -184,19 +306,19 @@ pub async fn handle_notification(
         message = message.unwrap_or("<none>"),
         "Hook: Notification received"
     );
-
-    // Future: flash ring for permission notifications
-    // if notif_type == "permission" { ... }
-
-    Ok(())
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "Notification",
+        "notification",
+        None,
+        ReadEffect::Preserve,
+        PulseEffect::Attention,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle SessionStart hook—session begins or resumes
-///
-/// This is the most important hook for the daemon: it carries session_id + kitty_id,
-/// enabling instant pane↔session binding without expensive fingerprint matching.
-/// Before this hook existed, Phase 5 had to fetch full scrollback and compare
-/// against 100 JSONL fingerprints to figure out which session a window belongs to.
+/// Handle SessionStart hook.
 pub async fn handle_session_start(
     session: &str,
     kitty_id: Option<u64>,
@@ -205,22 +327,21 @@ pub async fn handle_session_start(
 ) -> Result<()> {
     info!(
         session,
-        kitty_id,
-        cwd,
-        resumed,
-        "Hook: SessionStart received"
+        kitty_id, cwd, resumed, "Hook: SessionStart received"
     );
-
-    // Push to daemon — this binds kitty_id ↔ session_id immediately,
-    // bypassing the entire fingerprint matching pipeline (Phase 5)
-    push_to_daemon(session, kitty_id, HookState::Working, "session_start").await;
-
-    Ok(())
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "SessionStart",
+        "session-start",
+        Some(HookStateEffect::Working),
+        ReadEffect::Preserve,
+        PulseEffect::Session,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle SubagentStop hook—subagent finished
-///
-/// Logs when Task tool subagents complete their work.
+/// Handle SubagentStop hook.
 pub async fn handle_subagent_stop(
     session: &str,
     kitty_id: Option<u64>,
@@ -228,18 +349,21 @@ pub async fn handle_subagent_stop(
 ) -> Result<()> {
     debug!(
         session,
-        kitty_id,
-        subagent_id,
-        "Hook: SubagentStop received"
+        kitty_id, subagent_id, "Hook: SubagentStop received"
     );
-
-    Ok(())
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "SubagentStop",
+        "subagent-stop",
+        None,
+        ReadEffect::Preserve,
+        PulseEffect::Finished,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// Handle PreCompact hook—transcript compression imminent
-///
-/// Called before Claude Code compresses the conversation transcript.
-/// Good opportunity to archive the full transcript if needed.
+/// Handle PreCompact hook.
 pub async fn handle_pre_compact(
     session: &str,
     kitty_id: Option<u64>,
@@ -247,118 +371,345 @@ pub async fn handle_pre_compact(
 ) -> Result<()> {
     info!(
         session,
-        kitty_id,
-        transcript_path,
-        "Hook: PreCompact received—transcript compression imminent"
+        kitty_id, transcript_path, "Hook: PreCompact received"
     );
-
-    // Future: could archive transcript here before compression
-
-    Ok(())
+    let session = namespaced_session(AgentKind::Claude, session);
+    let pane_addr = kitty_id.map(|id| PaneAddr::new(default_socket(), id));
+    let event = synthetic_event(
+        "PreCompact",
+        "pre-compact",
+        None,
+        ReadEffect::Preserve,
+        PulseEffect::Compact,
+    );
+    execute_hook_flow(&session, AgentKind::Claude, pane_addr, &event).await
 }
 
-/// All 8 Claude Code hook events and their script names
-const HOOK_SCRIPTS: &[(&str, &str)] = &[
-    ("Stop", "on-stop"),
-    ("UserPromptSubmit", "on-prompt"),
-    ("PreToolUse", "on-tool-pre"),
-    ("PostToolUse", "on-tool-post"),
-    ("Notification", "on-notification"),
-    ("SessionStart", "on-session-start"),
-    ("SubagentStop", "on-subagent-stop"),
-    ("PreCompact", "on-pre-compact"),
-];
+#[derive(Debug, Deserialize)]
+struct CodexNotifyPayload {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(
+        default,
+        alias = "last-assistant-message",
+        alias = "last_assistant_message"
+    )]
+    last_assistant_message: Option<String>,
+    #[serde(default, alias = "input-messages", alias = "input_messages")]
+    input_messages: Option<serde_json::Value>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
 
-/// Install babel hooks into Claude Code settings
-///
-/// Modifies ~/.claude/settings.json to register all 8 hook handlers.
-/// Hook scripts live in ~/.config/babel/hooks/ and are written in nu.
-pub async fn install_hooks(dry_run: bool) -> Result<()> {
-    use serde_json::{json, Map, Value};
+/// Handle a Codex notify payload - legacy single-shot turn-complete signal.
+pub async fn handle_codex_notify(payload: &str) -> Result<()> {
+    let payload: CodexNotifyPayload =
+        serde_json::from_str(payload).context("Failed to parse Codex notify payload")?;
 
-    let settings_path = dirs::home_dir()
-        .context("No home directory")?
-        .join(".claude/settings.json");
+    if payload.event_type != "agent-turn-complete" {
+        debug!(event_type = %payload.event_type, "Ignoring unsupported Codex notify event");
+        return Ok(());
+    }
 
-    // Read existing settings
-    let content = std::fs::read_to_string(&settings_path)
-        .context("Failed to read ~/.claude/settings.json")?;
+    let pane_addr = current_pane_addr();
+    let cwd = payload
+        .cwd
+        .map(PathBuf::from)
+        .unwrap_or_else(current_working_dir);
+    let native = codex_notify_native_key(pane_addr.as_ref().map(|addr| addr.id), &cwd);
+    let session = AgentKind::Codex.session_key(&native);
 
-    let mut settings: Value = serde_json::from_str(&content)
-        .context("Failed to parse settings.json")?;
+    info!(
+        session,
+        kitty_id = ?pane_addr.as_ref().map(|addr| addr.id),
+        cwd = %cwd.display(),
+        message = payload.message.as_deref().unwrap_or("<none>"),
+        last_assistant_message = payload.last_assistant_message.as_deref().unwrap_or("<none>"),
+        has_input_messages = payload.input_messages.is_some(),
+        "Codex notify received"
+    );
 
-    // Hook script paths
-    let hooks_dir = dirs::config_dir()
-        .context("No config directory")?
-        .join("babel/hooks");
+    let event = synthetic_event(
+        "agent-turn-complete",
+        "stop",
+        Some(HookStateEffect::Idle),
+        ReadEffect::MarkUnread,
+        PulseEffect::Finished,
+    );
+    execute_hook_flow(&session, AgentKind::Codex, pane_addr, &event).await
+}
 
-    // Verify all hook scripts exist
-    let mut missing = Vec::new();
-    for (_, script_name) in HOOK_SCRIPTS {
-        let script_path = hooks_dir.join(script_name);
-        if !script_path.exists() {
-            missing.push(script_path);
+#[derive(Deserialize)]
+struct HookPayload {
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(rename = "type", default)]
+    notif_type: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    resumed: Option<bool>,
+    #[serde(default)]
+    subagent_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
+}
+
+fn payload_field(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(|v| match v {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+fn extract_identity(raw: &Value, agent_kind: AgentKind) -> Option<String> {
+    let spec = agent_kind.spec();
+    for field in spec.identity_fields {
+        if let Some(value) = payload_field(raw, field) {
+            return Some(value);
         }
     }
+    for env_key in spec.env_identity_fields {
+        if let Ok(value) = std::env::var(env_key) {
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
 
-    if !missing.is_empty() {
-        let missing_list: Vec<_> = missing.iter().map(|p| p.display().to_string()).collect();
-        anyhow::bail!(
-            "Missing hook scripts ({}/{}):\n  {}",
-            missing.len(),
-            HOOK_SCRIPTS.len(),
-            missing_list.join("\n  ")
-        );
+/// Handle a hook event by reading JSON from stdin.
+pub async fn handle_stdin(event: &str, agent_kind: AgentKind) -> Result<()> {
+    let spec = agent_kind.spec();
+    if !matches!(spec.support, HarnessSupport::Supported) {
+        warn!(agent = %agent_kind, "Harness has no direct hook support");
+        return Ok(());
     }
 
-    // Build hooks configuration for all 8 events
-    let mut babel_hooks = Map::new();
-    for (event_name, script_name) in HOOK_SCRIPTS {
-        let script_path = hooks_dir.join(script_name);
-        babel_hooks.insert(
-            (*event_name).to_string(),
+    let Some(event_spec) = spec.event(event) else {
+        warn!(agent = %agent_kind, event, "Unknown hook event for harness");
+        return Ok(());
+    };
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read hook payload from stdin")?;
+
+    let raw: Value = serde_json::from_str(&input).context("Failed to parse hook JSON payload")?;
+    let payload: HookPayload =
+        serde_json::from_value(raw.clone()).context("Failed to parse hook JSON payload")?;
+
+    let native_id = match extract_identity(&raw, agent_kind) {
+        Some(s) => s,
+        None => {
+            debug!(agent = %agent_kind, "No stable identity in payload/env, skipping");
+            return Ok(());
+        }
+    };
+
+    let session = agent_kind.session_key(&native_id);
+    let pane_addr = current_pane_addr();
+    debug!(
+        agent = %agent_kind,
+        event,
+        native = event_spec.native,
+        canonical = event_spec.canonical,
+        session,
+        kitty_id = ?pane_addr.as_ref().map(|addr| addr.id),
+        "Hook stdin dispatch"
+    );
+
+    match event_spec.canonical {
+        "pre-tool" => {
+            let tool = payload.tool_name.as_deref().unwrap_or("unknown");
+            debug!(session, tool, "Hook tool start");
+        }
+        "post-tool" => {
+            let tool = payload.tool_name.as_deref().unwrap_or("unknown");
+            debug!(session, tool, "Hook tool end");
+        }
+        "session-start" => {
+            let cwd = payload.cwd.as_deref().unwrap_or(".");
+            let resumed = payload.resumed.unwrap_or(false);
+            info!(session, cwd, resumed, "Hook session start");
+        }
+        "notification" => {
+            let notif_type = payload.notif_type.as_deref().unwrap_or("unknown");
+            info!(
+                session,
+                notif_type,
+                message = payload.message.as_deref().unwrap_or("<none>"),
+                "Hook notification"
+            );
+        }
+        "subagent-stop" => {
+            debug!(
+                session,
+                subagent_id = payload.subagent_id.as_deref().unwrap_or("unknown"),
+                "Hook subagent stop"
+            );
+        }
+        "pre-compact" => {
+            info!(
+                session,
+                transcript = payload.transcript_path.as_deref().unwrap_or(""),
+                "Hook pre compact"
+            );
+        }
+        _ => {}
+    }
+
+    execute_hook_flow(&session, agent_kind, pane_addr, event_spec).await
+}
+
+fn hook_json_for(agent_kind: AgentKind) -> Value {
+    let spec = agent_kind.spec();
+    let mut hooks = Map::new();
+    for event in spec.events {
+        hooks.insert(
+            event.native.to_string(),
             json!([{
                 "matcher": "",
                 "hooks": [{
                     "type": "command",
-                    "command": script_path.to_string_lossy()
+                    "command": format!("babel hook stdin {} --agent {}", event.canonical, spec.slug)
                 }]
             }]),
         );
     }
+    json!({ "hooks": hooks })
+}
 
-    // Merge hooks into settings
-    if let Some(existing_hooks) = settings.get_mut("hooks") {
-        if let Some(obj) = existing_hooks.as_object_mut() {
-            // Merge our hooks with existing ones
-            for (event, config) in babel_hooks {
-                obj.insert(event, config);
-            }
-        }
+fn hook_toml_for(agent_kind: AgentKind) -> Result<String> {
+    let spec = agent_kind.spec();
+    let mut out = String::new();
+    for event in spec.events {
+        out.push_str("[[hooks]]\n");
+        out.push_str(&format!("event = \"{}\"\n", event.native));
+        out.push_str("matcher = \"\"\n");
+        out.push_str(&format!(
+            "command = \"babel hook stdin {} --agent {}\"\n\n",
+            event.canonical, spec.slug
+        ));
+    }
+    Ok(out)
+}
+
+fn install_claude_hooks(dry_run: bool) -> Result<()> {
+    let settings_path = dirs::home_dir()
+        .context("No home directory")?
+        .join(".claude/settings.json");
+
+    let mut settings: Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)
+            .context("Failed to read ~/.claude/settings.json")?;
+        serde_json::from_str(&content).context("Failed to parse settings.json")?
     } else {
-        settings["hooks"] = Value::Object(babel_hooks);
+        json!({})
+    };
+
+    let generated = hook_json_for(AgentKind::Claude);
+    if let Some(new_hooks) = generated.get("hooks").and_then(|v| v.as_object()) {
+        if let Some(existing_hooks) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for (event, config) in new_hooks {
+                existing_hooks.insert(event.clone(), config.clone());
+            }
+        } else {
+            settings["hooks"] = Value::Object(new_hooks.clone());
+        }
     }
 
-    // Output
     let output = serde_json::to_string_pretty(&settings)?;
-
     if dry_run {
         println!("Would write to {}:\n", settings_path.display());
         println!("{}", output);
         println!("\n(dry run - no changes made)");
     } else {
-        std::fs::write(&settings_path, &output)
-            .context("Failed to write settings.json")?;
-
-        println!("✓ Installed babel hooks to {}", settings_path.display());
-        println!();
-        println!("Hooks registered ({}):", HOOK_SCRIPTS.len());
-        for (event_name, script_name) in HOOK_SCRIPTS {
-            let script_path = hooks_dir.join(script_name);
-            println!("  {} → {}", event_name, script_path.display());
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create ~/.claude directory")?;
         }
-        println!();
-        println!("⚠ Note: Review changes in Claude Code with /hooks command");
+        std::fs::write(&settings_path, &output).context("Failed to write settings.json")?;
+        println!("Installed babel hooks to {}", settings_path.display());
+    }
+    Ok(())
+}
+
+fn print_snippet(agent_kind: AgentKind) -> Result<()> {
+    let spec = agent_kind.spec();
+    println!("{} ({})", spec.display, spec.slug);
+    match spec.install {
+        InstallStrategy::JsonSnippet => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hook_json_for(agent_kind))?
+            );
+        }
+        InstallStrategy::TomlSnippet => {
+            print!("{}", hook_toml_for(agent_kind)?);
+        }
+        InstallStrategy::FilesystemSnippet => {
+            println!(".clinerules/hooks/<Event>/* commands should invoke:");
+            for event in spec.events {
+                println!(
+                    "  {} -> babel hook stdin {} --agent {}",
+                    event.native, event.canonical, spec.slug
+                );
+            }
+        }
+        InstallStrategy::BridgeContract => {
+            println!(
+                "Bridge callback should send JSON to: babel hook stdin <canonical-event> --agent {}",
+                spec.slug
+            );
+            println!("Required identity field: provider-native stable session/task id");
+            println!("Canonical payload:");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "session_id": "stable-native-id",
+                    "tool_name": "optional-tool",
+                    "cwd": "optional-working-directory"
+                }))?
+            );
+        }
+        InstallStrategy::Unsupported => {
+            println!("Unsupported: no stable lifecycle hook + identity surface.");
+        }
+        InstallStrategy::AutoJsonSettings => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hook_json_for(agent_kind))?
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Install or print babel hooks for supported harnesses.
+pub async fn install_hooks(dry_run: bool, targets: &[crate::cli::HookInstallTarget]) -> Result<()> {
+    use crate::cli::HookInstallTarget;
+
+    let targets: Vec<HookInstallTarget> = if targets.is_empty() {
+        vec![HookInstallTarget::Claude, HookInstallTarget::Codex]
+    } else {
+        targets.to_vec()
+    };
+
+    for target in targets {
+        let kind = target.agent_kind();
+        match kind.spec().install {
+            InstallStrategy::AutoJsonSettings if kind == AgentKind::Claude => {
+                install_claude_hooks(dry_run)?
+            }
+            _ => print_snippet(kind)?,
+        }
     }
 
     Ok(())

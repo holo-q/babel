@@ -3,22 +3,37 @@
 //! Parses ~/.claude/projects/{project}/{session}.jsonl into scrollparse::Message stream.
 //! Reuses scrollparse::MessageKind for consistent rendering.
 
-use std::path::Path;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use anyhow::Result;
-use serde::Deserialize;
 use scrollparse::{Message, MessageKind};
+use serde::Deserialize;
 
 /// Content block within a message
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock {
-    Text { text: String },
-    Thinking { thinking: String, #[allow(dead_code)] signature: Option<String> },
-    ToolUse { name: String, input: serde_json::Value, #[allow(dead_code)] id: Option<String> },
-    ToolResult { content: String, #[allow(dead_code)] tool_use_id: Option<String> },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        #[allow(dead_code)]
+        signature: Option<String>,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+        #[allow(dead_code)]
+        id: Option<String>,
+    },
+    ToolResult {
+        content: String,
+        #[allow(dead_code)]
+        tool_use_id: Option<String>,
+    },
     #[serde(other)]
     Other,
 }
@@ -38,7 +53,7 @@ enum ContentValue {
     Blocks(Vec<ContentBlock>),
 }
 
-/// Raw JSONL entry from Claude session file
+/// Raw JSONL entry from agent session file
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum JsonlEntry {
@@ -152,16 +167,14 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Message>> {
 fn extract_content(content: &ContentValue) -> String {
     match content {
         ContentValue::Text(text) => text.clone(),
-        ContentValue::Blocks(blocks) => {
-            blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        ContentValue::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 

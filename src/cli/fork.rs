@@ -3,17 +3,18 @@
 //! - `babel tail [target]` - Output recent transcript from a session
 //! - `babel fork [target]` - Launch Claude primed with another session's context
 //!
-//! The fork command enables "2nd degree mode" - a Claude session that's aware of
+//! The fork command enables "2nd degree mode" - an agent session that's aware of
 //! and can reflect on another session's work. This is particularly useful for:
 //! - Continuing interrupted work with fresh context
 //! - Getting a second opinion on an approach
-//! - Debugging by observing what another Claude did
+//! - Debugging by observing what another agent did
 //! - Meta-analysis of patterns and decisions
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use tracing::instrument;
+use vtr::{boundary, checkpoint};
 
 use claude_babel::core::BabelCore;
 use claude_babel::pager::parse_transcript;
@@ -40,8 +41,8 @@ async fn resolve_fork_target(core: &BabelCore, target: &str) -> Result<String> {
     }
 
     // Case 2: Window ID (pure number)
-    if let Ok(window_id) = target.parse::<u64>() {
-        return find_session_for_window(core, window_id).await;
+    if let Ok(pane_id) = target.parse::<u64>() {
+        return find_session_for_pane(core, pane_id).await;
     }
 
     // Case 3: Looks like a session ID (uuid-ish: 8+ hex chars with dashes)
@@ -93,19 +94,19 @@ async fn find_session_for_cwd(cwd: &Path) -> Result<String> {
 }
 
 /// Find session ID from a window
-async fn find_session_for_window(core: &BabelCore, window_id: u64) -> Result<String> {
-    let windows = core.windows().await?;
+async fn find_session_for_pane(core: &BabelCore, pane_id: u64) -> Result<String> {
+    let windows = core.panes().await?;
 
     for window in windows {
-        if window.id() == window_id {
+        if window.id() == pane_id {
             if let Some(session_id) = &window.session_id {
                 return Ok(session_id.clone());
             }
-            return Err(anyhow!("Window {} has no session ID", window_id));
+            return Err(anyhow!("Window {} has no session ID", pane_id));
         }
     }
 
-    Err(anyhow!("Window {} not found", window_id))
+    Err(anyhow!("Window {} not found", pane_id))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -117,12 +118,7 @@ async fn find_session_for_window(core: &BabelCore, window_id: u64) -> Result<Str
 /// The output format is designed to be both human-readable and machine-parseable,
 /// with clear role prefixes (> for user, ● for assistant, etc.)
 #[instrument(level = "debug", skip(core))]
-pub async fn cmd_tail(
-    core: &BabelCore,
-    target: &str,
-    lines: usize,
-    json: bool,
-) -> Result<()> {
+pub async fn cmd_tail(core: &BabelCore, target: &str, lines: usize, json: bool) -> Result<()> {
     let session_id = resolve_fork_target(core, target).await?;
     let transcript_path = find_session_transcript(&session_id)?
         .ok_or_else(|| anyhow!("Transcript not found for session: {}", session_id))?;
@@ -181,57 +177,122 @@ pub async fn cmd_tail(
 // Fork Command
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The reflection prompt for 2nd degree mode
-///
-/// This primes Claude to introspect on another session's work, recognizing patterns
-/// and being ready to continue, critique, or fork the approach.
-///
-/// The forked Claude knows:
-/// - It was forked from another session (bootstrap circuit)
-/// - The exact command used (`babel fork`)
-/// - How to explore further (`babel tail`, `babel ls`)
-/// - It has fresh eyes and should leverage that perspective
-const FORK_PROMPT: &str = r#"**🔀 FORKED SESSION**
+// ═══════════════════════════════════════════════════════════════════════════════
+// Prompt Library - Configurable fork prompts for different cognitive modes
+// ═══════════════════════════════════════════════════════════════════════════════
 
-You were spawned via `babel fork` to continue or reflect on another Claude's work.
-This is 2nd-degree mode: you have fresh context and can see patterns the working Claude may have missed.
+/// Get a fork prompt by name
+///
+/// Available prompts:
+/// - "reflect" (default) - Metacognitive self-optimization mode
+/// - "continue" - Seamless handoff, minimal meta
+/// - "review" - Code review perspective
+pub fn get_fork_prompt(name: &str) -> &'static str {
+    match name {
+        "continue" => PROMPT_CONTINUE,
+        "review" => PROMPT_REVIEW,
+        _ => PROMPT_REFLECT, // default
+    }
+}
+
+/// Default prompt - 2nd-degree metacognitive observation mode
+///
+/// Optimized for:
+/// - Observing the WORKER, not the work
+/// - Watching cognitive patterns, friction, flow
+/// - Identifying operations that could be hotwired
+/// - Maintenance on metacognition itself
+/// - Noticing new patterns that could become standard
+const PROMPT_REFLECT: &str = r#"**🔀 2ND DEGREE MODE** (reflect)
+
+You are NOT continuing this work. You are OBSERVING a agent worker.
+
+The transcript below is EVIDENCE of cognitive patterns—watch the worker, not the work.
+Your task: optimize Claude's ability to work, not the project itself.
+
+<worker-observation>
+{TRANSCRIPT}
+</worker-observation>
+
+**You are watching for:**
+
+1. **Flow friction** - Where did the worker struggle, loop, or lose momentum?
+2. **Pattern emergence** - What recurring operations could be hotwired into tooling?
+3. **Missing scaffolding** - Should this workflow be documented in `Docs/`?
+4. **CLAUDE.md gaps** - What should the worker have known but didn't?
+5. **Cognitive waste** - Repeated reasoning that could become instant field transmission
+
+**You are NOT here to:**
+- Continue the project work
+- Fix bugs in the code
+- Answer the user's original question
+- Pick up where the worker left off
+
+**You ARE here to:**
+- Observe how the worker navigated
+- Identify friction points in the process
+- Propose hotwiring: new commands, abstractions, patterns
+- Upgrade the system so future workers flow better
+
+**Your Toolbelt:**
+```
+babel fork .              # Spawn another observer
+babel tail .              # More context from cwd
+babel tail <window-id>    # Observe another worker
+babel ls                  # List active workers
+```
+
+Now: What patterns do you observe in this worker's session?"#;
+
+/// Seamless continuation prompt - minimal meta, just handoff
+const PROMPT_CONTINUE: &str = r#"**🔀 FORKED SESSION** (continue mode)
+
+Picking up from another agent session. Seamless handoff.
 
 <source-session>
 {TRANSCRIPT}
 </source-session>
 
-**Bootstrap Protocol:**
+Continue the work. The source agent may still be running in parallel.
+If blocked or need more context: `babel tail .` or `babel ls`
 
-1. **Grok** - Parse the context. What was being built? What's the current state? Any blockers?
-2. **Reflect** - With fresh eyes, what patterns or issues do you notice? Any better approaches?
-3. **Act** - Either continue the work seamlessly, or propose a fork in direction
+What's next?"#;
 
-**Your Toolbelt:**
-```
-babel tail .              # More context from current directory
-babel tail <session-id>   # Tail a specific session
-babel tail <window-id>    # Tail from a running pane
-babel ls                  # List active Claude sessions
-babel history             # Browse conversation history
-```
+/// Code review prompt - critical eye perspective
+const PROMPT_REVIEW: &str = r#"**🔀 FORKED SESSION** (review mode)
 
-You are not starting from scratch—you're picking up the thread. The source Claude may still be running; you're a parallel perspective. If the source asked you to fork for a specific task, focus on that. Otherwise, reflect on what you see and propose next steps.
+You were spawned to review another agent's work with a critical eye.
 
-What's the situation?"#;
+<source-session>
+{TRANSCRIPT}
+</source-session>
+
+**Review Checklist:**
+1. **Correctness** - Does the implementation match the intent?
+2. **Edge cases** - What could break? What's not handled?
+3. **Style** - Does it follow codebase conventions?
+4. **Simplicity** - Is there a simpler approach?
+5. **Security** - Any OWASP concerns? Input validation?
+
+Don't just approve—find something to improve. Fresh eyes catch what working eyes miss.
+
+What issues do you see?"#;
 
 /// Fork from another session with full context injection
 ///
-/// Launches a new Claude session primed with:
+/// Launches a new agent session primed with:
 /// - The transcript from the source session
 /// - The reflection prompt for 2nd degree mode
 /// - Clear annotation of babel commands for further exploration
 ///
+/// Mode can be: "reflect" (default), "continue", or "review"
 /// Location can be: "hsplit", "vsplit", "tab", or "os-window"
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_fork(
     core: &BabelCore,
     target: &str,
     lines: usize,
+    mode: &str,
     location: &str,
 ) -> Result<()> {
     let session_id = resolve_fork_target(core, target).await?;
@@ -269,13 +330,15 @@ pub async fn cmd_fork(
     }
 
     // Build the full prompt with transcript injected
-    let full_prompt = FORK_PROMPT.replace("{TRANSCRIPT}", &transcript_text);
+    let prompt_template = get_fork_prompt(mode);
+    let full_prompt = prompt_template.replace("{TRANSCRIPT}", &transcript_text);
 
-    tracing::info!(
-        source_session = %session_id,
-        ?cwd,
-        transcript_lines = tail_messages.len(),
-        "Forking session"
+    checkpoint!(
+        "fork_start",
+        source_session = session_id,
+        mode = mode,
+        cwd = format!("{:?}", cwd),
+        transcript_lines = format!("{}", tail_messages.len())
     );
 
     let location_label = match location {
@@ -285,7 +348,11 @@ pub async fn cmd_fork(
         _ => "new window",
     };
 
-    eprintln!("🔀 Forking from session {}", &session_id[..8.min(session_id.len())]);
+    eprintln!(
+        "🔀 Forking from session {}",
+        &session_id[..8.min(session_id.len())]
+    );
+    eprintln!("   Mode: {}", mode);
     eprintln!("   Working directory: {}", cwd.display());
     eprintln!("   Context: {} messages", tail_messages.len());
     eprintln!("   Location: {}", location_label);
@@ -297,11 +364,19 @@ pub async fn cmd_fork(
     let script_file = base.with_extension("sh");
 
     std::fs::write(&prompt_file, &full_prompt)?;
-    std::fs::write(&script_file, format!(r#"#!/bin/sh
+    std::fs::write(
+        &script_file,
+        format!(
+            r#"#!/bin/sh
 PROMPT=$(cat '{}')
 rm -f '{}' '{}'
 exec claude "$PROMPT"
-"#, prompt_file.display(), prompt_file.display(), script_file.display()))?;
+"#,
+            prompt_file.display(),
+            prompt_file.display(),
+            script_file.display()
+        ),
+    )?;
 
     // Use kitty @ launch for full control over location
     // SHELL=bash because Claude Code doesn't support zsh
@@ -334,7 +409,7 @@ exec claude "$PROMPT"
     // Target main socket if available
     if let Some(socket) = claude_babel::kitty::main_socket() {
         cmd.args(["--to", &socket]);
-        tracing::debug!(socket, location, "Spawning fork via kitty @");
+        boundary!("kitty", "spawn_fork", socket = socket, location = location);
     }
 
     let output = cmd.output().context("Failed to run kitty @ launch")?;

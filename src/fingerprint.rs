@@ -14,12 +14,18 @@
 //! - All public functions have #[instrument] for entry/exit logging
 //! - Use RUST_LOG=babel=debug for detailed fingerprint diagnostics
 
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use serde::{Deserialize, Serialize};
-use anyhow::{Result, Context};
+use std::path::{Path, PathBuf};
 use tracing::instrument;
+
+// VTR semantic tracing macros for fingerprint extraction
+// - checkpoint!: Milestones reached (fingerprint extraction phases)
+// - scope!: Named regions grouping major operations
+// Note: match_fingerprints uses #[vtr::branches] for auto-injected decision! calls
+use vtr::{checkpoint, scope};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -79,11 +85,11 @@ pub struct SessionFingerprint {
 /// Use threshold filtering (e.g., >= Medium) to avoid false positives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MatchConfidence {
-    None = 0,      // No meaningful overlap—a stranger's marks
-    Low = 1,       // CWD only (weak - many sessions in same project)
-    Medium = 2,    // Single prompt match—one phrase remembered
-    High = 3,      // Multiple prompts or tool sequence match—familiar patterns emerge
-    Exact = 4,     // First prompt + CWD + tools all match—unmistakable recognition
+    None = 0,   // No meaningful overlap—a stranger's marks
+    Low = 1,    // CWD only (weak - many sessions in same project)
+    Medium = 2, // Single prompt match—one phrase remembered
+    High = 3,   // Multiple prompts or tool sequence match—familiar patterns emerge
+    Exact = 4,  // First prompt + CWD + tools all match—unmistakable recognition
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -100,61 +106,58 @@ pub enum MatchConfidence {
 /// Scrollback is analyzed bottom-up for recency (recent prompts are at bottom).
 #[instrument(skip(scrollback), fields(scrollback_len = scrollback.len()))]
 pub fn extract_from_scrollback(scrollback: &str) -> SessionFingerprint {
-    let line_count = scrollback.lines().count();
-    tracing::debug!(scrollback_lines = line_count, "extracting fingerprint from scrollback");
+    scope!("scrollback_extraction", {
+        let line_count = scrollback.lines().count();
+        checkpoint!("scrollback_start", lines = line_count);
 
-    let mut fingerprint = SessionFingerprint::default();
-    let mut user_prompts: Vec<String> = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
+        let mut fingerprint = SessionFingerprint::default();
+        let mut user_prompts: Vec<String> = Vec::new();
+        let mut tools: Vec<String> = Vec::new();
 
-    for (line_num, line) in scrollback.lines().enumerate() {
-        let trimmed = line.trim();
+        for (line_num, line) in scrollback.lines().enumerate() {
+            let trimmed = line.trim();
 
-        // User prompts - multiple patterns
-        if let Some(prompt) = extract_user_prompt(trimmed) {
-            let normalized = normalize_prompt(&prompt);
-            if !normalized.is_empty() {
-                tracing::trace!(line_num, prompt = %normalized, "extracted user prompt");
-                user_prompts.push(normalized);
+            // User prompts - multiple patterns
+            if let Some(prompt) = extract_user_prompt(trimmed) {
+                let normalized = normalize_prompt(&prompt);
+                if !normalized.is_empty() {
+                    tracing::trace!(line_num, prompt = %normalized, "extracted user prompt");
+                    user_prompts.push(normalized);
+                }
+            }
+
+            // Tool calls - pattern: ● ToolName(args)
+            if let Some(tool) = extract_tool_call(trimmed) {
+                tracing::trace!(line_num, tool = %tool, "extracted tool call");
+                tools.push(tool);
+            }
+
+            // CWD - pattern: cwd: /path or similar
+            if let Some(cwd) = extract_cwd(trimmed) {
+                tracing::trace!(line_num, ?cwd, "extracted cwd");
+                fingerprint.cwd = Some(cwd);
             }
         }
 
-        // Tool calls - pattern: ● ToolName(args)
-        if let Some(tool) = extract_tool_call(trimmed) {
-            tracing::trace!(line_num, tool = %tool, "extracted tool call");
-            tools.push(tool);
-        }
+        // Set first prompt (earliest in scrollback)
+        fingerprint.first_prompt = user_prompts.first().cloned();
 
-        // CWD - pattern: cwd: /path or similar
-        if let Some(cwd) = extract_cwd(trimmed) {
-            tracing::trace!(line_num, ?cwd, "extracted cwd");
-            fingerprint.cwd = Some(cwd);
-        }
-    }
+        // Set recent prompts (last 3)
+        fingerprint.recent_prompts = user_prompts.iter().rev().take(3).rev().cloned().collect();
 
-    // Set first prompt (earliest in scrollback)
-    fingerprint.first_prompt = user_prompts.first().cloned();
+        // Set tool sequence (preserve order)
+        fingerprint.tool_sequence = tools;
 
-    // Set recent prompts (last 3)
-    fingerprint.recent_prompts = user_prompts.iter()
-        .rev()
-        .take(3)
-        .rev()
-        .cloned()
-        .collect();
+        checkpoint!(
+            "scrollback_complete",
+            first_prompt = format!("{:?}", fingerprint.first_prompt),
+            prompts = fingerprint.recent_prompts.len(),
+            tools = fingerprint.tool_sequence.len(),
+            cwd = format!("{:?}", fingerprint.cwd)
+        );
 
-    // Set tool sequence (preserve order)
-    fingerprint.tool_sequence = tools;
-
-    tracing::debug!(
-        ?fingerprint.first_prompt,
-        prompts_count = fingerprint.recent_prompts.len(),
-        tools_count = fingerprint.tool_sequence.len(),
-        ?fingerprint.cwd,
-        "scrollback extraction complete"
-    );
-
-    fingerprint
+        fingerprint
+    })
 }
 
 /// Extract user prompt from line if it matches known patterns
@@ -209,19 +212,30 @@ fn extract_user_prompt(line: &str) -> Option<String> {
 /// Only these specific tool names should be extracted from scrollback.
 const KNOWN_TOOLS: &[&str] = &[
     // Core file operations
-    "Read", "Write", "Edit", "Glob", "Grep",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
     // Execution
-    "Bash", "Task", "TaskOutput", "KillShell",
+    "Bash",
+    "Task",
+    "TaskOutput",
+    "KillShell",
     // Notebook
     "NotebookEdit",
     // Web
-    "WebFetch", "WebSearch",
+    "WebFetch",
+    "WebSearch",
     // User interaction
-    "AskUserQuestion", "TodoWrite",
+    "AskUserQuestion",
+    "TodoWrite",
     // Mode switching
-    "EnterPlanMode", "ExitPlanMode",
+    "EnterPlanMode",
+    "ExitPlanMode",
     // Extensions
-    "Skill", "SlashCommand",
+    "Skill",
+    "SlashCommand",
 ];
 
 /// Extract tool call from line if it matches pattern
@@ -267,7 +281,10 @@ fn extract_cwd(line: &str) -> Option<PathBuf> {
     }
 
     // Pattern: Working directory: /path
-    if let Some(cwd_part) = line.strip_prefix("Working directory:").map(|s| s.trim_start()) {
+    if let Some(cwd_part) = line
+        .strip_prefix("Working directory:")
+        .map(|s| s.trim_start())
+    {
         let path = extract_path_from_start(cwd_part);
         if !path.is_empty() {
             return Some(PathBuf::from(path));
@@ -286,7 +303,8 @@ fn extract_cwd(line: &str) -> Option<PathBuf> {
 /// - Tab or other control characters
 fn extract_path_from_start(s: &str) -> &str {
     // Find the first character that terminates the path
-    let end = s.char_indices()
+    let end = s
+        .char_indices()
         .find(|(_, c)| {
             // Non-breaking space (Claude status bar separator)
             *c == '\u{a0}' ||
@@ -359,118 +377,140 @@ struct MessageEntry {
 /// Extracts user prompts and tool calls in order.
 #[instrument(fields(path = %path.display()))]
 pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
-    tracing::debug!(?path, "extracting fingerprint from JSONL");
+    scope!("jsonl_extraction", {
+        checkpoint!("jsonl_start", path = format!("{}", path.display()));
 
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open JSONL file: {}", path.display()))?;
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open JSONL file: {}", path.display()))?;
 
-    let reader = BufReader::new(file);
-    let mut fingerprint = SessionFingerprint::default();
-    let mut user_prompts: Vec<String> = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
-    let mut lines_parsed = 0;
-    let mut lines_skipped = 0;
+        let reader = BufReader::new(file);
+        let mut fingerprint = SessionFingerprint::default();
+        let mut user_prompts: Vec<String> = Vec::new();
+        let mut tools: Vec<String> = Vec::new();
+        let mut lines_parsed = 0;
+        let mut lines_skipped = 0;
 
-    // Parse first 50 entries (performance optimization)
-    for (line_num, line) in reader.lines().take(50).enumerate() {
-        let line = line.with_context(||
-            format!("Failed to read line {} from {}", line_num + 1, path.display())
-        )?;
+        // Parse first 50 entries (performance optimization)
+        for (line_num, line) in reader.lines().take(50).enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "Failed to read line {} from {}",
+                    line_num + 1,
+                    path.display()
+                )
+            })?;
 
-        if line.trim().is_empty() {
-            lines_skipped += 1;
-            continue;
-        }
-
-        // Parse as generic entry
-        let entry: MessageEntry = match serde_json::from_str(&line) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::trace!(line_num, error = %e, "skipping malformed JSONL line");
+            if line.trim().is_empty() {
                 lines_skipped += 1;
                 continue;
             }
-        };
-        lines_parsed += 1;
 
-        tracing::trace!(line_num, entry_type = %entry.entry_type, "parsed JSONL entry");
+            // Parse as generic entry
+            let entry: MessageEntry = match serde_json::from_str(&line) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::trace!(line_num, error = %e, "skipping malformed JSONL line");
+                    lines_skipped += 1;
+                    continue;
+                }
+            };
+            lines_parsed += 1;
 
-        // Update metadata
-        if fingerprint.cwd.is_none() && entry.cwd.is_some() {
-            tracing::debug!("found cwd in JSONL at line {}: {:?}", line_num, entry.cwd);
-            fingerprint.cwd = entry.cwd;
-        }
-        if fingerprint.timestamp.is_none() && entry.timestamp.is_some() {
-            fingerprint.timestamp = entry.timestamp;
-        }
-        if fingerprint.session_id.is_none() && entry.session_id.is_some() {
-            tracing::debug!(line_num, session_id = ?entry.session_id, "found session_id in JSONL");
-            fingerprint.session_id = entry.session_id;
-        }
+            tracing::trace!(line_num, entry_type = %entry.entry_type, "parsed JSONL entry");
 
-        // Extract based on entry type
-        match entry.entry_type.as_str() {
-            "user" => {
-                if let Some(msg_value) = entry.message {
-                    if let Ok(user_msg) = serde_json::from_value::<UserMessage>(msg_value) {
-                        if let Some(content) = user_msg.content {
-                            let normalized = normalize_prompt(&content);
-                            if !normalized.is_empty() {
-                                tracing::trace!(line_num, prompt = %normalized, "extracted user prompt from JSONL");
-                                user_prompts.push(normalized);
+            // Update metadata
+            if fingerprint.cwd.is_none() && entry.cwd.is_some() {
+                checkpoint!(
+                    "jsonl_cwd_found",
+                    line = line_num,
+                    cwd = format!("{:?}", entry.cwd)
+                );
+                fingerprint.cwd = entry.cwd;
+            }
+            if fingerprint.timestamp.is_none() && entry.timestamp.is_some() {
+                fingerprint.timestamp = entry.timestamp;
+            }
+            if fingerprint.session_id.is_none() && entry.session_id.is_some() {
+                checkpoint!(
+                    "jsonl_session_found",
+                    line = line_num,
+                    session_id = format!("{:?}", entry.session_id)
+                );
+                fingerprint.session_id = entry.session_id;
+            }
+
+            // Extract based on entry type
+            match entry.entry_type.as_str() {
+                "user" => {
+                    if let Some(msg_value) = entry.message {
+                        if let Ok(user_msg) = serde_json::from_value::<UserMessage>(msg_value) {
+                            if let Some(content) = user_msg.content {
+                                let normalized = normalize_prompt(&content);
+                                if !normalized.is_empty() {
+                                    tracing::trace!(line_num, prompt = %normalized, "extracted user prompt from JSONL");
+                                    user_prompts.push(normalized);
+                                }
                             }
                         }
                     }
                 }
-            }
-            "assistant" => {
-                if let Some(msg_value) = entry.message {
-                    match serde_json::from_value::<AssistantMessage>(msg_value.clone()) {
-                        Ok(asst_msg) => {
-                            if let Some(content_items) = asst_msg.content {
-                                for item in content_items {
-                                    if item.content_type == "tool_use" {
-                                        match serde_json::from_value::<ToolUse>(item.data.clone()) {
-                                            Ok(tool_use) => {
-                                                tracing::trace!("extracted tool from JSONL: {}", tool_use.name);
-                                                tools.push(tool_use.name);
+                "assistant" => {
+                    if let Some(msg_value) = entry.message {
+                        match serde_json::from_value::<AssistantMessage>(msg_value.clone()) {
+                            Ok(asst_msg) => {
+                                if let Some(content_items) = asst_msg.content {
+                                    for item in content_items {
+                                        if item.content_type == "tool_use" {
+                                            match serde_json::from_value::<ToolUse>(
+                                                item.data.clone(),
+                                            ) {
+                                                Ok(tool_use) => {
+                                                    tracing::trace!(
+                                                        "extracted tool from JSONL: {}",
+                                                        tool_use.name
+                                                    );
+                                                    tools.push(tool_use.name);
+                                                }
+                                                Err(e) => tracing::trace!(
+                                                    "failed to parse tool_use: {}",
+                                                    e
+                                                ),
                                             }
-                                            Err(e) => tracing::trace!("failed to parse tool_use: {}", e),
                                         }
                                     }
                                 }
                             }
+                            Err(e) => tracing::trace!("failed to parse AssistantMessage: {}", e),
                         }
-                        Err(e) => tracing::trace!("failed to parse AssistantMessage: {}", e),
                     }
                 }
-            }
-            _ => {
-                tracing::trace!(line_num, entry_type = %entry.entry_type, "ignoring non-message entry");
+                _ => {
+                    tracing::trace!(line_num, entry_type = %entry.entry_type, "ignoring non-message entry");
+                }
             }
         }
-    }
 
-    // Set first prompt
-    fingerprint.first_prompt = user_prompts.first().cloned();
+        // Set first prompt
+        fingerprint.first_prompt = user_prompts.first().cloned();
 
-    // Set recent prompts (last 3)
-    fingerprint.recent_prompts = user_prompts.iter()
-        .rev()
-        .take(3)
-        .rev()
-        .cloned()
-        .collect();
+        // Set recent prompts (last 3)
+        fingerprint.recent_prompts = user_prompts.iter().rev().take(3).rev().cloned().collect();
 
-    // Set tool sequence
-    fingerprint.tool_sequence = tools;
+        // Set tool sequence
+        fingerprint.tool_sequence = tools;
 
-    tracing::debug!(
-        "JSONL extraction complete: path={:?}, lines={}/{} (parsed/skipped), first_prompt={:?}, cwd={:?}, session={:?}",
-        path, lines_parsed, lines_skipped, fingerprint.first_prompt, fingerprint.cwd, fingerprint.session_id
-    );
+        checkpoint!(
+            "jsonl_complete",
+            path = format!("{}", path.display()),
+            parsed = lines_parsed,
+            skipped = lines_skipped,
+            first_prompt = format!("{:?}", fingerprint.first_prompt),
+            cwd = format!("{:?}", fingerprint.cwd),
+            session_id = format!("{:?}", fingerprint.session_id)
+        );
 
-    Ok(fingerprint)
+        Ok(fingerprint)
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -500,7 +540,14 @@ pub fn extract_from_jsonl(path: &Path) -> Result<SessionFingerprint> {
 /// - 2 points (1 prompt): Medium
 /// - 3 points (2+ signals): High
 /// - 4+ points (all signals): Exact
-#[instrument(skip(scrollback_fp, jsonl_fp), fields(
+///
+/// # Automatic Control Flow Tracing
+///
+/// The `#[vtr::branches]` attribute automatically instruments all match/if branches,
+/// emitting `decision!()` calls that show which path was taken through the algorithm.
+/// This eliminates manual tracing while providing complete visibility into the decision tree.
+#[vtr::branches] // Auto-instruments match/if branches; order vs #[instrument] doesn't matter
+#[instrument(ret, skip(scrollback_fp, jsonl_fp), fields(
     scrollback_first = ?scrollback_fp.first_prompt,
     jsonl_first = ?jsonl_fp.first_prompt,
     jsonl_session = ?jsonl_fp.session_id,
@@ -509,98 +556,46 @@ pub fn match_fingerprints(
     scrollback_fp: &SessionFingerprint,
     jsonl_fp: &SessionFingerprint,
 ) -> MatchConfidence {
-    tracing::debug!(
-        scrollback_first_prompt = ?scrollback_fp.first_prompt,
-        jsonl_first_prompt = ?jsonl_fp.first_prompt,
-        jsonl_session_id = ?jsonl_fp.session_id,
-        "comparing fingerprints"
-    );
-
+    // Track confidence evolution as signals accumulate
+    // Each matching signal raises confidence from None toward Exact
+    // NOTE: #[vtr::branches] auto-traces every match arm, showing the decision path
     let mut score = 0;
-    let mut score_reasons: Vec<&str> = Vec::new();
 
-    // Check first prompt match (strong signal)
-    let first_prompt_match = match (&scrollback_fp.first_prompt, &jsonl_fp.first_prompt) {
-        (Some(fp1), Some(fp2)) if fp1 == fp2 => {
-            score += 2;
-            score_reasons.push("first_prompt(+2)");
-            true
-        }
-        (Some(fp1), Some(fp2)) => {
-            tracing::debug!(scrollback = %fp1, jsonl = %fp2, "first prompts differ");
-            false
-        }
-        _ => false,
+    // Check first prompt match (strong signal, worth +2)
+    match (&scrollback_fp.first_prompt, &jsonl_fp.first_prompt) {
+        (Some(fp1), Some(fp2)) if fp1 == fp2 => score += 2,
+        _ => {}
     };
 
-    // Check recent prompts match (any overlap)
-    let mut recent_prompt_match = false;
+    // Check recent prompts match (any overlap, worth +1)
     for scroll_prompt in &scrollback_fp.recent_prompts {
         if jsonl_fp.recent_prompts.contains(scroll_prompt) {
             score += 1;
-            score_reasons.push("recent_prompt(+1)");
-            recent_prompt_match = true;
-            tracing::debug!(prompt = %scroll_prompt, "recent prompt matched");
             break; // Only count once
         }
     }
 
-    // Check tool sequence similarity
-    let tool_sim = tool_sequence_similarity(
-        &scrollback_fp.tool_sequence,
-        &jsonl_fp.tool_sequence,
-    );
-    let tool_match = tool_sim > 0.5;
-    if tool_match {
+    // Check tool sequence similarity (Jaccard > 0.5, worth +1)
+    let tool_sim = tool_sequence_similarity(&scrollback_fp.tool_sequence, &jsonl_fp.tool_sequence);
+    if tool_sim > 0.5 {
         score += 1;
-        score_reasons.push("tools(+1)");
     }
-    tracing::debug!(
-        "tool sequence: similarity={:.3}, match={}, scrollback_len={}, jsonl_len={}",
-        tool_sim, tool_match, scrollback_fp.tool_sequence.len(), jsonl_fp.tool_sequence.len()
-    );
 
-    // Check CWD match (only if both have cwd)
-    let cwd_match = match (&scrollback_fp.cwd, &jsonl_fp.cwd) {
-        (Some(cwd1), Some(cwd2)) if cwd1 == cwd2 => {
-            tracing::debug!("cwds MATCH: {:?}", cwd1);
-            score += 1;
-            score_reasons.push("cwd(+1)");
-            true
-        }
-        (Some(cwd1), Some(cwd2)) => {
-            tracing::debug!("cwds differ: scrollback={:?} vs jsonl={:?}", cwd1, cwd2);
-            false
-        }
-        _ => false,
+    // Check CWD match (only if both have cwd, worth +1)
+    match (&scrollback_fp.cwd, &jsonl_fp.cwd) {
+        (Some(cwd1), Some(cwd2)) if cwd1 == cwd2 => score += 1,
+        _ => {}
     };
 
     // Map score to confidence level
-    let confidence = match score {
+    // Score thresholds: 0=None, 1=Low, 2=Medium, 3=High, 4+=Exact
+    match score {
         0 => MatchConfidence::None,
         1 => MatchConfidence::Low,
         2 => MatchConfidence::Medium,
         3 => MatchConfidence::High,
         _ => MatchConfidence::Exact,
-    };
-
-    tracing::debug!(
-        "match result: score={}, confidence={:?}, first_prompt={}, recent_prompt={}, tool={}, cwd={}, reasons={:?}",
-        score, confidence, first_prompt_match, recent_prompt_match, tool_match, cwd_match, score_reasons
-    );
-    // Keep original logging as trace for extra details
-    tracing::trace!(
-        score,
-        ?confidence,
-        first_prompt_match,
-        recent_prompt_match,
-        tool_match,
-        cwd_match,
-        reasons = ?score_reasons,
-        "fingerprint match result"
-    );
-
-    confidence
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -620,10 +615,7 @@ fn normalize_prompt(prompt: &str) -> String {
     let lowercase = trimmed.to_lowercase();
 
     // Replace multiple whitespace with single space
-    let normalized = lowercase
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let normalized = lowercase.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Truncate to 100 chars
     if normalized.len() > 100 {
@@ -672,10 +664,7 @@ mod tests {
 
     #[test]
     fn test_normalize_prompt() {
-        assert_eq!(
-            normalize_prompt("  Fix the BUG  "),
-            "fix the bug"
-        );
+        assert_eq!(normalize_prompt("  Fix the BUG  "), "fix the bug");
 
         assert_eq!(
             normalize_prompt("Multiple    spaces     here"),
@@ -803,13 +792,22 @@ mod tests {
     #[test]
     fn test_extract_path_from_start() {
         // Basic path
-        assert_eq!(extract_path_from_start("/home/user/project"), "/home/user/project");
+        assert_eq!(
+            extract_path_from_start("/home/user/project"),
+            "/home/user/project"
+        );
 
         // Path with trailing space
-        assert_eq!(extract_path_from_start("/home/user Model: foo"), "/home/user");
+        assert_eq!(
+            extract_path_from_start("/home/user Model: foo"),
+            "/home/user"
+        );
 
         // Path with non-breaking space
-        assert_eq!(extract_path_from_start("/home/user\u{a0}extra"), "/home/user");
+        assert_eq!(
+            extract_path_from_start("/home/user\u{a0}extra"),
+            "/home/user"
+        );
 
         // Path with Powerline symbol
         assert_eq!(extract_path_from_start("/path\u{e0b4}status"), "/path");
@@ -835,7 +833,10 @@ cwd: /home/nuck/Workspace
 
         let fp = extract_from_scrollback(scrollback);
 
-        assert_eq!(fp.first_prompt, Some("implement user authentication".to_string()));
+        assert_eq!(
+            fp.first_prompt,
+            Some("implement user authentication".to_string())
+        );
         assert_eq!(fp.recent_prompts.len(), 2);
         assert!(fp.recent_prompts.contains(&"add tests".to_string()));
         assert_eq!(fp.tool_sequence, vec!["Bash", "Read", "Edit", "Write"]);

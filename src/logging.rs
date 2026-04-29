@@ -26,19 +26,21 @@ use crate::events::{BabelEvent, PulseTrigger};
 pub fn format_event(event: &BabelEvent) -> String {
     match event {
         // ─── Pane Events ────────────────────────────────────────────────────────
-        BabelEvent::PaneFocused { kitty_id, session_id } => {
-            match session_id {
-                Some(sid) => format!("Pane(k{})::Focused {{ {} }}", kitty_id, short_uuid(sid)),
-                None => format!("Pane(k{})::Focused", kitty_id),
-            }
-        }
+        BabelEvent::PaneFocused {
+            kitty_id,
+            session_id,
+        } => match session_id {
+            Some(sid) => format!("Pane(k{})::Focused {{ {} }}", kitty_id, short_uuid(sid)),
+            None => format!("Pane(k{})::Focused", kitty_id),
+        },
 
-        BabelEvent::PaneUnfocused { kitty_id, session_id } => {
-            match session_id {
-                Some(sid) => format!("Pane(k{})::Unfocused {{ {} }}", kitty_id, short_uuid(sid)),
-                None => format!("Pane(k{})::Unfocused", kitty_id),
-            }
-        }
+        BabelEvent::PaneUnfocused {
+            kitty_id,
+            session_id,
+        } => match session_id {
+            Some(sid) => format!("Pane(k{})::Unfocused {{ {} }}", kitty_id, short_uuid(sid)),
+            None => format!("Pane(k{})::Unfocused", kitty_id),
+        },
 
         BabelEvent::SessionStateChanged {
             kitty_id,
@@ -66,58 +68,105 @@ pub fn format_event(event: &BabelEvent) -> String {
             let ws = workspace.map_or(String::new(), |w| format!(" ws:{}", w));
             format!(
                 "Pane(k{})::Pulse {{ {:.2}, {}{} }}",
-                kitty_id, intensity, format_trigger(trigger), ws
+                kitty_id,
+                intensity,
+                format_trigger(trigger),
+                ws
             )
         }
 
         // ─── Window Events ──────────────────────────────────────────────────────
-        BabelEvent::WindowAdded { kitty_id, title, workspace } => {
+        BabelEvent::WindowAdded {
+            kitty_id,
+            title,
+            workspace,
+            agent_kind,
+        } => {
             let ws = workspace.map_or(String::new(), |w| format!("ws:{} ", w));
             let short_title = truncate_title(title, 40);
-            format!("Window(k{})::Added {{ {}{} }}", kitty_id, ws, short_title)
+            // Render agent only when non-default to keep Claude logs unchanged.
+            let agent_tag = if *agent_kind == crate::AgentKind::default() {
+                String::new()
+            } else {
+                format!("{} ", agent_kind)
+            };
+            format!(
+                "Window(k{})::Added {{ {}{}{} }}",
+                kitty_id, agent_tag, ws, short_title
+            )
         }
 
         BabelEvent::WindowRemoved { kitty_id } => {
             format!("Window(k{})::Removed", kitty_id)
         }
 
-        BabelEvent::WindowWorkspaceChanged { kitty_id, old_workspace, new_workspace } => {
+        BabelEvent::WindowWorkspaceChanged {
+            kitty_id,
+            old_workspace,
+            new_workspace,
+        } => {
             let old = old_workspace.map_or("?".to_string(), |w| w.to_string());
             let new = new_workspace.map_or("?".to_string(), |w| w.to_string());
             format!("Window(k{})::Moved {{ {} → {} }}", kitty_id, old, new)
         }
 
         // ─── Terminal Events ────────────────────────────────────────────────────
-        BabelEvent::TerminalOpened { kitty_id, title, workspace, .. } => {
+        BabelEvent::TerminalOpened {
+            kitty_id,
+            title,
+            workspace,
+            ..
+        } => {
             let ws = workspace.map_or(String::new(), |w| format!("ws:{} ", w));
             let short_title = truncate_title(title, 30);
-            format!("Terminal(k{})::Opened {{ {}{} }}", kitty_id, ws, short_title)
+            format!(
+                "Terminal(k{})::Opened {{ {}{} }}",
+                kitty_id, ws, short_title
+            )
         }
 
         BabelEvent::TerminalClosed { kitty_id } => {
             format!("Terminal(k{})::Closed", kitty_id)
         }
 
-        BabelEvent::TerminalBecameClaude { kitty_id, title } => {
+        BabelEvent::TerminalBecameAgent { kitty_id, title } => {
             let short_title = truncate_title(title, 30);
-            format!("Terminal(k{})::BecameClaude {{ {} }}", kitty_id, short_title)
+            format!("Terminal(k{})::BecameAgent {{ {} }}", kitty_id, short_title)
         }
 
         // ─── Session Events ─────────────────────────────────────────────────────
-        BabelEvent::SessionMatched { kitty_id, session_id, confidence } => {
+        BabelEvent::SessionMatched {
+            kitty_id,
+            session_id,
+            confidence,
+        } => {
             format!(
                 "Session::Matched {{ k{} ↔ {}, {} }}",
-                kitty_id, short_uuid(session_id), confidence
+                kitty_id,
+                short_uuid(session_id),
+                confidence
             )
         }
 
-        BabelEvent::SessionUpdated { session_id, project } => {
+        BabelEvent::SessionUpdated {
+            session_id,
+            project,
+        } => {
             let short_proj = truncate_path(project, 30);
-            format!("Session::Updated {{ {}, {} }}", short_uuid(session_id), short_proj)
+            format!(
+                "Session::Updated {{ {}, {} }}",
+                short_uuid(session_id),
+                short_proj
+            )
         }
 
         // ─── Workspace Events ───────────────────────────────────────────────────
-        BabelEvent::WorkspaceTitleUpdated { workspace, title, window_count, .. } => {
+        BabelEvent::WorkspaceTitleUpdated {
+            workspace,
+            title,
+            window_count,
+            ..
+        } => {
             format!(
                 "Workspace({})::Title {{ \"{}\" ({} win) }}",
                 workspace, title, window_count
@@ -125,71 +174,158 @@ pub fn format_event(event: &BabelEvent) -> String {
         }
 
         // ─── Title Policy Events ────────────────────────────────────────────────
-        BabelEvent::TitleGenerated { session_id, title, prompt_count, policy } => {
+        BabelEvent::TitleGenerated {
+            session_id,
+            title,
+            prompt_count,
+            policy,
+        } => {
             format!(
                 "Title::Generated {{ {}, \"{}\" ({} prompts, {}) }}",
-                short_uuid(session_id), title, prompt_count, policy
+                short_uuid(session_id),
+                title,
+                prompt_count,
+                policy
             )
         }
 
-        BabelEvent::TitleSpliced { session_id, title, .. } => {
-            format!("Title::Spliced {{ {}, \"{}\" }}", short_uuid(session_id), title)
+        BabelEvent::TitleSpliced {
+            session_id, title, ..
+        } => {
+            format!(
+                "Title::Spliced {{ {}, \"{}\" }}",
+                short_uuid(session_id),
+                title
+            )
         }
 
         // ─── WSet Events ────────────────────────────────────────────────────────
-        BabelEvent::WSetSaved { name, wspaces, windows } => {
-            format!("WSet::Saved {{ \"{}\", {}ws, {}win }}", name, wspaces, windows)
+        BabelEvent::WSetSaved {
+            name,
+            wspaces,
+            windows,
+        } => {
+            format!(
+                "WSet::Saved {{ \"{}\", {}ws, {}win }}",
+                name, wspaces, windows
+            )
         }
 
-        BabelEvent::WSetLoaded { name, wspaces, windows, skipped } => {
+        BabelEvent::WSetLoaded {
+            name,
+            wspaces,
+            windows,
+            skipped,
+        } => {
             if *skipped > 0 {
                 format!(
                     "WSet::Loaded {{ \"{}\", {}ws, {}win, {} skipped }}",
                     name, wspaces, windows, skipped
                 )
             } else {
-                format!("WSet::Loaded {{ \"{}\", {}ws, {}win }}", name, wspaces, windows)
+                format!(
+                    "WSet::Loaded {{ \"{}\", {}ws, {}win }}",
+                    name, wspaces, windows
+                )
             }
         }
 
-        BabelEvent::WSetSwitched { from, to } => {
-            match from {
-                Some(f) => format!("WSet::Switched {{ \"{}\" → \"{}\" }}", f, to),
-                None => format!("WSet::Switched {{ → \"{}\" }}", to),
-            }
-        }
+        BabelEvent::WSetSwitched { from, to } => match from {
+            Some(f) => format!("WSet::Switched {{ \"{}\" → \"{}\" }}", f, to),
+            None => format!("WSet::Switched {{ → \"{}\" }}", to),
+        },
 
         // ─── Hook Events (from Claude Code neural interface) ────────────────────
-        BabelEvent::ToolStarted { session_id, kitty_id, tool_name } => {
+        BabelEvent::ToolStarted {
+            session_id,
+            kitty_id,
+            tool_name,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
-            format!("Hook::ToolStarted {{ {}, {}{} }}", short_uuid(session_id), tool_name, kit)
+            format!(
+                "Hook::ToolStarted {{ {}, {}{} }}",
+                short_uuid(session_id),
+                tool_name,
+                kit
+            )
         }
 
-        BabelEvent::ToolCompleted { session_id, kitty_id, tool_name } => {
+        BabelEvent::ToolCompleted {
+            session_id,
+            kitty_id,
+            tool_name,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
-            format!("Hook::ToolCompleted {{ {}, {}{} }}", short_uuid(session_id), tool_name, kit)
+            format!(
+                "Hook::ToolCompleted {{ {}, {}{} }}",
+                short_uuid(session_id),
+                tool_name,
+                kit
+            )
         }
 
-        BabelEvent::NotificationReceived { session_id, kitty_id, notif_type, message } => {
+        BabelEvent::NotificationReceived {
+            session_id,
+            kitty_id,
+            notif_type,
+            message,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
-            let msg = message.as_ref().map_or(String::new(), |m| format!(" \"{}\"", truncate_title(m, 30)));
-            format!("Hook::Notification {{ {}, {}{}{} }}", short_uuid(session_id), notif_type, msg, kit)
+            let msg = message
+                .as_ref()
+                .map_or(String::new(), |m| format!(" \"{}\"", truncate_title(m, 30)));
+            format!(
+                "Hook::Notification {{ {}, {}{}{} }}",
+                short_uuid(session_id),
+                notif_type,
+                msg,
+                kit
+            )
         }
 
-        BabelEvent::SessionStarted { session_id, kitty_id, cwd, resumed } => {
+        BabelEvent::SessionStarted {
+            session_id,
+            kitty_id,
+            cwd,
+            resumed,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
             let res = if *resumed { " resumed" } else { "" };
-            format!("Hook::SessionStarted {{ {}, {}{}{} }}", short_uuid(session_id), cwd, res, kit)
+            format!(
+                "Hook::SessionStarted {{ {}, {}{}{} }}",
+                short_uuid(session_id),
+                cwd,
+                res,
+                kit
+            )
         }
 
-        BabelEvent::SubagentCompleted { session_id, kitty_id, subagent_id } => {
+        BabelEvent::SubagentCompleted {
+            session_id,
+            kitty_id,
+            subagent_id,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
-            format!("Hook::SubagentCompleted {{ {}, sub:{}{} }}", short_uuid(session_id), short_uuid(subagent_id), kit)
+            format!(
+                "Hook::SubagentCompleted {{ {}, sub:{}{} }}",
+                short_uuid(session_id),
+                short_uuid(subagent_id),
+                kit
+            )
         }
 
-        BabelEvent::TranscriptCompacting { session_id, kitty_id, transcript_path } => {
+        BabelEvent::TranscriptCompacting {
+            session_id,
+            kitty_id,
+            transcript_path,
+        } => {
             let kit = kitty_id.map_or(String::new(), |k| format!(" k{}", k));
-            format!("Hook::TranscriptCompacting {{ {}, {}{} }}", short_uuid(session_id), transcript_path, kit)
+            format!(
+                "Hook::TranscriptCompacting {{ {}, {}{} }}",
+                short_uuid(session_id),
+                transcript_path,
+                kit
+            )
         }
 
         // ─── Daemon Events ──────────────────────────────────────────────────────
@@ -205,12 +341,17 @@ fn format_trigger(trigger: &PulseTrigger) -> &'static str {
         PulseTrigger::ToolComplete => "tool_done",
         PulseTrigger::UserInput => "input",
         PulseTrigger::StateTransition => "state",
+        PulseTrigger::HookLifecycle => "hook",
     }
 }
 
 /// Shorten a UUID to first 8 chars for readability
 fn short_uuid(uuid: &str) -> &str {
-    if uuid.len() > 8 { &uuid[..8] } else { uuid }
+    if uuid.len() > 8 {
+        &uuid[..8]
+    } else {
+        uuid
+    }
 }
 
 /// Truncate a title, adding ellipsis if needed
@@ -316,6 +457,7 @@ mod tests {
             old_state: ActivityState::Idle,
             new_state: ActivityState::Thinking,
             asking_question: true,
+            agent_kind: crate::AgentKind::Claude,
         };
         let formatted = format_event(&event);
         assert_eq!(formatted, "Pane(k42)::State { Idle → Thinking ws:3 ? }");
@@ -340,9 +482,13 @@ mod tests {
             kitty_id: 42,
             title: "claude - /home/user/project".to_string(),
             workspace: Some(2),
+            agent_kind: crate::AgentKind::Claude,
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Window(k42)::Added { ws:2 \"claude - /home/user/project\" }");
+        assert_eq!(
+            formatted,
+            "Window(k42)::Added { ws:2 \"claude - /home/user/project\" }"
+        );
     }
 
     #[test]
@@ -362,9 +508,6 @@ mod tests {
             format_sfx_failed("complete", "socket error"),
             "SFX::Failed { complete, \"socket error\" }"
         );
-        assert_eq!(
-            format_sfx_triggered("ding"),
-            "SFX::Triggered { ding }"
-        );
+        assert_eq!(format_sfx_triggered("ding"), "SFX::Triggered { ding }");
     }
 }

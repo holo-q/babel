@@ -53,11 +53,17 @@ async fn main() -> Result<()> {
     // Parse CLI first to get --debug flag before logging init
     let cli = Cli::parse();
 
-    // Initialize logging via spaceship-std (centralized config + SIGHUP hot-reload)
-    // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
-    // "babel" = config key and journald identifier
-    // --debug flag forces debug level regardless of config
-    spaceship_std::init_logging!("babel", &cli.logging);
+    // Initialize logging - daemon uses custom init with VtrLayer, others use spaceship-std
+    // Daemon's VtrLayer captures 50K events in a ring buffer for debugging parallel operations
+    let is_daemon = matches!(cli.command, Commands::Daemon { .. });
+    if is_daemon {
+        // Custom init with VtrLayer - captures all tracing events to ring buffer
+        claude_babel::daemon::init_daemon_logging(&cli.logging);
+    } else {
+        // Standard spaceship-std init for CLI commands
+        // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
+        spaceship_std::init_logging!("babel", &cli.logging);
+    }
 
     if cli.logging.debug {
         tracing::debug!("debug logging enabled via --debug flag");
@@ -70,7 +76,11 @@ async fn main() -> Result<()> {
     // Skip for daemon/tui/monitor/mcp/hook which have their own connection handling
     let show_mode = !matches!(
         cli.command,
-        Commands::Daemon { .. } | Commands::Tui | Commands::Monitor { .. } | Commands::Mcp | Commands::Hook { .. }
+        Commands::Daemon { .. }
+            | Commands::Tui
+            | Commands::Monitor { .. }
+            | Commands::Mcp
+            | Commands::Hook { .. }
     );
     if show_mode && !cli.json {
         eprintln!("[{}]", core.mode_label());
@@ -79,88 +89,95 @@ async fn main() -> Result<()> {
     // Route to appropriate handler based on subcommand
     match cli.command {
         // ─── Daemon Management ───────────────────────────────────────────────────
-        Commands::Daemon { trace, no_scrollparse } => {
+        Commands::Daemon {
+            trace,
+            no_scrollparse,
+        } => {
+            let enable_scrollparse = !no_scrollparse;
             if trace {
-                claude_babel::daemon::run_daemon_traced(no_scrollparse).await
+                claude_babel::daemon::run_daemon_traced(enable_scrollparse).await
             } else {
-                claude_babel::daemon::run_daemon(no_scrollparse).await
+                claude_babel::daemon::run_daemon(enable_scrollparse).await
             }
         }
 
         // ─── Query Commands (read-only, safe) ────────────────────────────────────
-        Commands::Ls { details } => {
-            cli::query::cmd_ls(&core, cli.json, details).await
-        }
+        Commands::Ls { details, all } => cli::query::cmd_ls(&core, cli.json, details, all).await,
 
-        Commands::LsTerminals => {
-            cli::query::cmd_ls_terminals(&core, cli.json).await
-        }
+        Commands::LsTerminals => cli::query::cmd_ls_terminals(&core, cli.json).await,
 
-        Commands::LsPanes => {
-            cli::query::cmd_ls_panes(&core, cli.json).await
-        }
+        Commands::LsPanes => cli::query::cmd_ls_panes(&core, cli.json).await,
 
-        Commands::LsSockets => {
-            cli::query::cmd_ls_sockets(&core, cli.json).await
-        }
+        Commands::LsSockets => cli::query::cmd_ls_sockets(&core, cli.json).await,
 
-        Commands::GetWindow { window_id } => {
-            cli::query::cmd_check_window(&core, window_id, cli.json).await
+        Commands::GetWindow { pane_id } => {
+            cli::query::cmd_check_agent_pane(&core, pane_id, cli.json).await
         }
 
         Commands::GetPane { pane_name } => {
             cli::query::cmd_check_pane(&core, pane_name, cli.json).await
         }
 
-        Commands::History { sessions, limit, all } => {
-            cli::query::cmd_history(&core, sessions, limit, all, cli.json).await
-        }
+        Commands::History {
+            sessions,
+            limit,
+            all,
+        } => cli::query::cmd_history(&core, sessions, limit, all, cli.json).await,
 
-        Commands::Target => {
-            cli::action::cmd_target(cli.json).await
-        }
+        Commands::Target => cli::action::cmd_target(cli.json).await,
 
-        Commands::Plan { target } => {
-            cli::query::cmd_plan(&core, &target, cli.json).await
-        }
+        Commands::Plan { target } => cli::query::cmd_plan(&core, &target, cli.json).await,
 
-        Commands::Resume { all } => {
-            cli::resume::cmd_resume(&core, all, cli.json).await
-        }
+        Commands::Resume { all } => cli::resume::cmd_resume(&core, all, cli.json).await,
 
-        Commands::Continue => {
-            cli::resume::cmd_continue(&core).await
-        }
+        Commands::Continue => cli::resume::cmd_continue(&core).await,
 
         Commands::Tail { target, lines } => {
             cli::fork::cmd_tail(&core, &target, lines, cli.json).await
         }
 
-        Commands::Fork { target, lines, hsplit, vsplit, tab } => {
-            let location = if hsplit { "hsplit" } else if vsplit { "vsplit" } else if tab { "tab" } else { "os-window" };
-            cli::fork::cmd_fork(&core, &target, lines, location).await
+        Commands::Fork {
+            target,
+            lines,
+            mode,
+            hsplit,
+            vsplit,
+            tab,
+        } => {
+            let location = if hsplit {
+                "hsplit"
+            } else if vsplit {
+                "vsplit"
+            } else if tab {
+                "tab"
+            } else {
+                "os-window"
+            };
+            cli::fork::cmd_fork(&core, &target, lines, &mode, location).await
         }
 
         // ─── Action Commands (state-changing) ────────────────────────────────────
-        Commands::Focus { window_id, content } => {
-            cli::action::cmd_focus(&core, window_id, content).await
+        Commands::Focus { pane_id, content } => {
+            cli::action::cmd_focus(&core, pane_id, content).await
         }
 
         Commands::GetScrollback { target, lines } => {
             cli::action::cmd_get_scrollback(&core, &target, lines).await
         }
 
-        Commands::GetTitle { target } => {
-            cli::query::cmd_get_title(&core, &target, cli.json).await
-        }
+        Commands::GetTitle { target } => cli::query::cmd_get_title(&core, &target, cli.json).await,
 
-        Commands::Send { target, text, force } => {
-            cli::action::cmd_send(&core, &target, &text, force).await
-        }
+        Commands::Send {
+            target,
+            text,
+            force,
+        } => cli::action::cmd_send(&core, &target, &text, force).await,
 
-        Commands::Type { target, text, force } => {
-            cli::action::cmd_type(&core, &target, &text, force).await
-        }
+        Commands::Type {
+            target,
+            text,
+            force,
+        } => cli::action::cmd_type(&core, &target, &text, force).await,
 
         Commands::Broadcast { text, force } => {
             cli::action::cmd_broadcast(&core, &text, force).await
@@ -170,102 +187,147 @@ async fn main() -> Result<()> {
             cli::action::cmd_set_icon(&core, &target, &icon).await
         }
 
-        Commands::SetRead { target } => {
-            cli::action::cmd_set_read(&core, &target).await
-        }
+        Commands::SetRead { target } => cli::action::cmd_set_read(&core, &target).await,
 
         Commands::SetTitle { target, title } => {
             cli::action::cmd_set_title(&core, &target, title.as_deref()).await
         }
 
-        Commands::Solo { target, off } => {
-            cli::action::cmd_solo(&core, target.as_ref(), off).await
-        }
+        Commands::Solo { target, off } => cli::action::cmd_solo(&core, target.as_ref(), off).await,
 
         // ─── Fire-and-Forget Sessions ────────────────────────────────────────────
-        Commands::Fire { prompt, workdir, ambient } => {
-            cli::action::cmd_fire(&mut core, &prompt, workdir.as_deref(), ambient).await
-        }
+        Commands::Fire {
+            prompt,
+            workdir,
+            ambient,
+        } => cli::action::cmd_fire(&mut core, &prompt, workdir.as_deref(), ambient).await,
 
-        Commands::FireLs => {
-            cli::action::cmd_fire_ls(cli.json)
-        }
+        Commands::FireLs => cli::action::cmd_fire_ls(cli.json),
 
-        Commands::FireClean => {
-            cli::action::cmd_fire_clean()
-        }
+        Commands::FireClean => cli::action::cmd_fire_clean(),
 
-        Commands::Reboot { target } => {
-            cli::action::cmd_reboot(&mut core, &target).await
-        }
+        Commands::Reboot { target } => cli::action::cmd_reboot(&mut core, &target).await,
 
         // ─── Migration & Diagnostics ─────────────────────────────────────────────
-        Commands::Mv { source, dest, dry_run, history_only, anxious, force } => {
-            cli::mv::cmd_mv(&mut core, source, dest, dry_run, history_only, anxious, force, cli.json).await
+        Commands::Mv {
+            source,
+            dest,
+            dry_run,
+            history_only,
+            anxious,
+            force,
+        } => {
+            cli::mv::cmd_mv(
+                &mut core,
+                source,
+                dest,
+                dry_run,
+                history_only,
+                anxious,
+                force,
+                cli.json,
+            )
+            .await
         }
 
-        Commands::Fingerprint { input, window, dir, session } => {
-            cli::fingerprint::cmd_fingerprint(&core, input, window, dir, session, cli.json).await
-        }
+        Commands::Fingerprint {
+            input,
+            window,
+            dir,
+            session,
+        } => cli::fingerprint::cmd_fingerprint(&core, input, window, dir, session, cli.json).await,
 
         // ─── Workspace Sets ──────────────────────────────────────────────────────
-        Commands::WSet { command } => {
-            cli::wset::cmd_wset(&core, command, cli.json).await
-        }
+        Commands::WSet { command } => cli::wset::cmd_wset(&core, command, cli.json).await,
 
         // ─── TUI Debug Console ──────────────────────────────────────────────────
-        Commands::Tui => {
-            claude_babel::tui::run_tui().await
-        }
+        Commands::Tui => claude_babel::tui::run_tui().await,
 
         // ─── CLI Event Monitor ──────────────────────────────────────────────────
-        Commands::Monitor { filter } => {
-            cli::action::cmd_monitor(filter).await
-        }
+        Commands::Monitor { filter } => cli::action::cmd_monitor(filter).await,
 
         // ─── MCP Server ─────────────────────────────────────────────────────────
-        Commands::Mcp => {
-            cli::mcp::run_mcp().await
-        }
+        Commands::Mcp => cli::mcp::run_mcp().await,
 
         // ─── Hook Handlers ──────────────────────────────────────────────────────
         // All 8 Claude Code lifecycle hooks wired here
         Commands::Hook { command } => {
             use cli::HookCommands;
             match command {
-                HookCommands::Stop { session, kitty_id, transcript } => {
-                    cli::hook::handle_stop(&session, kitty_id, transcript.as_deref()).await
-                }
+                HookCommands::Stop {
+                    session,
+                    kitty_id,
+                    transcript,
+                } => cli::hook::handle_stop(&session, kitty_id, transcript.as_deref()).await,
                 HookCommands::Prompt { session, kitty_id } => {
                     cli::hook::handle_prompt(&session, kitty_id).await
                 }
-                HookCommands::PreTool { session, tool, input, kitty_id } => {
-                    cli::hook::handle_pre_tool(&session, kitty_id, &tool, input.as_deref()).await
-                }
-                HookCommands::PostTool { session, tool, output, kitty_id } => {
+                HookCommands::PreTool {
+                    session,
+                    tool,
+                    input,
+                    kitty_id,
+                } => cli::hook::handle_pre_tool(&session, kitty_id, &tool, input.as_deref()).await,
+                HookCommands::PostTool {
+                    session,
+                    tool,
+                    output,
+                    kitty_id,
+                } => {
                     cli::hook::handle_post_tool(&session, kitty_id, &tool, output.as_deref()).await
                 }
-                HookCommands::Notification { session, notif_type, message, kitty_id } => {
-                    cli::hook::handle_notification(&session, kitty_id, &notif_type, message.as_deref()).await
+                HookCommands::Notification {
+                    session,
+                    notif_type,
+                    message,
+                    kitty_id,
+                } => {
+                    cli::hook::handle_notification(
+                        &session,
+                        kitty_id,
+                        &notif_type,
+                        message.as_deref(),
+                    )
+                    .await
                 }
-                HookCommands::SessionStart { session, cwd, resumed, kitty_id } => {
-                    cli::hook::handle_session_start(&session, kitty_id, &cwd, resumed).await
+                HookCommands::SessionStart {
+                    session,
+                    cwd,
+                    resumed,
+                    kitty_id,
+                } => cli::hook::handle_session_start(&session, kitty_id, &cwd, resumed).await,
+                HookCommands::SubagentStop {
+                    session,
+                    subagent_id,
+                    kitty_id,
+                } => cli::hook::handle_subagent_stop(&session, kitty_id, &subagent_id).await,
+                HookCommands::PreCompact {
+                    session,
+                    transcript,
+                    kitty_id,
+                } => cli::hook::handle_pre_compact(&session, kitty_id, &transcript).await,
+                HookCommands::Stdin { event, agent } => {
+                    let agent_kind: claude_babel::AgentKind = agent.parse().unwrap_or_default();
+                    cli::hook::handle_stdin(&event, agent_kind).await
                 }
-                HookCommands::SubagentStop { session, subagent_id, kitty_id } => {
-                    cli::hook::handle_subagent_stop(&session, kitty_id, &subagent_id).await
+                HookCommands::CodexNotify { payload } => {
+                    cli::hook::handle_codex_notify(&payload).await
                 }
-                HookCommands::PreCompact { session, transcript, kitty_id } => {
-                    cli::hook::handle_pre_compact(&session, kitty_id, &transcript).await
-                }
-                HookCommands::Install { dry_run } => {
-                    cli::hook::install_hooks(dry_run).await
+                HookCommands::Install { dry_run, targets } => {
+                    cli::hook::install_hooks(dry_run, &targets).await
                 }
             }
         }
 
         // ─── Diagnostics ──────────────────────────────────────────────────────────
-        Commands::Doctor => {
-            cli::doctor::cmd_doctor().await
-        }
+        Commands::Doctor => cli::doctor::cmd_doctor().await,
+
+        // ─── Generation Tools ──────────────────────────────────────────────────────
+        Commands::Mmdc {
+            dirpath,
+            out,
+            fire,
+            verbose,
+        } => cli::mmdc::cmd_mmdc(dirpath, out, fire, verbose).await,
     }
 }

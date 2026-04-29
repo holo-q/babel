@@ -1,8 +1,8 @@
 //! Integration Tests for Fingerprint-Based Session Matching
 //!
 //! These tests require:
-//! - Running kitty terminal with Claude windows
-//! - Active Claude sessions in ~/.claude/projects/
+//! - Running kitty terminal with agent panes
+//! - Active provider sessions in ~/.claude/projects/
 //!
 //! Run with: cargo test --test integration_fingerprint -- --ignored --nocapture
 //!
@@ -21,9 +21,9 @@ use claude_babel::fingerprint::{
     extract_from_jsonl, extract_from_scrollback, match_fingerprints, MatchConfidence,
     SessionFingerprint,
 };
-use claude_babel::kitty::{find_claude_windows, get_scrollback};
-use claude_babel::claude_storage::{list_projects, list_sessions};
-use claude_babel::discovery::discover_claude_windows;
+use claude_babel::kitty::get_scrollback;
+use claude_babel::utility::agent_discovery::{discover_agent_panes, find_agent_panes};
+use claude_babel::utility::claude_storage::{list_projects, list_sessions};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test Utilities
@@ -61,30 +61,34 @@ fn get_recent_session_files(limit: usize) -> Result<Vec<PathBuf>> {
 // Scrollback Extraction Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Test: Extract fingerprints from all live Claude windows
-#[test]
+/// Test: Extract fingerprints from all live agent panes
+#[tokio::test]
 #[ignore]
-fn test_live_scrollback_extraction() -> Result<()> {
+async fn test_live_scrollback_extraction() -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Live Scrollback Extraction                            ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
-    let windows = find_claude_windows()?;
-    println!("Found {} Claude windows", windows.len());
+    let windows = find_agent_panes().await?;
+    println!("Found {} agent panes", windows.len());
 
-    assert!(!windows.is_empty(), "No Claude windows found - start some Claude sessions first");
+    assert!(
+        !windows.is_empty(),
+        "No agent panes found - start some agent sessions first"
+    );
 
     for window in &windows {
-        println!("\n--- Window {} (title: {}) ---", window.id, window.title);
+        println!("\n--- Pane {} (title: {}) ---", window.id, window.title);
 
-        let scrollback = get_scrollback(window.id)?;
-        println!("  Scrollback size: {} bytes, {} lines",
+        let scrollback = get_scrollback(window.id).await?;
+        println!(
+            "  Scrollback size: {} bytes, {} lines",
             scrollback.len(),
             scrollback.lines().count()
         );
 
         let fp = extract_from_scrollback(&scrollback);
-        print_fingerprint(&format!("Window {} Fingerprint", window.id), &fp);
+        print_fingerprint(&format!("Pane {} Fingerprint", window.id), &fp);
 
         // Validate extraction produced meaningful data
         let has_prompts = fp.first_prompt.is_some() || !fp.recent_prompts.is_empty();
@@ -96,7 +100,7 @@ fn test_live_scrollback_extraction() -> Result<()> {
         println!("    - Has tools: {}", has_tools);
         println!("    - Has CWD: {}", has_cwd);
 
-        // At least one signal should be present in an active Claude session
+        // At least one signal should be present in an active agent session
         assert!(
             has_prompts || has_tools,
             "No prompts or tools extracted from window {} - scrollback may be empty or format changed",
@@ -107,25 +111,25 @@ fn test_live_scrollback_extraction() -> Result<()> {
     Ok(())
 }
 
-/// Test: Validate scrollback patterns against known Claude output format
-#[test]
+/// Test: Validate scrollback patterns against known agent output format
+#[tokio::test]
 #[ignore]
-fn test_scrollback_pattern_recognition() -> Result<()> {
+async fn test_scrollback_pattern_recognition() -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Scrollback Pattern Recognition                        ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
-    let windows = find_claude_windows()?;
+    let windows = find_agent_panes().await?;
     if windows.is_empty() {
-        println!("SKIP: No Claude windows available");
+        println!("SKIP: No agent panes available");
         return Ok(());
     }
 
     // Take first window
     let window = &windows[0];
-    let scrollback = get_scrollback(window.id)?;
+    let scrollback = get_scrollback(window.id).await?;
 
-    // Check for expected Claude output patterns
+    // Check for expected agent output patterns
     let patterns = [
         ("> ", "User prompt marker"),
         ("● ", "Tool call marker (bullet)"),
@@ -136,7 +140,7 @@ fn test_scrollback_pattern_recognition() -> Result<()> {
         ("cwd:", "CWD indicator"),
     ];
 
-    println!("\nPattern detection in window {}:", window.id);
+    println!("\nPattern detection in pane {}:", window.id);
     for (pattern, desc) in &patterns {
         let count = scrollback.matches(pattern).count();
         let status = if count > 0 { "✓" } else { "✗" };
@@ -176,10 +180,16 @@ fn test_jsonl_extraction() -> Result<()> {
     let session_files = get_recent_session_files(10)?;
     println!("Testing {} most recent session files", session_files.len());
 
-    assert!(!session_files.is_empty(), "No session files found in ~/.claude/projects/");
+    assert!(
+        !session_files.is_empty(),
+        "No session files found in ~/.claude/projects/"
+    );
 
     for path in &session_files {
-        let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
         println!("\n--- Session: {} ---", session_id);
         println!("  Path: {}", path.display());
 
@@ -204,7 +214,11 @@ fn test_jsonl_extraction() -> Result<()> {
                 println!("    - Has CWD: {}", has_cwd);
 
                 // Real sessions should have at least prompts
-                assert!(has_prompts, "No prompts extracted from session {}", session_id);
+                assert!(
+                    has_prompts,
+                    "No prompts extracted from session {}",
+                    session_id
+                );
             }
             Err(e) => {
                 println!("  ERROR: Failed to extract: {}", e);
@@ -220,9 +234,9 @@ fn test_jsonl_extraction() -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Test: Match live terminals against JSONL sessions
-#[test]
+#[tokio::test]
 #[ignore]
-fn test_terminal_to_session_matching() -> Result<()> {
+async fn test_terminal_to_session_matching() -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Terminal → Session Matching                           ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
@@ -231,7 +245,10 @@ fn test_terminal_to_session_matching() -> Result<()> {
     let session_files = get_recent_session_files(50)?;
     let mut session_fingerprints: HashMap<String, SessionFingerprint> = HashMap::new();
 
-    println!("\nBuilding fingerprint index from {} sessions...", session_files.len());
+    println!(
+        "\nBuilding fingerprint index from {} sessions...",
+        session_files.len()
+    );
     for path in &session_files {
         if let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) {
             if let Ok(mut fp) = extract_from_jsonl(path) {
@@ -242,12 +259,12 @@ fn test_terminal_to_session_matching() -> Result<()> {
     }
     println!("Index contains {} sessions", session_fingerprints.len());
 
-    // Get live Claude windows
-    let windows = find_claude_windows()?;
+    // Get live agent panes
+    let windows = find_agent_panes().await?;
     println!("\nMatching {} live windows...", windows.len());
 
     if windows.is_empty() {
-        println!("SKIP: No Claude windows available");
+        println!("SKIP: No agent panes available");
         return Ok(());
     }
 
@@ -255,11 +272,11 @@ fn test_terminal_to_session_matching() -> Result<()> {
     let mut match_results = Vec::new();
 
     for window in &windows {
-        println!("\n--- Window {} ---", window.id);
+        println!("\n--- Pane {} ---", window.id);
         println!("  Title: {}", window.title);
         println!("  CWD: {}", window.cwd.display());
 
-        let scrollback = get_scrollback(window.id)?;
+        let scrollback = get_scrollback(window.id).await?;
         let window_fp = extract_from_scrollback(&scrollback);
 
         // Find best match
@@ -285,7 +302,11 @@ fn test_terminal_to_session_matching() -> Result<()> {
         all_scores.sort_by(|a, b| b.1.cmp(&a.1));
         println!("  Top matches:");
         for (session_id, conf) in all_scores.iter().take(3) {
-            let marker = if *conf >= MatchConfidence::Medium { "→" } else { " " };
+            let marker = if *conf >= MatchConfidence::Medium {
+                "→"
+            } else {
+                " "
+            };
             println!("    {} {:?}: {}", marker, conf, session_id);
         }
 
@@ -299,25 +320,29 @@ fn test_terminal_to_session_matching() -> Result<()> {
     }
 
     println!("\n═══════════════════════════════════════════════════════════════");
-    println!("RESULTS: {}/{} windows matched to sessions", matches_found, windows.len());
+    println!(
+        "RESULTS: {}/{} windows matched to sessions",
+        matches_found,
+        windows.len()
+    );
     for (window_id, session_id, confidence) in &match_results {
-        println!("  Window {} → {} ({:?})", window_id, session_id, confidence);
+        println!("  Pane {} → {} ({:?})", window_id, session_id, confidence);
     }
 
     Ok(())
 }
 
 /// Test: Verify matching accuracy against known pairings
-#[test]
+#[tokio::test]
 #[ignore]
-fn test_matching_accuracy_report() -> Result<()> {
+async fn test_matching_accuracy_report() -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Matching Accuracy Report                              ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
-    // Use discover_claude_windows which includes pre-existing tags
-    let windows = discover_claude_windows()?;
-    println!("Found {} Claude windows via discovery", windows.len());
+    // Use discover_agent_panes which includes pre-existing tags
+    let windows = discover_agent_panes().await?;
+    println!("Found {} agent panes via discovery", windows.len());
 
     // Build fresh fingerprint index
     let session_files = get_recent_session_files(100)?;
@@ -338,7 +363,7 @@ fn test_matching_accuracy_report() -> Result<()> {
     let mut unmatched = 0;
 
     for window in &windows {
-        let scrollback = get_scrollback(window.kitty_id)?;
+        let scrollback = get_scrollback(window.id()).await?;
         let window_fp = extract_from_scrollback(&scrollback);
 
         // Find fingerprint match
@@ -353,27 +378,27 @@ fn test_matching_accuracy_report() -> Result<()> {
         match (&window.session_id, fp_match) {
             (Some(tagged_id), Some((fp_id, conf))) => {
                 if tagged_id == &fp_id {
-                    println!("  ✓ Window {}: Correct match ({:?})", window.kitty_id, conf);
+                    println!("  ✓ Pane {}: Correct match ({:?})", window.id(), conf);
                     correct += 1;
                 } else {
-                    println!("  ✗ Window {}: Mismatch!", window.kitty_id);
+                    println!("  ✗ Pane {}: Mismatch!", window.id());
                     println!("      Tagged:      {}", tagged_id);
                     println!("      Fingerprint: {} ({:?})", fp_id, conf);
                     incorrect += 1;
                 }
             }
             (Some(tagged_id), None) => {
-                println!("  ? Window {}: Tagged but no FP match", window.kitty_id);
+                println!("  ? Pane {}: Tagged but no FP match", window.id());
                 println!("      Tagged: {}", tagged_id);
                 unmatched += 1;
             }
             (None, Some((fp_id, conf))) => {
-                println!("  + Window {}: Untagged, FP suggests {}", window.kitty_id, fp_id);
+                println!("  + Pane {}: Untagged, FP suggests {}", window.id(), fp_id);
                 println!("      Confidence: {:?}", conf);
                 untagged += 1;
             }
             (None, None) => {
-                println!("  - Window {}: No tag, no FP match", window.kitty_id);
+                println!("  - Pane {}: No tag, no FP match", window.id());
                 unmatched += 1;
             }
         }
@@ -402,7 +427,7 @@ fn test_matching_accuracy_report() -> Result<()> {
 #[test]
 #[ignore]
 fn test_daemon_fingerprint_index() -> Result<()> {
-    use claude_babel::ipc::{send_request_sync, Request, Response};
+    use claude_babel::utility::ipc::{send_request_sync, Request, Response};
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Daemon Fingerprint Index                              ║");
@@ -429,7 +454,12 @@ fn test_daemon_fingerprint_index() -> Result<()> {
                 Some(id) => format!("→ {}", id),
                 None => "unmatched".to_string(),
             };
-            println!("  Window {}: {} [{}]", window.kitty_id, window.title, session_status);
+            println!(
+                "  Pane {}: {} [{}]",
+                window.id(),
+                window.title,
+                session_status
+            );
         }
 
         // Force refresh and compare
@@ -437,16 +467,24 @@ fn test_daemon_fingerprint_index() -> Result<()> {
         send_request_sync(&Request::Refresh)?;
 
         let after_refresh = send_request_sync(&Request::List)?;
-        if let Response::Windows { windows: after_windows } = after_refresh {
+        if let Response::Windows {
+            windows: after_windows,
+        } = after_refresh
+        {
             let matched_before = windows.iter().filter(|w| w.session_id.is_some()).count();
-            let matched_after = after_windows.iter().filter(|w| w.session_id.is_some()).count();
+            let matched_after = after_windows
+                .iter()
+                .filter(|w| w.session_id.is_some())
+                .count();
 
             println!("Windows matched before refresh: {}", matched_before);
             println!("Windows matched after refresh:  {}", matched_after);
 
             if matched_after > matched_before {
-                println!("✓ Fingerprint matching found {} new associations",
-                    matched_after - matched_before);
+                println!(
+                    "✓ Fingerprint matching found {} new associations",
+                    matched_after - matched_before
+                );
             }
         }
     }
@@ -459,9 +497,9 @@ fn test_daemon_fingerprint_index() -> Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Test: Analyze fingerprint data quality across all sources
-#[test]
+#[tokio::test]
 #[ignore]
-fn test_fingerprint_data_quality() -> Result<()> {
+async fn test_fingerprint_data_quality() -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Fingerprint Data Quality Analysis                     ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
@@ -476,32 +514,42 @@ fn test_fingerprint_data_quality() -> Result<()> {
         }
     }
 
-    println!("\n=== JSONL Extraction Quality (n={}) ===", jsonl_stats.total);
+    println!(
+        "\n=== JSONL Extraction Quality (n={}) ===",
+        jsonl_stats.total
+    );
     jsonl_stats.print();
 
     // Analyze scrollback fingerprints
-    let windows = find_claude_windows().unwrap_or_default();
+    let windows = find_agent_panes().await.unwrap_or_default();
     let mut scrollback_stats = DataQualityStats::default();
 
     for window in &windows {
-        if let Ok(scrollback) = get_scrollback(window.id) {
+        if let Ok(scrollback) = get_scrollback(window.id).await {
             let fp = extract_from_scrollback(&scrollback);
             scrollback_stats.record(&fp);
         }
     }
 
-    println!("\n=== Scrollback Extraction Quality (n={}) ===", scrollback_stats.total);
+    println!(
+        "\n=== Scrollback Extraction Quality (n={}) ===",
+        scrollback_stats.total
+    );
     scrollback_stats.print();
 
     // Recommendations
     println!("\n=== Recommendations ===");
     if jsonl_stats.first_prompt_pct() < 80.0 {
-        println!("  ⚠ JSONL first_prompt extraction low ({:.0}%) - check parser",
-            jsonl_stats.first_prompt_pct());
+        println!(
+            "  ⚠ JSONL first_prompt extraction low ({:.0}%) - check parser",
+            jsonl_stats.first_prompt_pct()
+        );
     }
     if scrollback_stats.tool_pct() < 50.0 && scrollback_stats.total > 0 {
-        println!("  ⚠ Scrollback tool extraction low ({:.0}%) - patterns may have changed",
-            scrollback_stats.tool_pct());
+        println!(
+            "  ⚠ Scrollback tool extraction low ({:.0}%) - patterns may have changed",
+            scrollback_stats.tool_pct()
+        );
     }
     if scrollback_stats.first_prompt_pct() < jsonl_stats.first_prompt_pct() * 0.5 {
         println!("  ⚠ Scrollback prompt extraction much worse than JSONL - check patterns");
@@ -542,15 +590,24 @@ impl DataQualityStats {
         if let Some(ref prompt) = fp.first_prompt {
             self.avg_prompt_len = self.avg_prompt_len * ((n - 1.0) / n) + prompt.len() as f64 / n;
         }
-        self.avg_tool_count = self.avg_tool_count * ((n - 1.0) / n) + fp.tool_sequence.len() as f64 / n;
+        self.avg_tool_count =
+            self.avg_tool_count * ((n - 1.0) / n) + fp.tool_sequence.len() as f64 / n;
     }
 
     fn first_prompt_pct(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.has_first_prompt as f64 / self.total as f64 * 100.0 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.has_first_prompt as f64 / self.total as f64 * 100.0
+        }
     }
 
     fn tool_pct(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.has_tools as f64 / self.total as f64 * 100.0 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.has_tools as f64 / self.total as f64 * 100.0
+        }
     }
 
     fn print(&self) {
@@ -558,16 +615,30 @@ impl DataQualityStats {
             println!("  No samples collected");
             return;
         }
-        println!("  has_first_prompt:  {:>3}/{} ({:.0}%)",
-            self.has_first_prompt, self.total, self.first_prompt_pct());
-        println!("  has_recent_prompts:{:>3}/{} ({:.0}%)",
-            self.has_recent_prompts, self.total,
-            self.has_recent_prompts as f64 / self.total as f64 * 100.0);
-        println!("  has_tools:         {:>3}/{} ({:.0}%)",
-            self.has_tools, self.total, self.tool_pct());
-        println!("  has_cwd:           {:>3}/{} ({:.0}%)",
-            self.has_cwd, self.total,
-            self.has_cwd as f64 / self.total as f64 * 100.0);
+        println!(
+            "  has_first_prompt:  {:>3}/{} ({:.0}%)",
+            self.has_first_prompt,
+            self.total,
+            self.first_prompt_pct()
+        );
+        println!(
+            "  has_recent_prompts:{:>3}/{} ({:.0}%)",
+            self.has_recent_prompts,
+            self.total,
+            self.has_recent_prompts as f64 / self.total as f64 * 100.0
+        );
+        println!(
+            "  has_tools:         {:>3}/{} ({:.0}%)",
+            self.has_tools,
+            self.total,
+            self.tool_pct()
+        );
+        println!(
+            "  has_cwd:           {:>3}/{} ({:.0}%)",
+            self.has_cwd,
+            self.total,
+            self.has_cwd as f64 / self.total as f64 * 100.0
+        );
         println!("  avg_prompt_len:    {:.0} chars", self.avg_prompt_len);
         println!("  avg_tool_count:    {:.1} tools", self.avg_tool_count);
     }

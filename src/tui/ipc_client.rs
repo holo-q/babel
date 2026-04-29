@@ -142,7 +142,9 @@ mod tests {
 
         // Add entries up to limit
         for i in 0..MAX_LOG_ENTRIES + 10 {
-            client.log_entry(IpcDirection::Send, format!("msg{}", i)).await;
+            client
+                .log_entry(IpcDirection::Send, format!("msg{}", i))
+                .await;
         }
 
         let log = client.get_log().await;

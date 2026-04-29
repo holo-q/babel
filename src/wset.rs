@@ -5,7 +5,7 @@
 //! workspace configuration, preserving which workers gathered in which chambers.
 //!
 //! Terminology:
-//! - WSet: A remembered arrangement of all workspaces and their claude panes
+//! - WSet: A remembered arrangement of all workspaces and their agent panes
 //! - WSpace: A chamber in the tower where workers gather (XFCE workspace)
 //! - Session: A claude conversation (identified by session_id UUID)
 //!
@@ -17,12 +17,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use vtr::{effect, trace_error};
 
 use crate::daemon::BabelState;
-use crate::utility::claude_discovery::ClaudePane;
+use crate::utility::agent_discovery::AgentPane;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data Types
@@ -30,7 +31,7 @@ use crate::utility::claude_discovery::ClaudePane;
 
 /// A remembered arrangement—where each worker stood when the tower last rested.
 ///
-/// Captures the complete state of claude panes across all workspaces, preserving
+/// Captures the complete state of agent panes across all workspaces, preserving
 /// which voices gathered in which chambers and their exact positions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WSet {
@@ -50,7 +51,7 @@ pub struct WSetMeta {
 
 /// A chamber's contents—which voices gathered there.
 ///
-/// Records the configuration of a single workspace, including which claude panes
+/// Records the configuration of a single workspace, including which agent panes
 /// (workers) occupy this chamber and the chamber's designated title.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WSpaceConfig {
@@ -71,7 +72,7 @@ pub struct WSpaceConfig {
 /// to their remembered place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneConfig {
-    /// Claude session UUID (from ~/.claude/projects/)
+    /// agent session UUID (from ~/.claude/projects/)
     pub session_id: String,
     /// Working directory for the session
     pub cwd: PathBuf,
@@ -139,8 +140,14 @@ fn current_file_path() -> Result<PathBuf> {
 /// Path to a specific wset file
 fn wset_path(name: &str) -> Result<PathBuf> {
     // Sanitize name - only allow alphanumeric, dash, underscore
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        bail!("Invalid wset name '{}': only alphanumeric, dash, underscore allowed", name);
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Invalid wset name '{}': only alphanumeric, dash, underscore allowed",
+            name
+        );
     }
     Ok(wsets_dir()?.join(format!("{}.toml", name)))
 }
@@ -156,8 +163,8 @@ pub fn get_current_wset_name() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     let name = content.trim();
     if name.is_empty() {
@@ -206,7 +213,7 @@ impl WSet {
         // Group windows by workspace
         let mut wspaces_map: HashMap<i32, Vec<PaneConfig>> = HashMap::new();
 
-        for window in state.windows.values() {
+        for window in state.panes.values() {
             // Skip windows without session IDs - can't restore them
             let session_id = match &window.session_id {
                 Some(id) => id.clone(),
@@ -217,7 +224,9 @@ impl WSet {
 
             // Capture window geometry for precise restoration
             let geometry = get_window_geometry(window.platform_window_id)
-                .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
+                .map_err(
+                    |e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"),
+                )
                 .ok();
 
             let config = PaneConfig {
@@ -254,10 +263,14 @@ impl WSet {
         }
     }
 
-    /// Build a WSet from a list of ClaudePanes—committing the arrangement to memory.
+    /// Build a WSet from a list of AgentPanes—committing the arrangement to memory.
     ///
     /// Captures geometry for precise multi-monitor restoration (for direct mode without daemon).
-    pub fn from_windows(name: &str, windows: &[ClaudePane], workspace_titles: &HashMap<i32, String>) -> Self {
+    pub fn from_windows(
+        name: &str,
+        windows: &[AgentPane],
+        workspace_titles: &HashMap<i32, String>,
+    ) -> Self {
         use crate::kitty::get_window_geometry;
 
         let now = Utc::now();
@@ -274,7 +287,9 @@ impl WSet {
 
             // Capture window geometry for precise restoration
             let geometry = get_window_geometry(window.platform_window_id)
-                .map_err(|e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"))
+                .map_err(
+                    |e| tracing::debug!(window = window.id(), error = %e, "Failed to get geometry"),
+                )
                 .ok();
 
             let config = PaneConfig {
@@ -316,13 +331,17 @@ impl WSet {
         // Update timestamp
         self.meta.updated = Utc::now();
 
-        let toml_str = toml::to_string_pretty(self)
-            .context("Failed to serialize WSet to TOML")?;
+        let toml_str = toml::to_string_pretty(self).context("Failed to serialize WSet to TOML")?;
 
         fs::write(&path, toml_str)
             .with_context(|| format!("Failed to write {}", path.display()))?;
 
-        tracing::info!(name = %self.meta.name, path = %path.display(), "Saved WSet");
+        effect!(
+            "wset",
+            "save",
+            name = self.meta.name.as_str(),
+            path = path.to_string_lossy().as_ref()
+        );
 
         Ok(path)
     }
@@ -357,8 +376,7 @@ impl WSet {
             bail!("WSet '{}' not found", name);
         }
 
-        fs::remove_file(&path)
-            .with_context(|| format!("Failed to delete {}", path.display()))?;
+        fs::remove_file(&path).with_context(|| format!("Failed to delete {}", path.display()))?;
 
         // If this was the current wset, clear _current
         if let Ok(Some(current)) = get_current_wset_name() {
@@ -368,7 +386,7 @@ impl WSet {
             }
         }
 
-        tracing::info!(name = %name, "Deleted WSet");
+        effect!("wset", "delete", name = name);
         Ok(())
     }
 
@@ -390,8 +408,7 @@ impl WSet {
         wset.meta.name = new_name.to_string();
         wset.meta.updated = Utc::now();
 
-        let toml_str = toml::to_string_pretty(&wset)
-            .context("Failed to serialize WSet")?;
+        let toml_str = toml::to_string_pretty(&wset).context("Failed to serialize WSet")?;
 
         fs::write(&new_path, toml_str)
             .with_context(|| format!("Failed to write {}", new_path.display()))?;
@@ -406,7 +423,7 @@ impl WSet {
             }
         }
 
-        tracing::info!(old = %old_name, new = %new_name, "Renamed WSet");
+        effect!("wset", "rename", old = old_name, new = new_name);
         Ok(())
     }
 
@@ -454,7 +471,7 @@ pub fn list_wsets() -> Result<Vec<WSetSummary>> {
             match WSet::load(&name) {
                 Ok(wset) => summaries.push(wset.summary()),
                 Err(e) => {
-                    tracing::warn!(name = %name, error = %e, "Failed to load WSet for listing");
+                    trace_error!("wset load failed", name = name, error = %e);
                 }
             }
         }

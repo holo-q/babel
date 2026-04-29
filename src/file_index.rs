@@ -1,4 +1,4 @@
-//! File Index - Track which files each Claude session has touched
+//! File Index - Track which files each agent session has touched
 //!
 //! Extracts file paths from scrollback using scrollparse patterns (tool calls
 //! like Read, Write, Edit). Enables queries like:
@@ -155,7 +155,11 @@ fn is_valid_file_path(path: &str) -> bool {
     path.starts_with('/')
         || path.starts_with("./")
         || path.starts_with("../")
-        || path.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+        || path
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic())
+            .unwrap_or(false)
 }
 
 /// Process incremental scrollback and record file touches
@@ -169,7 +173,7 @@ fn is_valid_file_path(path: &str) -> bool {
 /// # Arguments
 /// * `storage` - Database connection for cursors and touches
 /// * `pane_addr` - Unique identifier for this pane
-/// * `session_id` - Claude session ID (if known)
+/// * `session_id` - agent session ID (if known)
 /// * `scrollback_result` - Result from kitty @ get-text --from-offset
 ///
 /// # Returns

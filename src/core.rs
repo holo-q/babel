@@ -1,8 +1,8 @@
-//! BabelCore - Unified API for Claude session management
+//! BabelCore - Unified API for agent session management
 //!
 //! The brain of Babel, and the foundation for the Captain's throne. Today it serves
 //! CLI commands as thin puppets; tomorrow it will be the Captain's interface to the
-//! workers below. Every method here—`windows()`, `focus()`, `send()`—is a lever the
+//! workers below. Every method here—`panes()`, `focus()`, `send()`—is a lever the
 //! Captain will pull. The anima of orchestration flows through this core: queries
 //! descend, states ascend, and soon, directives will flow both ways.
 //!
@@ -15,13 +15,13 @@
 //!
 //! ```text
 //! BabelState (same structure daemon uses)
-//! ├── windows: HashMap<u64, ClaudePane>
+//! ├── panes: HashMap<PaneAddr, AgentPane>
 //! ├── fingerprint_index, summary_index, etc.
-//! └── refresh_windows(), rebuild_*_index(), etc.
+//! └── refresh_panes(), rebuild_*_index(), etc.
 //!
 //! CLI command:
 //!   core = BabelCore::connect()  // init state if no daemon
-//!   core.windows()               // use it
+//!   core.panes()                 // use it
 //!   // exit, state drops
 //!
 //! Daemon:
@@ -34,18 +34,19 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail, Context};
-use tracing::{debug, warn, info, instrument};
+use anyhow::{bail, Context, Result};
+use tracing::{debug, info, instrument, warn};
+use vtr::trace_error;
 
-use crate::daemon::{BabelState, TerminalInfo};
-use crate::utility::claude_discovery::ClaudePane;
-use crate::utility::claude_storage::{SessionInfo, MigrateResult};
-use crate::utility::ipc::{send_request, is_daemon_running, Request, Response};
-use crate::kitty;
 use crate::babel_storage;
+use crate::daemon::{BabelState, TerminalInfo};
+use crate::kitty;
+use crate::utility::agent_discovery::AgentPane;
+use crate::utility::claude_storage::{MigrateResult, SessionInfo};
+use crate::utility::ipc::{is_daemon_running, send_request, Request, Response};
 use scrollparse::claude::{detect_activity_state, ActivityState};
 
-/// Core API for Claude session management
+/// Core API for agent session management
 ///
 /// Automatically selects connected or local mode based on daemon availability.
 /// Both modes provide identical API - local mode just initializes state locally.
@@ -64,30 +65,37 @@ impl BabelCore {
     /// Connect to babel - tries daemon first, falls back to local state
     ///
     /// In local mode, initializes state the same way daemon does:
-    /// - refresh_windows() to discover kitty windows
+    /// - refresh_panes() to discover kitty windows
     /// - rebuild_summary_index() for title matching
     /// - rebuild_fingerprint_index() for scrollback matching
     #[instrument(level = "debug")]
     pub async fn connect() -> Self {
         if is_daemon_running().await {
             debug!("connected to babeld");
-            Self { mode: CoreMode::Connected }
+            Self {
+                mode: CoreMode::Connected,
+            }
         } else {
             debug!("daemon not available, initializing local state");
             let mut state = BabelState::new();
 
             // Initialize same way daemon does (full refresh with activity states)
-            if let Err(e) = state.refresh_windows(false) {
-                warn!("failed to refresh windows: {}", e);
+            if let Err(e) = state.refresh_panes(false).await {
+                trace_error!("pane refresh failed", error = %e);
+                warn!("failed to refresh panes: {}", e);
             }
             if let Err(e) = state.rebuild_summary_index() {
+                trace_error!("summary index rebuild failed", error = %e);
                 warn!("failed to build summary index: {}", e);
             }
             if let Err(e) = state.rebuild_fingerprint_index() {
+                trace_error!("fingerprint index rebuild failed", error = %e);
                 warn!("failed to build fingerprint index: {}", e);
             }
 
-            Self { mode: CoreMode::Local(state) }
+            Self {
+                mode: CoreMode::Local(state),
+            }
         }
     }
 
@@ -108,44 +116,51 @@ impl BabelCore {
     // Query Operations (read-only)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Get all Claude panes with enriched session data
+    /// Get all agent panes with enriched session data.
+    ///
+    /// This is Babel's ground-truth agent list: agents live in panes. Use
+    /// `window` only for actual platform/X clients or legacy wire names.
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn windows(&self) -> Result<Vec<ClaudePane>> {
+    pub async fn panes(&self) -> Result<Vec<AgentPane>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::List).await {
-                    Ok(Response::Windows { windows }) => Ok(windows),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::List).await {
+                Ok(Response::Windows { windows }) => Ok(windows),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "List", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(state) => {
                 // Direct access to same state structure daemon uses
-                Ok(state.windows.values().cloned().collect())
+                Ok(state.panes.values().cloned().collect())
             }
         }
     }
 
-    /// Get all terminals (not just Claude sessions)
+    /// Compatibility alias for older callers. New code should use `panes()`.
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn windows(&self) -> Result<Vec<AgentPane>> {
+        self.panes().await
+    }
+
+    /// Get all terminals (not just agent sessions)
     ///
     /// Returns all kitty terminals for visibility into the full terminal flow.
-    /// Useful for watching terminals transition to Claude sessions.
+    /// Useful for watching terminals transition to agent sessions.
     #[instrument(level = "debug", skip(self))]
     pub async fn terminals(&self) -> Result<Vec<TerminalInfo>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::ListTerminals).await {
-                    Ok(Response::Terminals { terminals }) => Ok(terminals),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::ListTerminals).await {
+                Ok(Response::Terminals { terminals }) => Ok(terminals),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "ListTerminals", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(state) => {
                 // In local mode, we don't track terminals (only daemon does)
                 // Return empty list - users should use daemon for full terminal visibility
@@ -159,21 +174,20 @@ impl BabelCore {
     /// Returns raw KittyPane data without babel enrichment. Queries all
     /// responsive kitty instances directly. Useful for low-level kitty inspection.
     #[instrument(level = "debug", skip(self))]
-    pub async fn panes(&self) -> Result<Vec<kitty::KittyPane>> {
+    pub async fn kitty_panes(&self) -> Result<Vec<kitty::KittyPane>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::ListPanes).await {
-                    Ok(Response::Panes { panes }) => Ok(panes),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::ListPanes).await {
+                Ok(Response::Panes { panes }) => Ok(panes),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "ListPanes", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(_) => {
                 // Query kitty directly - same as daemon does
-                kitty::list_all_panes()
+                kitty::list_all_panes().await
             }
         }
     }
@@ -183,18 +197,19 @@ impl BabelCore {
     /// Returns status for each known kitty socket including responsiveness,
     /// pane count, and whether it's the current socket.
     #[instrument(level = "debug", skip(self))]
-    pub async fn sockets(&self) -> Result<std::collections::HashMap<String, crate::daemon::SocketStatus>> {
+    pub async fn sockets(
+        &self,
+    ) -> Result<std::collections::HashMap<String, crate::daemon::SocketStatus>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::ListSockets).await {
-                    Ok(Response::Sockets { sockets }) => Ok(sockets),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::ListSockets).await {
+                Ok(Response::Sockets { sockets }) => Ok(sockets),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "ListSockets", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(state) => {
                 // Return socket status from local state
                 Ok(state.socket_status.clone())
@@ -202,64 +217,71 @@ impl BabelCore {
         }
     }
 
-    /// Get windows with fingerprints extracted from scrollback
+    /// Get agent panes with fingerprints extracted from scrollback.
     #[instrument(level = "debug", skip(self))]
-    pub async fn windows_with_fingerprints(&self) -> Result<Vec<ClaudePane>> {
+    pub async fn panes_with_fingerprints(&self) -> Result<Vec<AgentPane>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::ListWithFingerprints).await {
-                    Ok(Response::Windows { windows }) => Ok(windows),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::ListWithFingerprints).await {
+                Ok(Response::Windows { windows }) => Ok(windows),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "ListWithFingerprints", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(state) => {
-                // Windows already have fingerprints from state initialization
-                Ok(state.windows.values().cloned().collect())
+                // Panes already have fingerprints from state initialization
+                Ok(state.panes.values().cloned().collect())
             }
         }
     }
 
-    /// Get a specific window by ID, or focused window if None
+    /// Compatibility alias for older callers. New code should use `panes_with_fingerprints()`.
     #[instrument(level = "debug", skip(self))]
-    pub async fn window(&self, window_id: Option<u64>) -> Result<Option<ClaudePane>> {
+    pub async fn windows_with_fingerprints(&self) -> Result<Vec<AgentPane>> {
+        self.panes_with_fingerprints().await
+    }
+
+    /// Get a specific agent pane by ID, or focused pane if None.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn pane(&self, pane_id: Option<u64>) -> Result<Option<AgentPane>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::Status { window_id }).await {
-                    Ok(Response::Window { window }) => Ok(*window),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::Status { pane_id }).await {
+                Ok(Response::Window { window }) => Ok(*window),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "Status", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
-            CoreMode::Local(state) => {
-                match window_id {
-                    Some(id) => Ok(state.find_window_by_id(id).cloned()),
-                    None => Ok(state.windows.values().find(|w| w.is_focused).cloned()),
-                }
-            }
+            },
+            CoreMode::Local(state) => match pane_id {
+                Some(id) => Ok(state.find_pane_by_id(id).cloned()),
+                None => Ok(state.panes.values().find(|w| w.is_focused).cloned()),
+            },
         }
+    }
+
+    /// Compatibility alias for older callers. New code should use `pane()`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn window(&self, pane_id: Option<u64>) -> Result<Option<AgentPane>> {
+        self.pane(pane_id).await
     }
 
     /// Get session history
     #[instrument(level = "debug", skip(self))]
     pub async fn history(&self, limit: usize) -> Result<Vec<SessionInfo>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::History { limit }).await {
-                    Ok(Response::History { sessions }) => Ok(sessions),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::History { limit }).await {
+                Ok(Response::History { sessions }) => Ok(sessions),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "History", error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
+            },
             CoreMode::Local(_state) => {
                 // Direct file access - same as daemon does internally
                 crate::utility::claude_storage::get_recent_sessions(limit)
@@ -267,23 +289,20 @@ impl BabelCore {
         }
     }
 
-    /// Get scrollback text from a window
+    /// Get scrollback text from a pane.
     #[instrument(level = "debug", skip(self))]
-    pub async fn scrollback(&self, window_id: u64, lines: Option<usize>) -> Result<String> {
+    pub async fn scrollback(&self, pane_id: u64, lines: Option<usize>) -> Result<String> {
         let text = match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::Scroll { window_id }).await {
-                    Ok(Response::Scrollback { text }) => text,
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => {
-                        warn!("daemon request failed: {}", e);
-                        bail!("daemon connection failed: {}", e)
-                    }
+            CoreMode::Connected => match send_request(&Request::Scroll { pane_id }).await {
+                Ok(Response::Scrollback { text }) => text,
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "Scroll", pane_id = pane_id, error = %e);
+                    warn!("daemon request failed: {}", e);
+                    bail!("daemon connection failed: {}", e)
                 }
-            }
-            CoreMode::Local(_) => {
-                kitty::get_scrollback(window_id)?
-            }
+            },
+            CoreMode::Local(_) => kitty::get_scrollback(pane_id).await?,
         };
 
         // Apply line limit if specified
@@ -299,32 +318,39 @@ impl BabelCore {
     // Mutation Operations (state-changing)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Focus a window
+    /// Focus a pane.
     #[instrument(level = "debug", skip(self))]
-    pub async fn focus(&self, window_id: u64) -> Result<()> {
+    pub async fn focus(&self, pane_id: u64) -> Result<()> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::Focus { window_id }).await {
-                    Ok(Response::Ok { .. }) => Ok(()),
-                    Ok(Response::Error { message }) => bail!("{}", message),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => bail!("daemon connection failed: {}", e),
+            CoreMode::Connected => match send_request(&Request::Focus { pane_id }).await {
+                Ok(Response::Ok { .. }) => Ok(()),
+                Ok(Response::Error { message }) => {
+                    trace_error!("focus failed", pane_id = pane_id, error = %message);
+                    bail!("{}", message)
                 }
-            }
-            CoreMode::Local(_) => {
-                kitty::focus_window(window_id)
-            }
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "Focus", pane_id = pane_id, error = %e);
+                    bail!("daemon connection failed: {}", e)
+                }
+            },
+            CoreMode::Local(_) => kitty::focus_pane(pane_id).await,
         }
     }
 
-    /// Send text to a window (with Enter/CR at end)
+    /// Send text to a pane (with Enter/CR at end).
     ///
-    /// The text is appended with a carriage return to submit it to Claude.
+    /// The text is appended with a carriage return to submit it to the agent.
     #[instrument(level = "debug", skip(self, text))]
-    pub async fn send(&self, window_id: u64, text: &str) -> Result<()> {
+    pub async fn send(&self, pane_id: u64, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::Send { window_id, text: text.to_string() }).await {
+                match send_request(&Request::Send {
+                    pane_id,
+                    text: text.to_string(),
+                })
+                .await
+                {
                     Ok(Response::Ok { .. }) => Ok(()),
                     Ok(Response::Error { message }) => bail!("{}", message),
                     Ok(other) => bail!("unexpected response: {:?}", other),
@@ -334,20 +360,25 @@ impl BabelCore {
             CoreMode::Local(_) => {
                 // Append CR to submit
                 let text_with_cr = format!("{}\r", text);
-                kitty::send_text(window_id, &text_with_cr)
+                kitty::send_text(pane_id, &text_with_cr).await
             }
         }
     }
 
-    /// Type text to a window (without Enter/CR at end)
+    /// Type text to a pane (without Enter/CR at end).
     ///
     /// Types the text into the input area without submitting. Useful for
     /// composing prompts incrementally or staging input.
     #[instrument(level = "debug", skip(self, text))]
-    pub async fn type_text(&self, window_id: u64, text: &str) -> Result<()> {
+    pub async fn type_text(&self, pane_id: u64, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::Type { window_id, text: text.to_string() }).await {
+                match send_request(&Request::Type {
+                    pane_id,
+                    text: text.to_string(),
+                })
+                .await
+                {
                     Ok(Response::Ok { .. }) => Ok(()),
                     Ok(Response::Error { message }) => bail!("{}", message),
                     Ok(other) => bail!("unexpected response: {:?}", other),
@@ -356,12 +387,12 @@ impl BabelCore {
             }
             CoreMode::Local(_) => {
                 // No CR - just type the text as-is
-                kitty::send_text(window_id, text)
+                kitty::send_text(pane_id, text).await
             }
         }
     }
 
-    /// Check if a window has pending (unsent) input in the textbox
+    /// Check if a pane has pending (unsent) input in the textbox.
     ///
     /// Returns (has_pending, pending_text) where pending_text may be None
     /// even if has_pending is true (due to detection limitations).
@@ -370,13 +401,15 @@ impl BabelCore {
     /// will support extracting the actual pending text for save/restore
     /// operations during broadcast.
     #[instrument(level = "debug", skip(self))]
-    pub async fn has_pending_input(&self, window_id: u64) -> Result<(bool, Option<String>)> {
+    pub async fn has_pending_input(&self, pane_id: u64) -> Result<(bool, Option<String>)> {
         match &self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::HasPendingInput { window_id }).await {
-                    Ok(Response::PendingInput { has_pending, pending_text, .. }) => {
-                        Ok((has_pending, pending_text))
-                    }
+                match send_request(&Request::HasPendingInput { pane_id }).await {
+                    Ok(Response::PendingInput {
+                        has_pending,
+                        pending_text,
+                        ..
+                    }) => Ok((has_pending, pending_text)),
                     Ok(Response::Error { message }) => bail!("{}", message),
                     Ok(other) => bail!("unexpected response: {:?}", other),
                     Err(e) => bail!("daemon connection failed: {}", e),
@@ -384,19 +417,24 @@ impl BabelCore {
             }
             CoreMode::Local(_) => {
                 // Get scrollback and detect pending input
-                let scrollback = kitty::get_scrollback(window_id)?;
+                let scrollback = kitty::get_scrollback(pane_id).await?;
                 let (has_pending, pending_text) = detect_pending_input(&scrollback);
                 Ok((has_pending, pending_text))
             }
         }
     }
 
-    /// Set icon/tag for a window
+    /// Set icon/tag for a pane.
     #[instrument(level = "debug", skip(self))]
-    pub async fn set_icon(&self, window_id: u64, icon: &str) -> Result<()> {
+    pub async fn set_icon(&self, pane_id: u64, icon: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::Tag { window_id, icon: icon.to_string() }).await {
+                match send_request(&Request::Tag {
+                    pane_id,
+                    icon: icon.to_string(),
+                })
+                .await
+                {
                     Ok(Response::Ok { .. }) => Ok(()),
                     Ok(Response::Error { message }) => bail!("{}", message),
                     Ok(other) => bail!("unexpected response: {:?}", other),
@@ -405,14 +443,14 @@ impl BabelCore {
             }
             CoreMode::Local(state) => {
                 // Get session ID from our state
-                if let Some(window) = state.find_window_by_id(window_id) {
-                    if let Some(session_id) = &window.session_id {
+                if let Some(pane) = state.find_pane_by_id(pane_id) {
+                    if let Some(session_id) = &pane.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::set_icon(&db, session_id, icon)?;
                     }
                 }
                 // Also set kitty user var for visual feedback
-                kitty::set_user_var(window_id, "babel_icon", icon)?;
+                kitty::set_user_var(pane_id, "babel_icon", icon).await?;
                 Ok(())
             }
         }
@@ -420,19 +458,17 @@ impl BabelCore {
 
     /// Mark session as read
     #[instrument(level = "debug", skip(self))]
-    pub async fn mark_read(&self, window_id: u64) -> Result<()> {
+    pub async fn mark_read(&self, pane_id: u64) -> Result<()> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::MarkRead { window_id }).await {
-                    Ok(Response::Ok { .. }) => Ok(()),
-                    Ok(Response::Error { message }) => bail!("{}", message),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => bail!("daemon connection failed: {}", e),
-                }
-            }
+            CoreMode::Connected => match send_request(&Request::MarkRead { pane_id }).await {
+                Ok(Response::Ok { .. }) => Ok(()),
+                Ok(Response::Error { message }) => bail!("{}", message),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => bail!("daemon connection failed: {}", e),
+            },
             CoreMode::Local(state) => {
-                if let Some(window) = state.find_window_by_id(window_id) {
-                    if let Some(session_id) = &window.session_id {
+                if let Some(pane) = state.find_pane_by_id(pane_id) {
+                    if let Some(session_id) = &pane.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::mark_read(&db, session_id)?;
                     }
@@ -442,10 +478,33 @@ impl BabelCore {
         }
     }
 
-    /// Set window title
+    /// Set a pane's kitty title.
     #[instrument(level = "debug", skip(self))]
-    pub async fn set_title(&self, window_id: u64, title: &str) -> Result<()> {
-        kitty::set_window_title(window_id, title)
+    pub async fn set_title(&self, pane_id: u64, title: &str) -> Result<()> {
+        kitty::set_pane_title(pane_id, title).await
+    }
+
+    /// Set or clear solo mode (isolate a single pane for debugging).
+    ///
+    /// When pane_id is Some, only that pane is shown by `ls` and similar.
+    /// When pane_id is None, solo mode is disabled and all panes are shown.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn solo(&self, pane_id: Option<u64>) -> Result<()> {
+        match &self.mode {
+            CoreMode::Connected => match send_request(&Request::Solo { pane_id }).await {
+                Ok(Response::Ok { message }) => {
+                    info!("{}", message);
+                    Ok(())
+                }
+                Ok(Response::Error { message }) => bail!("{}", message),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => bail!("daemon connection failed: {}", e),
+            },
+            CoreMode::Local(state) => {
+                // Local mode doesn't support solo - would need mutable state
+                bail!("Solo mode requires daemon to be running")
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -465,9 +524,10 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(state) => {
-                let windows: Vec<_> = state.windows.values().cloned().collect();
+                let windows: Vec<_> = state.panes.values().cloned().collect();
                 let wset_name = name.unwrap_or_else(|| "unnamed".to_string());
-                let mut wset = crate::wset::WSet::from_windows(&wset_name, &windows, &state.workspace_titles);
+                let mut wset =
+                    crate::wset::WSet::from_windows(&wset_name, &windows, &state.workspace_titles);
                 wset.save()?;
                 Ok(wset)
             }
@@ -478,16 +538,12 @@ impl BabelCore {
     #[instrument(level = "debug", skip(self))]
     pub async fn wset_list(&self) -> Result<Vec<crate::wset::WSetSummary>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::WSetList).await {
-                    Ok(Response::WSetList { wsets, .. }) => Ok(wsets),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => bail!("daemon connection failed: {}", e),
-                }
-            }
-            CoreMode::Local(_) => {
-                Ok(crate::wset::list_wsets()?)
-            }
+            CoreMode::Connected => match send_request(&Request::WSetList).await {
+                Ok(Response::WSetList { wsets, .. }) => Ok(wsets),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => bail!("daemon connection failed: {}", e),
+            },
+            CoreMode::Local(_) => Ok(crate::wset::list_wsets()?),
         }
     }
 
@@ -495,31 +551,46 @@ impl BabelCore {
     #[instrument(level = "debug", skip(self))]
     pub async fn wset_current(&self) -> Result<Option<String>> {
         match &self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::WSetCurrent).await {
-                    Ok(Response::WSetCurrent { name }) => Ok(name),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => bail!("daemon connection failed: {}", e),
-                }
-            }
-            CoreMode::Local(_) => {
-                Ok(crate::wset::get_current_wset_name()?)
-            }
+            CoreMode::Connected => match send_request(&Request::WSetCurrent).await {
+                Ok(Response::WSetCurrent { name }) => Ok(name),
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => bail!("daemon connection failed: {}", e),
+            },
+            CoreMode::Local(_) => Ok(crate::wset::get_current_wset_name()?),
         }
     }
 
     /// Load a workspace set, spawning windows for each session
     ///
-    /// This closes all existing Claude panes and spawns new ones from the WSet.
+    /// This closes all existing agent panes and spawns new ones from the WSet.
     /// Returns information about what was loaded and any sessions that couldn't be restored.
     #[instrument(level = "debug", skip(self))]
-    pub async fn wset_load(&mut self, name: Option<String>, dry_run: bool) -> Result<WSetLoadResult> {
+    pub async fn wset_load(
+        &mut self,
+        name: Option<String>,
+        dry_run: bool,
+    ) -> Result<WSetLoadResult> {
         match &mut self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::WSetLoad { name: name.clone(), dry_run }).await {
-                    Ok(Response::WSetLoaded { name, wspaces, windows, skipped, dry_run }) => {
-                        Ok(WSetLoadResult { name, wspaces, windows, skipped, dry_run })
-                    }
+                match send_request(&Request::WSetLoad {
+                    name: name.clone(),
+                    dry_run,
+                })
+                .await
+                {
+                    Ok(Response::WSetLoaded {
+                        name,
+                        wspaces,
+                        windows,
+                        skipped,
+                        dry_run,
+                    }) => Ok(WSetLoadResult {
+                        name,
+                        wspaces,
+                        windows,
+                        skipped,
+                        dry_run,
+                    }),
                     Ok(Response::Error { message }) => bail!("{}", message),
                     Ok(other) => bail!("unexpected response: {:?}", other),
                     Err(e) => bail!("daemon connection failed: {}", e),
@@ -544,12 +615,13 @@ impl BabelCore {
                     });
                 }
 
-                // Use the impl function from claude_discovery
-                let skipped = crate::utility::claude_discovery::load_wset(&wset).await?;
+                // Use the impl function from agent_discovery
+                let skipped = crate::utility::agent_discovery::load_wset(&wset).await?;
 
                 // Refresh state after loading (quick, activity via periodic poll)
-                if let Err(e) = state.refresh_windows(true) {
-                    warn!("failed to refresh windows after wset load: {}", e);
+                if let Err(e) = state.refresh_panes(true).await {
+                    trace_error!("pane refresh after wset load failed", wset = %wset_name, error = %e);
+                    warn!("failed to refresh panes after wset load: {}", e);
                 }
 
                 Ok(WSetLoadResult {
@@ -581,10 +653,10 @@ impl BabelCore {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Detached Claude Spawning
+    // Detached Agent Spawning
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Spawn Claude in a detached background process
+    /// Spawn the current provider in a detached background process.
     ///
     /// Returns the child PID (best-effort detection).
     /// The process runs fully detached via setsid.
@@ -597,7 +669,8 @@ impl BabelCore {
 
         // Build claude command with args
         // SHELL=/usr/bin/bash: Claude Code doesn't support zsh
-        let args_str = args.iter()
+        let args_str = args
+            .iter()
             .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
             .collect::<Vec<_>>()
             .join(" ");
@@ -636,13 +709,13 @@ impl BabelCore {
     // Fire-and-Forget Sessions
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Fire a prompt to Claude in a detached background session
+    /// Fire a prompt to an agent in a detached background session
     ///
     /// Combines workdir resolution, detached spawning, and task tracking.
     /// This is the high-level API for fire-and-forget prompts.
     ///
     /// # Arguments
-    /// * `prompt` - The prompt to send to Claude
+    /// * `prompt` - The prompt to send to the agent
     /// * `workdir` - Optional working directory (resolved automatically if None)
     /// * `ambient_sound` - Optional ambient sound name to associate with task
     #[instrument(level = "debug", skip(self, prompt))]
@@ -652,7 +725,7 @@ impl BabelCore {
         workdir: Option<&Path>,
         ambient_sound: Option<String>,
     ) -> Result<crate::fire::FiredTask> {
-        use crate::fire::{FiredTask, track_task};
+        use crate::fire::{track_task, FiredTask};
 
         // Resolve working directory
         let cwd = match workdir {
@@ -660,7 +733,7 @@ impl BabelCore {
             None => Self::resolve_workdir(None),
         };
 
-        info!(?cwd, prompt_len = prompt.len(), "firing claude session");
+        info!(?cwd, prompt_len = prompt.len(), "firing agent session");
 
         // Spawn detached claude with prompt
         let pid = Self::spawn_detached_claude(&cwd, &["-p", prompt]).await?;
@@ -695,7 +768,7 @@ impl BabelCore {
     // Session Spawning
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Spawn a Claude session in a new kitty window
+    /// Spawn an agent session in a new kitty window
     ///
     /// Uses `kitty-claude` script for consistent window setup. Returns the new
     /// window ID if found (may be None if window spawns but can't be located).
@@ -707,7 +780,7 @@ impl BabelCore {
         &mut self,
         session_id: &str,
         cwd: &Path,
-    ) -> Result<Option<ClaudePane>> {
+    ) -> Result<Option<AgentPane>> {
         match &mut self.mode {
             CoreMode::Connected => {
                 // Daemon handles spawning - use WSetLoad with single session as workaround
@@ -717,18 +790,18 @@ impl BabelCore {
             }
             CoreMode::Local(state) => {
                 // Direct spawn using the impl function
-                let window_id = crate::utility::claude_discovery::spawn_claude_session(
-                    session_id, cwd
-                ).await?;
+                let pane_id =
+                    crate::utility::agent_discovery::spawn_agent_session(session_id, cwd).await?;
 
-                // Refresh state to pick up new window (quick, activity via periodic poll)
-                if let Err(e) = state.refresh_windows(true) {
-                    warn!("failed to refresh windows after spawn: {}", e);
+                // Refresh state to pick up the new pane (quick, activity via periodic poll)
+                if let Err(e) = state.refresh_panes(true).await {
+                    trace_error!("pane refresh after spawn failed", session_id = session_id, error = %e);
+                    warn!("failed to refresh panes after spawn: {}", e);
                 }
 
-                // Return the window if found
-                match window_id {
-                    Some(id) => Ok(state.find_window_by_id(id).cloned()),
+                // Return the pane if found
+                match pane_id {
+                    Some(id) => Ok(state.find_pane_by_id(id).cloned()),
                     None => Ok(None),
                 }
             }
@@ -739,40 +812,50 @@ impl BabelCore {
     // State Detection
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Get the current state of a Claude session (idle, thinking, tool use, etc.)
+    /// Get the current state of an agent session (idle, thinking, tool use, etc.)
     ///
-    /// Analyzes the window's scrollback to determine what Claude is currently doing.
+    /// Analyzes the pane's scrollback to determine what the agent is currently doing.
     #[instrument(level = "debug", skip(self))]
-    pub async fn get_window_state(&self, window_id: u64) -> Result<ActivityState> {
-        let scrollback = self.scrollback(window_id, Some(50)).await?;
+    pub async fn get_pane_state(&self, pane_id: u64) -> Result<ActivityState> {
+        let scrollback = self.scrollback(pane_id, Some(50)).await?;
         Ok(detect_activity_state(&scrollback))
     }
 
-    /// Find all windows whose cwd is inside the given path
+    /// Compatibility alias for older callers. New code should use `get_pane_state()`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn get_window_state(&self, pane_id: u64) -> Result<ActivityState> {
+        self.get_pane_state(pane_id).await
+    }
+
+    /// Find all agent panes whose cwd is inside the given path.
     ///
-    /// Returns windows along with their current state and relative path from source.
+    /// Returns panes along with their current state and relative path from source.
     /// Used by migration to detect affected terminals.
     #[instrument(level = "debug", skip(self))]
-    pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingPane>> {
+    pub async fn find_panes_in_path(&self, source: &Path) -> Result<Vec<ConflictingPane>> {
         // Canonicalize source path for accurate comparison
-        let source = source.canonicalize()
+        let source = source
+            .canonicalize()
             .unwrap_or_else(|_| std::env::current_dir().unwrap().join(source));
 
-        let windows = self.windows().await?;
+        let panes = self.panes().await?;
         let mut conflicts = Vec::new();
 
-        for win in windows {
-            if win.cwd.starts_with(&source) {
-                let state = self.get_window_state(win.id()).await
+        for pane in panes {
+            if pane.cwd.starts_with(&source) {
+                let state = self
+                    .get_pane_state(pane.id())
+                    .await
                     .unwrap_or(ActivityState::Unknown);
 
-                let relative_path = win.cwd
+                let relative_path = pane
+                    .cwd
                     .strip_prefix(&source)
                     .unwrap_or(Path::new(""))
                     .to_path_buf();
 
                 conflicts.push(ConflictingPane {
-                    window: win,
+                    pane,
                     state,
                     relative_path,
                 });
@@ -780,6 +863,12 @@ impl BabelCore {
         }
 
         Ok(conflicts)
+    }
+
+    /// Compatibility alias for older callers. New code should use `find_panes_in_path()`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn find_windows_in_path(&self, source: &Path) -> Result<Vec<ConflictingPane>> {
+        self.find_panes_in_path(source).await
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -791,23 +880,28 @@ impl BabelCore {
     /// Sends: Ctrl-C (ensure clean prompt) → cd <new_path> → claude -r <session_id>
     /// This allows the terminal to continue working after a directory move.
     #[instrument(level = "debug", skip(self))]
-    pub async fn migrate_terminal(&self, window_id: u64, new_cwd: &Path, session_id: Option<&str>) -> Result<()> {
+    pub async fn migrate_terminal(
+        &self,
+        pane_id: u64,
+        new_cwd: &Path,
+        session_id: Option<&str>,
+    ) -> Result<()> {
         use std::time::Duration;
         use tokio::time::sleep;
 
         // Ctrl-C to ensure clean prompt
-        self.send(window_id, "\x03").await?;
+        self.send(pane_id, "\x03").await?;
         sleep(Duration::from_millis(100)).await;
 
         // cd to new directory
         let cd_cmd = format!("cd {}\n", shell_escape(new_cwd));
-        self.send(window_id, &cd_cmd).await?;
+        self.send(pane_id, &cd_cmd).await?;
         sleep(Duration::from_millis(50)).await;
 
         // Resume session if we have the ID
         if let Some(sid) = session_id {
             let resume_cmd = format!("claude -r {}\n", sid);
-            self.send(window_id, &resume_cmd).await?;
+            self.send(pane_id, &resume_cmd).await?;
         }
 
         Ok(())
@@ -833,10 +927,16 @@ impl BabelCore {
         new_path: &Path,
         options: MigrateOptions,
     ) -> Result<MigrateOutcome> {
-        info!(?old_path, ?new_path, dry_run = options.dry_run, "starting project migration");
+        info!(
+            ?old_path,
+            ?new_path,
+            dry_run = options.dry_run,
+            "starting project migration"
+        );
 
         // Canonicalize paths
-        let old_canonical = old_path.canonicalize()
+        let old_canonical = old_path
+            .canonicalize()
             .unwrap_or_else(|_| old_path.to_path_buf());
         let new_canonical = new_path.canonicalize().unwrap_or_else(|_| {
             if new_path.is_absolute() {
@@ -848,19 +948,22 @@ impl BabelCore {
             }
         });
 
-        // Find conflicting windows
-        let conflicts = self.find_windows_in_path(&old_canonical).await?;
+        // Find conflicting panes
+        let conflicts = self.find_panes_in_path(&old_canonical).await?;
 
         // Partition by migratable state
         // PlanApproval is considered migratable (waiting for user decision, not actively processing)
         let (migratable, active): (Vec<_>, Vec<_>) = conflicts.iter().partition(|c| {
-            matches!(c.state, ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval)
+            matches!(
+                c.state,
+                ActivityState::Idle | ActivityState::AwaitingInput | ActivityState::PlanApproval
+            )
         });
 
-        // Check for blocking active windows
+        // Check for blocking active panes
         if !active.is_empty() && !options.force {
             bail!(
-                "{} active Claude session(s) in source path would break. \
+                "{} active agent session(s) in source path would break. \
                 Use force=true to proceed anyway.",
                 active.len()
             );
@@ -872,20 +975,20 @@ impl BabelCore {
         if options.migrate_terminals && !options.dry_run {
             for conflict in &migratable {
                 let new_cwd = new_canonical.join(&conflict.relative_path);
-                let session_id = conflict.window.session_id.as_deref();
+                let session_id = conflict.pane.session_id.as_deref();
 
-                if let Err(e) = self.migrate_terminal(
-                    conflict.window.id(),
-                    &new_cwd,
-                    session_id,
-                ).await {
+                if let Err(e) = self
+                    .migrate_terminal(conflict.pane.id(), &new_cwd, session_id)
+                    .await
+                {
+                    trace_error!("terminal migration failed", pane_id = conflict.pane.id(), new_cwd = %new_cwd.display(), error = %e);
                     warn!(
-                        window_id = conflict.window.id(),
+                        pane_id = conflict.pane.id(),
                         error = %e,
                         "failed to migrate terminal"
                     );
                 } else {
-                    migrated_terminals.push(conflict.window.id());
+                    migrated_terminals.push(conflict.pane.id());
                 }
             }
         }
@@ -896,13 +999,16 @@ impl BabelCore {
             // Try rename first (same filesystem)
             if std::fs::rename(&old_canonical, &new_canonical).is_err() {
                 debug!("rename failed, falling back to copy+delete");
-                copy_dir_recursive(&old_canonical, &new_canonical)
-                    .with_context(|| format!(
+                copy_dir_recursive(&old_canonical, &new_canonical).with_context(|| {
+                    format!(
                         "Failed to copy {} → {}",
-                        old_canonical.display(), new_canonical.display()
-                    ))?;
-                std::fs::remove_dir_all(&old_canonical)
-                    .with_context(|| format!("Failed to remove source: {}", old_canonical.display()))?;
+                        old_canonical.display(),
+                        new_canonical.display()
+                    )
+                })?;
+                std::fs::remove_dir_all(&old_canonical).with_context(|| {
+                    format!("Failed to remove source: {}", old_canonical.display())
+                })?;
             }
             directory_moved = true;
         }
@@ -923,7 +1029,7 @@ impl BabelCore {
             storage: storage_result,
             directory_moved,
             terminals_migrated: migrated_terminals,
-            active_terminals: active.iter().map(|c| c.window.id()).collect(),
+            active_terminals: active.iter().map(|c| c.pane.id()).collect(),
             dry_run: options.dry_run,
         })
     }
@@ -938,23 +1044,30 @@ impl BabelCore {
     #[instrument(level = "debug", skip(self))]
     pub async fn refresh(&mut self) -> Result<()> {
         match &mut self.mode {
-            CoreMode::Connected => {
-                match send_request(&Request::Refresh).await {
-                    Ok(Response::Ok { .. }) => Ok(()),
-                    Ok(Response::Error { message }) => bail!("{}", message),
-                    Ok(other) => bail!("unexpected response: {:?}", other),
-                    Err(e) => bail!("daemon connection failed: {}", e),
+            CoreMode::Connected => match send_request(&Request::Refresh).await {
+                Ok(Response::Ok { .. }) => Ok(()),
+                Ok(Response::Error { message }) => {
+                    trace_error!("refresh failed", error = %message);
+                    bail!("{}", message)
                 }
-            }
+                Ok(other) => bail!("unexpected response: {:?}", other),
+                Err(e) => {
+                    trace_error!("IPC request failed", request = "Refresh", error = %e);
+                    bail!("daemon connection failed: {}", e)
+                }
+            },
             CoreMode::Local(state) => {
                 // Re-initialize state same as connect() (full refresh)
-                if let Err(e) = state.refresh_windows(false) {
-                    warn!("failed to refresh windows: {}", e);
+                if let Err(e) = state.refresh_panes(false).await {
+                    trace_error!("pane refresh failed", error = %e);
+                    warn!("failed to refresh panes: {}", e);
                 }
                 if let Err(e) = state.rebuild_summary_index() {
+                    trace_error!("summary index rebuild failed", error = %e);
                     warn!("failed to rebuild summary index: {}", e);
                 }
                 if let Err(e) = state.rebuild_fingerprint_index() {
+                    trace_error!("fingerprint index rebuild failed", error = %e);
                     warn!("failed to rebuild fingerprint index: {}", e);
                 }
                 Ok(())
@@ -967,9 +1080,9 @@ impl BabelCore {
 // Migration Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// A window whose cwd conflicts with a migration source path
+/// A pane whose cwd conflicts with a migration source path.
 pub struct ConflictingPane {
-    pub window: ClaudePane,
+    pub pane: AgentPane,
     pub state: ActivityState,
     /// Path relative to source directory
     pub relative_path: PathBuf,
@@ -995,9 +1108,9 @@ pub struct MigrateOutcome {
     pub storage: MigrateResult,
     /// Whether the physical directory was moved
     pub directory_moved: bool,
-    /// Window IDs of terminals that were migrated
+    /// Pane IDs of terminals that were migrated
     pub terminals_migrated: Vec<u64>,
-    /// Window IDs of active terminals (not migrated)
+    /// Pane IDs of active terminals (not migrated)
     pub active_terminals: Vec<u64>,
     /// Whether this was a dry run
     pub dry_run: bool,
@@ -1159,11 +1272,12 @@ fn detect_pending_input(scrollback: &str) -> (bool, Option<String>) {
 /// This is CLI-specific logic that uses the core API.
 pub async fn resolve_target(core: &BabelCore, target: &str) -> Result<Vec<u64>> {
     if target == "*" {
-        let windows = core.windows().await?;
+        let windows = core.panes().await?;
         Ok(windows.iter().map(|w| w.id()).collect())
     } else {
-        let id = target.parse::<u64>()
-            .map_err(|_| anyhow::anyhow!("invalid target '{}': expected window ID or '*'", target))?;
+        let id = target.parse::<u64>().map_err(|_| {
+            anyhow::anyhow!("invalid target '{}': expected window ID or '*'", target)
+        })?;
         Ok(vec![id])
     }
 }

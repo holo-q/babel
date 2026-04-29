@@ -1,6 +1,6 @@
 //! Smart Working Directory Resolution
 //!
-//! Intelligent CWD detection for spawning Claude sessions in the right context.
+//! Intelligent CWD detection for spawning agent sessions in the right context.
 //! Used by fire-and-forget prompts, session spawning, and anywhere we need to
 //! infer the user's intended working directory.
 //!
@@ -129,13 +129,16 @@ fn get_x11_focused_info() -> (u32, String, String) {
 /// Get the cwd of the focused kitty window via remote control
 ///
 /// Uses our kitty module's socket discovery rather than manual globbing.
+/// Note: This uses block_on because this is a sync utility function, but
+/// list_panes is async (due to timeout protection on kitten subprocess calls).
 fn get_kitty_focused_cwd() -> Option<PathBuf> {
     // Use our existing kitty infrastructure
-    let panes = kitty::list_panes().ok()?;
+    // block_on is safe here because this utility is only called from CLI contexts
+    // where a runtime is already running
+    let rt = tokio::runtime::Handle::try_current().ok()?;
+    let panes = rt.block_on(kitty::list_panes()).ok()?;
 
-    panes.into_iter()
-        .find(|p| p.is_focused)
-        .map(|p| p.cwd)
+    panes.into_iter().find(|p| p.is_focused).map(|p| p.cwd)
 }
 
 /// Get the cwd of a process via /proc/PID/cwd
@@ -164,8 +167,7 @@ fn get_process_cwd(pid: u32) -> Option<PathBuf> {
 fn get_cmdline_project(pid: u32) -> Option<PathBuf> {
     let cmdline_path = format!("/proc/{}/cmdline", pid);
     let cmdline_bytes = fs::read(&cmdline_path).ok()?;
-    let cmdline = String::from_utf8_lossy(&cmdline_bytes)
-        .replace('\0', " "); // Null-separated args
+    let cmdline = String::from_utf8_lossy(&cmdline_bytes).replace('\0', " "); // Null-separated args
 
     // Pattern: .venv/bin/python → parent of .venv is project
     if let Some(idx) = cmdline.find("/.venv/bin/python") {

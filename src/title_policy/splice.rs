@@ -58,11 +58,7 @@ struct SummaryEntry {
 /// * `Ok(true)` - Title successfully woven into the record
 /// * `Ok(false)` - File not found or couldn't be processed
 /// * `Err(e)` - I/O or parse error
-pub async fn splice_title(
-    jsonl_path: &Path,
-    title: &str,
-    settle_delay: Duration,
-) -> Result<bool> {
+pub async fn splice_title(jsonl_path: &Path, title: &str, settle_delay: Duration) -> Result<bool> {
     // Wait for Claude to finish writing
     tokio::time::sleep(settle_delay).await;
 
@@ -129,7 +125,9 @@ pub async fn splice_title(
     let new_content = new_lines.join("\n");
 
     // Atomic write: write to temp file, then rename
-    let parent = jsonl_path.parent().context("JSONL has no parent directory")?;
+    let parent = jsonl_path
+        .parent()
+        .context("JSONL has no parent directory")?;
     let temp_path = parent.join(format!(
         ".{}.tmp",
         jsonl_path.file_name().unwrap_or_default().to_string_lossy()
@@ -176,8 +174,13 @@ mod tests {
     async fn test_splice_title_with_existing_content() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        tokio::fs::write(&path, r#"{"type":"user","message":"hello"}
-{"type":"assistant","message":"hi"}"#).await.unwrap();
+        tokio::fs::write(
+            &path,
+            r#"{"type":"user","message":"hello"}
+{"type":"assistant","message":"hi"}"#,
+        )
+        .await
+        .unwrap();
 
         let result = splice_title(&path, "project:task", Duration::from_millis(0)).await;
         assert!(result.is_ok());
@@ -194,8 +197,13 @@ mod tests {
     async fn test_splice_title_after_existing_summary() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        tokio::fs::write(&path, r#"{"type":"summary","summary":"old title"}
-{"type":"user","message":"hello"}"#).await.unwrap();
+        tokio::fs::write(
+            &path,
+            r#"{"type":"summary","summary":"old title"}
+{"type":"user","message":"hello"}"#,
+        )
+        .await
+        .unwrap();
 
         let result = splice_title(&path, "new:title", Duration::from_millis(0)).await;
         assert!(result.is_ok());
@@ -213,8 +221,13 @@ mod tests {
     async fn test_splice_title_idempotent() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        tokio::fs::write(&path, r#"{"type":"summary","summary":"babel:title","generatedBy":"babel"}
-{"type":"user","message":"hello"}"#).await.unwrap();
+        tokio::fs::write(
+            &path,
+            r#"{"type":"summary","summary":"babel:title","generatedBy":"babel"}
+{"type":"user","message":"hello"}"#,
+        )
+        .await
+        .unwrap();
 
         let result = splice_title(&path, "new:title", Duration::from_millis(0)).await;
         assert!(result.is_ok());

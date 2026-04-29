@@ -1,16 +1,15 @@
 //! Cairo rendering for indicator dots — shared between panel widgets
 //!
-//! This module provides the canonical rendering implementation for Claude session
+//! This module provides the canonical rendering implementation for agent session
 //! indicator dots. Both richspace and richmon panels can use these functions
 //! to render consistent visuals.
 //!
 //! ## Rendering Layers
 //!
-//! Each dot is rendered with up to four layers (back to front):
+//! Each dot is rendered with up to three layers (back to front):
 //! 1. **Ring glow** - Animated aura during token output (ring_intensity > 0)
 //! 2. **Outline** - Static border for question state (if DotStyle.outline is set)
 //! 3. **Main dot** - Solid or textured fill (DotTexture::Solid, Stripes, Concentric)
-//! 4. **Highlight** - Top-left shine for 3D effect
 //!
 //! ## Usage
 //!
@@ -30,8 +29,7 @@
 //! });
 //! ```
 
-use gtk::cairo;
-use spaceship_std::visual::{DotStyle, DotTexture, OutlinePattern, OutlineStyle, Rgb};
+use crate::{DotStyle, DotTexture, OutlinePattern, OutlineStyle, Rgb};
 use std::f64::consts::TAU;
 
 /// Render a complete dot with optional ring, outline, and texture
@@ -46,7 +44,6 @@ use std::f64::consts::TAU;
 /// 1. Ring glow (if ring_intensity > 0.01)
 /// 2. Outline border (if outline is Some)
 /// 3. Main dot body (solid or textured)
-/// 4. Highlight shine
 pub fn render_dot(ctx: &cairo::Context, x: f64, y: f64, radius: f64, style: &DotStyle) {
     // Apply scale factor
     let radius = radius * style.scale;
@@ -91,16 +88,20 @@ pub fn render_dot(ctx: &cairo::Context, x: f64, y: f64, radius: f64, style: &Dot
             render_concentric_dot(ctx, x, y, radius, &style.color, *ring_count, secondary);
         }
     }
-
-    // 4. Highlight shine (top-left)
-    render_highlight(ctx, x, y, radius);
 }
 
 /// Render the animated ring glow effect
 ///
 /// The ring expands outward from the dot and fades with intensity.
 /// Used during token output to show activity.
-fn render_ring_glow(ctx: &cairo::Context, x: f64, y: f64, radius: f64, color: &Rgb, intensity: f64) {
+fn render_ring_glow(
+    ctx: &cairo::Context,
+    x: f64,
+    y: f64,
+    radius: f64,
+    color: &Rgb,
+    intensity: f64,
+) {
     let ring_radius = radius * (1.0 + intensity * 0.5);
     let alpha = intensity * 0.4;
 
@@ -249,24 +250,6 @@ pub fn decay_ring(intensity: &mut f32, dt_secs: f32) {
     if *intensity < 0.01 {
         *intensity = 0.0;
     }
-}
-
-/// Render the highlight shine on top-left
-///
-/// Adds a subtle 3D effect with a white highlight.
-fn render_highlight(ctx: &cairo::Context, x: f64, y: f64, radius: f64) {
-    let highlight_offset = radius * 0.3;
-    let highlight_radius = radius * 0.2;
-
-    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.3);
-    ctx.arc(
-        x - highlight_offset,
-        y - highlight_offset,
-        highlight_radius,
-        0.0,
-        TAU,
-    );
-    let _ = ctx.fill();
 }
 
 #[cfg(test)]

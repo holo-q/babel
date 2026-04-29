@@ -5,21 +5,22 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use claude_babel::core::BabelCore;
 
 // Re-export submodules
-pub mod query;
 pub mod action;
-pub mod mv;
+pub mod doctor;
 pub mod fingerprint;
-pub mod wset;
+pub mod fork;
+pub mod hook;
 pub mod legend;
 pub mod mcp;
-pub mod hook;
-pub mod doctor;
+pub mod mmdc;
+pub mod mv;
+pub mod query;
 pub mod resume;
-pub mod fork;
+pub mod wset;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -35,7 +36,7 @@ pub mod fork;
 pub enum Target {
     /// Target a specific window by ID
     Window(u64),
-    /// Target all Claude panes
+    /// Target all agent panes
     All,
     /// Target the current window (from KITTY_WINDOW_ID env var)
     /// This allows Claude to introspect its own pane
@@ -49,9 +50,10 @@ impl std::str::FromStr for Target {
         match s {
             "*" => Ok(Target::All),
             "." => Ok(Target::Current),
-            _ => s.parse::<u64>()
+            _ => s
+                .parse::<u64>()
                 .map(Target::Window)
-                .map_err(|_| format!("Invalid target '{}': expected window ID, '*', or '.'", s))
+                .map_err(|_| format!("Invalid target '{}': expected window ID, '*', or '.'", s)),
         }
     }
 }
@@ -60,13 +62,13 @@ impl std::str::FromStr for Target {
 ///
 /// This is a helper that converts Target enum to concrete window IDs.
 /// - Target::Window(id) → [id]
-/// - Target::All → all Claude panes from daemon
+/// - Target::All → all agent panes from daemon
 /// - Target::Current → current window from KITTY_WINDOW_ID env var
 pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result<Vec<u64>> {
     match target {
         Target::Window(id) => Ok(vec![*id]),
         Target::All => {
-            let windows = core.windows().await?;
+            let windows = core.panes().await?;
             Ok(windows.iter().map(|w| w.id()).collect())
         }
         Target::Current => {
@@ -78,7 +80,7 @@ pub async fn resolve_target(core: &BabelCore, target: &Target) -> anyhow::Result
 
 /// Get current pane info from kitty env vars
 ///
-/// Returns (window_id, socket) for the current kitty pane.
+/// Returns (pane_id, socket) for the current kitty pane.
 /// Kitty sets these env vars in every shell it spawns:
 /// - KITTY_WINDOW_ID: The pane's window ID
 /// - KITTY_LISTEN_ON: The socket path (e.g., "unix:/run/user/1000/kitty.sock-3497")
@@ -88,11 +90,12 @@ pub fn current_pane_info() -> anyhow::Result<(u64, String)> {
     let id_str = std::env::var("KITTY_WINDOW_ID")
         .map_err(|_| anyhow::anyhow!("KITTY_WINDOW_ID not set (not running in kitty?)"))?;
 
-    let id = id_str.parse::<u64>()
+    let id = id_str
+        .parse::<u64>()
         .map_err(|_| anyhow::anyhow!("Invalid KITTY_WINDOW_ID: {}", id_str))?;
 
-    let socket = std::env::var("KITTY_LISTEN_ON")
-        .unwrap_or_else(|_| claude_babel::kitty::default_socket());
+    let socket =
+        std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| claude_babel::kitty::default_socket());
 
     Ok((id, socket))
 }
@@ -119,7 +122,7 @@ pub fn current_pane_addr() -> anyhow::Result<claude_babel::kitty::PaneAddr> {
 ///
 /// This visual language provides instant recognition of command safety.
 pub fn spaceship_styles() -> clap::builder::Styles {
-    use anstyle::{Style, Effects};
+    use anstyle::{Effects, Style};
 
     clap::builder::Styles::styled()
         // Literals: no special style (we style command names individually)
@@ -137,13 +140,34 @@ const RESET: &str = "\x1b[0m";
 
 /// Query commands (read-only, safe) - rendered italic in help
 const QUERY_COMMANDS: &[&str] = &[
-    "ls", "ls-terminals", "ls-panes", "ls-sockets", "get-window", "get-pane",
-    "get-scrollback", "history", "target", "plan", "resume", "continue", "tail"
+    "ls",
+    "ls-terminals",
+    "ls-panes",
+    "ls-sockets",
+    "get-window",
+    "get-pane",
+    "get-scrollback",
+    "history",
+    "target",
+    "plan",
+    "resume",
+    "continue",
+    "tail",
 ];
 
 /// Mutation commands (state-changing) - rendered underlined in help
 const MUTATION_COMMANDS: &[&str] = &[
-    "focus", "send", "type", "broadcast", "set-icon", "set-read", "set-title", "mv", "fire", "reboot", "fork"
+    "focus",
+    "send",
+    "type",
+    "broadcast",
+    "set-icon",
+    "set-read",
+    "set-title",
+    "mv",
+    "fire",
+    "reboot",
+    "fork",
 ];
 
 /// Style command names in help output based on their semantic category
@@ -195,7 +219,7 @@ fn style_command_line(line: &str) -> String {
 
 #[derive(Parser)]
 #[command(name = "babel")]
-#[command(about = "Manage Claude Code sessions across kitty windows", long_about = None)]
+#[command(about = "Manage agent sessions across kitty panes", long_about = None)]
 #[command(styles = spaceship_styles())]
 pub struct Cli {
     #[command(subcommand)]
@@ -213,8 +237,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     // ─── Information Retrieval (italic = query, safe to run) ─────────────────────
-
-    /// List all discovered Claude sessions
+    /// List all discovered agent sessions
     ///
     /// Automatically scans all kitty instances on the system. Windows from
     /// non-current sockets are shown but some operations (focus, send) only
@@ -224,9 +247,13 @@ pub enum Commands {
         /// Show detailed multiline info for each session
         #[arg(short, long)]
         details: bool,
+
+        /// Also show ordinary or unrecognized terminal panes
+        #[arg(short, long)]
+        all: bool,
     },
 
-    /// List all kitty terminals (not just Claude)
+    /// List all kitty terminals (not just agents)
     ///
     /// Scans ALL kitty sockets on the system, showing terminals from all
     /// kitty instances. Useful for finding orphaned terminals.
@@ -250,13 +277,13 @@ pub enum Commands {
 
     /// Get status of a kitty window
     ///
-    /// Shows detailed information about a Claude pane including session info,
+    /// Shows detailed information about an agent pane including session info,
     /// fingerprint data, and activity state. If no window ID is provided, shows
-    /// the currently focused Claude pane.
+    /// the currently focused agent pane.
     #[command()]
     GetWindow {
         /// Kitty window ID to query (omit for focused window)
-        window_id: Option<u64>,
+        pane_id: Option<u64>,
     },
 
     /// Get status of a panel pane
@@ -283,7 +310,7 @@ pub enum Commands {
         lines: Option<usize>,
     },
 
-    /// Get the title/name of a Claude session
+    /// Get the title/name of an agent session
     ///
     /// Returns the conversation name from Claude's history. This is the name
     /// shown in Claude Code's history panel and can be set via `/rename <name>`.
@@ -301,7 +328,7 @@ pub enum Commands {
     ///
     /// Without arguments, shows recent conversations. Pass session IDs as
     /// positional arguments to show specific sessions.
-    #[command( alias = "h")]
+    #[command(alias = "h")]
     History {
         /// Session IDs to show (if none, shows recent conversations)
         #[arg(value_name = "SESSION")]
@@ -330,10 +357,10 @@ pub enum Commands {
     #[command(name = "target")]
     Target,
 
-    /// Show the todo/plan list for a Claude session
+    /// Show the todo/plan list for an agent session
     ///
     /// Extracts the latest todos from the session's JSONL transcript. The todo
-    /// list represents Claude's work plan created via the TodoWrite tool.
+    /// list represents the agent's work plan created via the TodoWrite tool.
     ///
     /// Target can be:
     /// - Window ID: Shows plan for that pane's session
@@ -382,7 +409,7 @@ pub enum Commands {
 
     /// Output recent transcript from a session
     ///
-    /// Shows the last N messages from a Claude session's transcript.
+    /// Shows the last N messages from an agent session's transcript.
     /// Useful for reviewing what happened or piping context to other tools.
     ///
     /// Target can be:
@@ -409,9 +436,9 @@ pub enum Commands {
 
     /// Fork from another session with full context injection
     ///
-    /// Launches a new Claude session primed with the transcript from the source
+    /// Launches a new agent session primed with the transcript from the source
     /// session, enabling "2nd degree mode" - meta-cognitive reflection on another
-    /// Claude's work.
+    /// the agent's work.
     ///
     /// The forked session receives:
     /// - Recent transcript from the source session
@@ -424,13 +451,15 @@ pub enum Commands {
     /// - Session ID → direct session reference
     ///
     /// Examples:
-    ///   babel fork                # Fork from cwd session (default)
+    ///   babel fork                # Fork from cwd session (default: reflect mode)
     ///   babel fork .              # Same as above
     ///   babel fork 42             # Fork from window 42
     ///   babel fork abc123         # Fork from session abc123
     ///   babel fork . -n 50        # Fork with more context
     ///   babel fork --hsplit       # Fork in horizontal split
     ///   babel fork --vsplit       # Fork in vertical split
+    ///   babel fork -m continue    # Seamless handoff mode
+    ///   babel fork -m review      # Code review mode
     #[command(visible_alias = "f")]
     Fork {
         /// Target: ".", window ID, or session ID
@@ -440,6 +469,15 @@ pub enum Commands {
         /// Number of messages to include in context
         #[arg(short = 'n', long, default_value = "30")]
         lines: usize,
+
+        /// Cognitive mode for the forked session
+        ///
+        /// Available modes:
+        /// - reflect (default): Metacognitive self-optimization, process introspection
+        /// - continue: Seamless handoff, minimal meta-commentary
+        /// - review: Code review perspective, critical eye
+        #[arg(short, long, default_value = "reflect")]
+        mode: String,
 
         /// Launch as horizontal split in current window
         #[arg(long, conflicts_with_all = ["vsplit", "tab"])]
@@ -455,21 +493,20 @@ pub enum Commands {
     },
 
     // ─── Actions (underline = mutation, changes state) ───────────────────────────
-
-    /// Focus a Claude pane (interactive picker if no ID given)
+    /// Focus an agent pane (interactive picker if no ID given)
     #[command()]
     Focus {
         /// Kitty window ID to focus (omit for interactive picker)
-        window_id: Option<u64>,
+        pane_id: Option<u64>,
 
         /// Search by scrollback content instead of title
         #[arg(long, short)]
         content: bool,
     },
 
-    /// Send text to Claude pane(s) and press Enter
+    /// Send text to agent pane(s) and press Enter
     ///
-    /// Sends text followed by Enter (carriage return) to submit to Claude.
+    /// Sends text followed by Enter (carriage return) to submit to the agent.
     /// If any targeted window has unsent text in the input area, the operation
     /// is aborted and those windows are listed.
     ///
@@ -492,7 +529,7 @@ pub enum Commands {
         force: bool,
     },
 
-    /// Type text into Claude pane(s) without pressing Enter
+    /// Type text into agent pane(s) without pressing Enter
     ///
     /// Types text into the input area without submitting. Useful for composing
     /// prompts incrementally or when you want manual control over when to send.
@@ -516,9 +553,9 @@ pub enum Commands {
         force: bool,
     },
 
-    /// Broadcast a prompt to all Claude panes
+    /// Broadcast a prompt to all agent panes
     ///
-    /// Sends the same text to every Claude pane and presses Enter. Equivalent
+    /// Sends the same text to every agent pane and presses Enter. Equivalent
     /// to `babel send '*' "text"` but more explicit about intent.
     ///
     /// If any window has unsent text in the input area, the broadcast is aborted
@@ -539,7 +576,7 @@ pub enum Commands {
 
     /// Set a custom icon for window(s)
     ///
-    /// Associates a custom emoji or icon with a Claude session. The icon
+    /// Associates a custom emoji or icon with an agent session. The icon
     /// appears in `babel ls` output and can be used to visually mark
     /// important sessions.
     ///
@@ -563,7 +600,6 @@ pub enum Commands {
     },
 
     // ─── Management ─────────────────────────────────────────────────────────────
-
     /// Set window title(s) or refresh auto-titles
     ///
     /// With a title argument, sets a custom title for the target window(s).
@@ -588,7 +624,7 @@ pub enum Commands {
 
     /// Solo a single pane for debugging (isolate one pane, hide others)
     ///
-    /// Useful when debugging a specific Claude session - hides all other panes
+    /// Useful when debugging a specific agent session - hides all other panes
     /// from `babel ls` and similar outputs to reduce noise. Use `--off` to restore.
     ///
     /// Target can be a window ID or "." for current window.
@@ -650,7 +686,7 @@ pub enum Commands {
         force: bool,
     },
 
-    /// Fire a prompt to Claude in a detached background session
+    /// Fire a prompt to an agent in a detached background session
     ///
     /// Launches Claude with your prompt in a new detached terminal. The working
     /// directory is auto-detected from your current context (focused window, IDE,
@@ -665,7 +701,7 @@ pub enum Commands {
     ///   babel fire --ambient rain "Long research task"
     #[command()]
     Fire {
-        /// The prompt to send to Claude
+        /// The prompt to send to the agent
         prompt: String,
 
         /// Working directory (auto-detected if omitted)
@@ -685,7 +721,7 @@ pub enum Commands {
     #[command()]
     FireClean,
 
-    /// Reboot Claude pane(s) - close and reopen with same session
+    /// Reboot agent pane(s) - close and reopen with same session
     ///
     /// Useful for applying new kitty forks, Claude Code updates, recovering from
     /// frozen conversations, or pre-testing wset configurations. Preserves:
@@ -699,7 +735,7 @@ pub enum Commands {
     /// Examples:
     ///   babel reboot 42       # Reboot window 42
     ///   babel reboot .        # Reboot current window
-    ///   babel reboot '*'      # Reboot ALL Claude panes
+    ///   babel reboot '*'      # Reboot ALL agent panes
     #[command()]
     Reboot {
         /// Target: window ID, "*" for all, or "." for current
@@ -707,7 +743,6 @@ pub enum Commands {
     },
 
     // ─── Namespace Commands (normal = has subcommands or system) ────────────────
-
     /// Debug fingerprint linkage between terminals, sessions, and directories
     ///
     /// Traces the connection between a terminal window, its scrollback fingerprint,
@@ -744,7 +779,7 @@ pub enum Commands {
 
     /// Manage saved workspace sets (WSet)
     ///
-    /// Workspace sets capture all Claude panes and their positions across workspaces.
+    /// Workspace sets capture all agent panes and their positions across workspaces.
     /// Use `babel wset save` and `babel wset load` to manage layouts.
     #[command(name = "wset")]
     WSet {
@@ -769,7 +804,7 @@ pub enum Commands {
     /// Launch interactive TUI debug console
     ///
     /// Requires daemon to be running. Shows live view of:
-    /// - Claude panes and their states
+    /// - agent panes and their states
     /// - Fired tasks and their status
     /// - IPC traffic (SEND/RECV/EVNT) for debugging
     ///
@@ -798,16 +833,16 @@ pub enum Commands {
 
     /// Run MCP server for Claude Code integration
     ///
-    /// Exposes babel's Claude session management via the Model Context Protocol.
+    /// Exposes babel's agent session management via the Model Context Protocol.
     /// This enables Claude Code (or any MCP client) to query sessions, send prompts,
-    /// and manage Claude panes programmatically.
+    /// and manage agent panes programmatically.
     ///
     /// Tools exposed:
-    ///   - claude_sessions: List all active Claude sessions
+    ///   - claude_sessions: List all active agent sessions
     ///   - claude_history: Query conversation history
-    ///   - claude_send: Send text to a Claude pane
+    ///   - claude_send: Send text to an agent pane
     ///   - claude_fire: Fire a prompt in background
-    ///   - claude_focus: Focus a Claude pane
+    ///   - claude_focus: Focus an agent pane
     ///
     /// Runs on stdio transport (stdin/stdout JSON-RPC).
     #[command()]
@@ -840,6 +875,46 @@ pub enum Commands {
     /// or real-time event updates.
     #[command()]
     Doctor,
+
+    // ─── Generation Tools ──────────────────────────────────────────────────────
+    /// Generate a mermaid architecture diagram of a codebase
+    ///
+    /// Fires a agent instance that:
+    /// 1. Maps the codebase broadly (tree, reading types)
+    /// 2. Dispatches up to 15 subagents to map different "regions"
+    /// 3. Aggregates results into a master mermaid document
+    /// 4. Processes with `mmdc` to produce the diagram
+    ///
+    /// The result is an exhaustive, accurate, holistic system diagram
+    /// representing the architecture and component interconnections.
+    ///
+    /// Examples:
+    ///   babel mmdc .                       # Map current directory
+    ///   babel mmdc ~/project               # Map a specific project
+    ///   babel mmdc . architecture.mmd      # Custom output name
+    ///   babel mmdc ~/project -o ./out      # Output to specific directory
+    #[command(visible_alias = "mmd")]
+    Mmdc {
+        /// Directory to map (defaults to current directory)
+        #[arg(default_value = ".")]
+        dirpath: PathBuf,
+
+        /// Output path for the mermaid file (optional)
+        /// If a directory, outputs architecture.mmd there
+        /// If a file, uses that exact path
+        /// If omitted, outputs to dirpath/architecture.mmd
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+
+        /// Just generate the prompt and fire Claude (don't wait)
+        #[arg(long)]
+        fire: bool,
+
+        /// Print Claude's output to stdout (for debugging/capturing transcript)
+        /// Runs Claude in print mode (-p) with output streamed to this terminal
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
 }
 
 /// Hook handler subcommands—direct signals from Claude Code
@@ -852,7 +927,52 @@ pub enum Commands {
 /// - Notification: Permission/idle alerts
 /// - SubagentStop: Subagent finishes
 /// - PreCompact: Before transcript compression
-/// - Stop: Claude finishes responding (existing)
+/// - Stop: agent finishes responding (existing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookInstallTarget {
+    Claude,
+    Codex,
+    FactoryDroid,
+    QwenCode,
+    Kimi,
+    Gemini,
+    Crush,
+    Cursor,
+    Cline,
+    OpenCode,
+    Amp,
+    Kiro,
+    GithubCopilot,
+    RooCode,
+    KiloCode,
+    Aider,
+    Antigravity,
+}
+
+impl HookInstallTarget {
+    pub fn agent_kind(self) -> claude_babel::AgentKind {
+        match self {
+            HookInstallTarget::Claude => claude_babel::AgentKind::Claude,
+            HookInstallTarget::Codex => claude_babel::AgentKind::Codex,
+            HookInstallTarget::FactoryDroid => claude_babel::AgentKind::FactoryDroid,
+            HookInstallTarget::QwenCode => claude_babel::AgentKind::QwenCode,
+            HookInstallTarget::Kimi => claude_babel::AgentKind::Kimi,
+            HookInstallTarget::Gemini => claude_babel::AgentKind::Gemini,
+            HookInstallTarget::Crush => claude_babel::AgentKind::Crush,
+            HookInstallTarget::Cursor => claude_babel::AgentKind::Cursor,
+            HookInstallTarget::Cline => claude_babel::AgentKind::Cline,
+            HookInstallTarget::OpenCode => claude_babel::AgentKind::OpenCode,
+            HookInstallTarget::Amp => claude_babel::AgentKind::Amp,
+            HookInstallTarget::Kiro => claude_babel::AgentKind::Kiro,
+            HookInstallTarget::GithubCopilot => claude_babel::AgentKind::GithubCopilot,
+            HookInstallTarget::RooCode => claude_babel::AgentKind::RooCode,
+            HookInstallTarget::KiloCode => claude_babel::AgentKind::KiloCode,
+            HookInstallTarget::Aider => claude_babel::AgentKind::Aider,
+            HookInstallTarget::Antigravity => claude_babel::AgentKind::Antigravity,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum HookCommands {
     /// Handle Stop event—worker has finished speaking
@@ -1017,15 +1137,60 @@ pub enum HookCommands {
         kitty_id: Option<u64>,
     },
 
-    /// Install babel hooks into Claude Code settings
+    /// Handle hook event from stdin JSON (no bash/jq overhead)
     ///
-    /// Registers babel's hook handlers in ~/.claude/settings.json so Claude Code
-    /// will call them on lifecycle events. This is the neural handshake.
+    /// Reads agent harness hook payload directly from stdin and dispatches
+    /// to the appropriate handler. Eliminates bash+jq process spawning.
+    ///
+    /// Codex's lifecycle hooks (stable in 2026) ship the same payload schema
+    /// as Claude Code's, so a single stdin path serves both — `--agent` only
+    /// influences logging and any agent-specific telemetry. Pane state and
+    /// indicator color are derived from the foreground process detected by
+    /// the daemon, which means this flag is optional but improves trace
+    /// clarity when both harnesses run side by side.
+    ///
+    /// Examples:
+    ///   echo '{"session_id":"abc","tool_name":"Bash"}' | babel hook stdin pre-tool
+    ///   echo '{"session_id":"abc"}' | babel hook stdin stop --agent codex
+    #[command()]
+    Stdin {
+        /// Event type: pre-tool, post-tool, stop, prompt, session-start,
+        /// notification, subagent-stop, pre-compact
+        event: String,
+
+        /// Which harness fired this hook (claude / codex). Defaults to claude
+        /// for backwards compat with existing hook scripts that predate the
+        /// codex hook surface. Surfaced in trace events; the agent_kind
+        /// stored on each pane is still derived from cmdline detection by
+        /// the daemon.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
+
+    /// Handle a Codex notify payload
+    ///
+    /// Codex currently exposes a single `notify` program instead of Claude-style
+    /// lifecycle hooks. We normalize that payload into Babel's hook state model.
+    #[command(name = "codex-notify")]
+    CodexNotify {
+        /// Raw JSON payload passed as the notify program argument
+        payload: String,
+    },
+
+    /// Install babel hook integrations for supported harnesses
+    ///
+    /// By default this installs both:
+    /// - Claude Code hooks in ~/.claude/settings.json
+    /// - Codex notify in ~/.codex/config.toml
     #[command()]
     Install {
         /// Preview changes without writing (dry run)
         #[arg(long)]
         dry_run: bool,
+
+        /// Which harness integrations to install
+        #[arg(long = "target", value_enum)]
+        targets: Vec<HookInstallTarget>,
     },
 }
 
@@ -1034,7 +1199,7 @@ pub enum HookCommands {
 pub enum WSetCommands {
     /// Save current workspace layout
     ///
-    /// Captures all Claude panes and their positions across workspaces.
+    /// Captures all agent panes and their positions across workspaces.
     /// WSet files are stored in ~/.config/claude-babel/wsets/
     #[command(alias = "s")]
     Save {
@@ -1048,7 +1213,7 @@ pub enum WSetCommands {
 
     /// Load a workspace layout
     ///
-    /// Spawns Claude panes from the saved state.
+    /// Spawns agent panes from the saved state.
     /// Sessions that no longer exist in ~/.claude are skipped.
     #[command(alias = "l")]
     Load {

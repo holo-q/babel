@@ -162,7 +162,8 @@ The prompts may be:
 Prompts (newest last):
 {prompts}
 
-Title:"#.to_string()
+Title:"#
+        .to_string()
 }
 
 fn default_flush_strategy() -> String {

@@ -1,6 +1,6 @@
 //! Fire-and-Forget Claude Session Tracking
 //!
-//! Tracks background Claude sessions launched via `babel fire`. These are
+//! Tracks background agent sessions launched via `babel fire`. These are
 //! autonomous workers released to work alone—given a task and set free to
 //! complete it, detached from any terminal. Each worker may carry its own
 //! ambient sound as it works in solitude.
@@ -27,7 +27,7 @@ use std::process::Command;
 /// they complete their journey.
 ///
 /// Stored in ~/.local/state/claude-fire/ to allow monitoring and cleanup
-/// of background claude sessions.
+/// of background agent sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FiredTask {
     /// Unique task identifier (timestamp-based)
@@ -83,8 +83,7 @@ pub fn track_task(task: &FiredTask) -> Result<()> {
 
     // Write PID file
     let pid_file = state.join(format!("{}.pid", task.task_id));
-    fs::write(&pid_file, task.pid.to_string())
-        .context("Failed to write PID file")?;
+    fs::write(&pid_file, task.pid.to_string()).context("Failed to write PID file")?;
 
     // Write info file (prompt + ambient sound + workdir)
     let info_file = state.join(format!("{}.info", task.task_id));
@@ -94,8 +93,7 @@ pub fn track_task(task: &FiredTask) -> Result<()> {
         task.ambient_sound.as_deref().unwrap_or(""),
         task.workdir.display()
     );
-    fs::write(&info_file, info_content)
-        .context("Failed to write info file")?;
+    fs::write(&info_file, info_content).context("Failed to write info file")?;
 
     Ok(())
 }
@@ -121,7 +119,8 @@ pub fn list_running_tasks() -> Result<Vec<FiredTask>> {
             continue;
         }
 
-        let task_id = path.file_stem()
+        let task_id = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
@@ -141,13 +140,16 @@ pub fn list_running_tasks() -> Result<Vec<FiredTask>> {
             continue;
         }
 
-        let info_content = fs::read_to_string(&info_file)
-            .context("Failed to read info file")?;
+        let info_content = fs::read_to_string(&info_file).context("Failed to read info file")?;
         let lines: Vec<&str> = info_content.lines().collect();
 
         let prompt_preview = lines.first().unwrap_or(&"").to_string();
         let ambient_sound = lines.get(1).and_then(|s| {
-            if s.is_empty() { None } else { Some(s.to_string()) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
         });
         let workdir = PathBuf::from(lines.get(2).unwrap_or(&""));
 

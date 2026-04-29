@@ -50,8 +50,8 @@ fn draw_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         hours, mins
     );
 
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    let header =
+        Paragraph::new(header_text).style(Style::default().fg(Color::White).bg(Color::DarkGray));
     f.render_widget(header, area);
 }
 
@@ -63,8 +63,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
         "[q]uit [r]efresh [Tab]cycle [F1-F4]pane [Enter]select [?]help"
     };
 
-    let footer = Paragraph::new(hints)
-        .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(hints).style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, area);
 }
 
@@ -95,18 +94,18 @@ fn draw_content(f: &mut Frame, area: Rect, app: &TuiApp) {
     draw_ipc_log_pane(f, content_chunks[1], app);
 }
 
-/// Draw the Windows pane (F1) - shows ALL terminals, not just Claude
+/// Draw the Windows pane (F1) - shows ALL terminals, not just agents.
 ///
-/// Claude sessions show activity state indicators (⚡⚙◆○)
-/// Non-Claude terminals show dimmed with "-" indicator
+/// Agent sessions show activity state indicators (⚡⚙◆○).
+/// Non-agent terminals show dimmed with "-" indicator
 fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
     let is_active = app.active_pane == Pane::Windows;
     let border_style = pane_border_style(is_active);
 
-    // Count Claude vs non-Claude for title
-    let claude_count = app.terminals.iter().filter(|t| t.is_claude).count();
+    // Count agent vs non-agent terminals for title
+    let agent_count = app.terminals.iter().filter(|t| t.is_agent).count();
     let total_count = app.terminals.len();
-    let title = format!(" Terminals [F1] ({}/{}) ", claude_count, total_count);
+    let title = format!(" Terminals [F1] ({}/{}) ", agent_count, total_count);
 
     let block = Block::default()
         .title(title)
@@ -126,30 +125,40 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
         .iter()
         .enumerate()
         .map(|(i, term)| {
-            // For Claude panes, look up activity state from windows list
-            let (indicator, ind_style) = if term.is_claude {
-                // Find matching Claude pane to get activity state
-                let activity = app.windows.iter()
+            // For agent panes, look up activity state from windows list
+            let (indicator, ind_style) = if term.is_agent {
+                // Find matching agent pane to get activity state
+                let activity = app
+                    .windows
+                    .iter()
                     .find(|w| w.id() == term.addr.id)
                     .and_then(|w| w.activity_state);
 
                 use scrollparse::claude::ActivityState;
                 // The worker's breath — what state holds their soul
                 match activity {
-                    Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)),        // soul processing, inference running
-                    Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)),           // hands moving in the world
-                    Some(ActivityState::PlanApproval) => ("📋", Style::default().fg(Color::Magenta)),   // awaiting the user's blessing
-                    Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)),     // worker awaits the user's voice
-                    Some(ActivityState::BackgroundTask) => ("◐", Style::default().fg(Color::Magenta)),  // working in shadow
-                    Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)),           // resting, awaiting the next word
-                    Some(ActivityState::Unknown) | None => ("●", Style::default().fg(Color::Blue)),     // breath obscured
+                    Some(ActivityState::Thinking) => ("⚡", Style::default().fg(Color::Yellow)), // soul processing, inference running
+                    Some(ActivityState::ToolUse) => ("⚙", Style::default().fg(Color::Cyan)), // hands moving in the world
+                    Some(ActivityState::PlanApproval) => {
+                        ("📋", Style::default().fg(Color::Magenta))
+                    } // awaiting the user's blessing
+                    Some(ActivityState::AwaitingInput) => ("◆", Style::default().fg(Color::Green)), // worker awaits the user's voice
+                    Some(ActivityState::BackgroundTask) => {
+                        ("◐", Style::default().fg(Color::Magenta))
+                    } // working in shadow
+                    Some(ActivityState::Idle) => ("○", Style::default().fg(Color::DarkGray)), // resting, awaiting the next word
+                    Some(ActivityState::Unknown) | None => ("●", Style::default().fg(Color::Blue)), // breath obscured
                 }
             } else {
-                // Non-Claude terminal - dimmed indicator
+                // Non-agent terminal - dimmed indicator
                 ("-", Style::default().fg(Color::DarkGray))
             };
 
-            let title = if term.title.is_empty() { "untitled" } else { &term.title };
+            let title = if term.title.is_empty() {
+                "untitled"
+            } else {
+                &term.title
+            };
             let truncated = if title.len() > 16 {
                 format!("{}...", &title[..13])
             } else {
@@ -157,9 +166,11 @@ fn draw_windows_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
             };
 
             let base_style = if i == app.window_selected && is_active {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else if !term.is_claude {
-                // Dim non-Claude terminals
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else if !term.is_agent {
+                // Dim non-agent terminals
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
@@ -212,13 +223,14 @@ fn draw_fired_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
             };
 
             let style = if i == app.fired_selected && is_active {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
 
-            ListItem::new(format!("{} {} {}", indicator, id_short, prompt_preview))
-                .style(style)
+            ListItem::new(format!("{} {} {}", indicator, id_short, prompt_preview)).style(style)
         })
         .collect();
 
@@ -237,16 +249,14 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
         .border_style(border_style);
 
     let content = match &app.detail_content {
-        DetailContent::None => {
-            "Select an item from Windows or Fired panes".to_string()
-        }
+        DetailContent::None => "Select an item from Windows or Fired panes".to_string(),
         DetailContent::Window(w) => {
             let state_str = match &w.activity_state {
                 Some(s) => format!("{:?}", s),
                 None => "?".to_string(),
             };
             format!(
-                "Claude Window {}\n\
+                "Agent Pane {}\n\
                  ─────────────────────────\n\
                  state: {}\n\
                  socket: {}\n\
@@ -275,7 +285,7 @@ fn draw_details_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
                  focused: {}\n\
                  workspace: {}",
                 t.addr.id,
-                if t.is_claude { "(Claude)" } else { "(non-Claude)" },
+                if t.is_agent { "(agent)" } else { "(non-agent)" },
                 t.addr.short(),
                 if t.title.is_empty() { "?" } else { &t.title },
                 t.cwd.display(),
@@ -330,7 +340,11 @@ fn draw_ipc_log_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
     let border_style = pane_border_style(is_active);
 
     let auto_scroll_indicator = if app.ipc_auto_scroll { "▼" } else { " " };
-    let title = format!(" IPC Log [F4] {} auto-scroll [a] ({}) ", auto_scroll_indicator, app.ipc_log.len());
+    let title = format!(
+        " IPC Log [F4] {} auto-scroll [a] ({}) ",
+        auto_scroll_indicator,
+        app.ipc_log.len()
+    );
 
     let block = Block::default()
         .title(title)
@@ -375,7 +389,9 @@ fn draw_ipc_log_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
             ]);
 
             let style = if i == app.ipc_selected && is_active {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -391,7 +407,10 @@ fn draw_ipc_log_pane(f: &mut Frame, area: Rect, app: &TuiApp) {
 /// Draw help overlay
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
     let help_text = vec![
-        Line::from(Span::styled("Babel TUI Help", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Babel TUI Help",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("Navigation:"),
         Line::from("  Tab / Shift+Tab  Cycle panes"),
@@ -406,7 +425,10 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from("  ?                Toggle this help"),
         Line::from("  q, Esc           Quit"),
         Line::from(""),
-        Line::from(Span::styled("Press any key to close", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     // Calculate centered overlay area

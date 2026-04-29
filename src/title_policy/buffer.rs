@@ -2,10 +2,10 @@
 //!
 //! Stores generated titles until pane closes and JSONL can be spliced.
 
+use super::GeneratedTitle;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use super::GeneratedTitle;
 
 /// Buffered title awaiting splice
 #[derive(Debug, Clone)]
@@ -34,12 +34,15 @@ impl TitleBuffer {
     pub fn store(&self, title: GeneratedTitle) {
         let session_id = title.session_id.clone();
         let mut titles = self.titles.write().unwrap();
-        titles.insert(session_id, BufferedTitle {
-            title,
-            buffered_at: Instant::now(),
-            attempts: 0,
-            last_error: None,
-        });
+        titles.insert(
+            session_id,
+            BufferedTitle {
+                title,
+                buffered_at: Instant::now(),
+                attempts: 0,
+                last_error: None,
+            },
+        );
     }
 
     /// Take title for splicing (removes from buffer)
