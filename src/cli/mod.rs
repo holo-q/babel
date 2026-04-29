@@ -229,6 +229,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Diagnostic operation mode: produce an evidence report and do not mutate
+    #[arg(long, global = true)]
+    pub doctor: bool,
+
     /// Logging args (--debug) - enforced by spaceship-std
     #[command(flatten)]
     pub logging: spaceship_std::logging::LoggingArgs,
@@ -643,22 +647,21 @@ pub enum Commands {
         off: bool,
     },
 
-    /// Move a directory while preserving Claude conversation history
+    /// Move a directory while preserving conversation history
     ///
-    /// When you move a project directory, Claude's conversation history becomes
-    /// orphaned because it stores paths like ~/.claude/projects/-home-user-OldProject/.
-    /// This command updates those paths so your conversations follow the directory.
+    /// `--doctor` is the supported universal planning surface. It inspects native
+    /// harness state, reports live panes and path-bound storage, and makes no
+    /// changes. The legacy non-doctor path is Claude-only compatibility code.
     ///
-    /// If Claude terminals are open in the source path:
-    /// - Idle terminals are automatically migrated (cd + claude -r)
-    /// - Active terminals block the move (use --force to override)
+    /// If agent panes are open in the source path:
+    /// - Idle panes are reported as migratable
+    /// - Active panes are blockers unless a future apply command explicitly
+    ///   handles interruption/restart
     ///
     /// Usage:
-    ///   babel mv ~/OldProject ~/NewProject           # Move + update history
-    ///   babel mv --dry ~/OldProject ~/NewProject      # Preview changes only
-    ///   babel mv --history-only ~/Old ~/New          # Update history without moving
-    ///   babel mv --anxious ~/Old ~/New               # Step-by-step confirmation
-    ///   babel mv --force ~/Old ~/New                 # Force move even with active terminals
+    ///   babel mv --doctor ~/OldProject ~/NewProject  # Universal diagnostic operation graph
+    ///   babel mv --dry ~/OldProject ~/NewProject     # Legacy Claude-only preview
+    ///   babel mv --history-only ~/Old ~/New          # Legacy Claude-only history update
     #[command()]
     Mv {
         /// Source directory path

@@ -71,9 +71,9 @@ babel fire-ls                              # List running fire tasks
 babel fire-clean                           # Clean up finished tasks
 
 # Directory migration (preserves provider history)
-babel mv ~/old ~/new          # Move + update history paths
-babel mv --dry ~/old ~/new    # Preview changes only
-babel mv --history-only       # Just update history
+babel mv --doctor ~/old ~/new # Universal evidence report; no mutation
+babel mv --dry ~/old ~/new    # Legacy Claude-only preview
+babel mv --history-only       # Legacy Claude-only history update
 
 # Workspace sets
 babel wset save mysetup       # Save current layout
@@ -96,6 +96,9 @@ babel tui              # Interactive debug console
 - **overlay**: User metadata database (icons, read status, notes)
 - **state**: Detect session activity state from scrollback
 - **fire**: Quick agent launch with smart directory detection
+- **harness_ops**: Harness-aware operation planning for move/resume-style workflows.
+  `--doctor` is the first public surface: it audits native storage and live panes
+  without using a global index or the legacy Claude-only mover.
 
 ### Data Storage
 
@@ -175,6 +178,8 @@ These harnesses do not meet the orchestration bar. Babel should not contort itse
 ### Deprecated And Consumed
 
 These projects are prior art and reference material. Babel's direction is to consume the useful jutsus into one harness-aware system: move, resume, handoff, search, archive, migration, bridge contracts, and verification. Once absorbed, they are deprecated as standalone answers for this stack, not dismissed as bad work.
+
+Local clones live under ignored `references/` when doing adapter work. The clones are a research board, not vendored code; durable conclusions belong in `Docs/18-harness-operations-board.md`, the harness roster, tests, or adapter comments.
 
 | Project | Link | Jutsus to consume |
 | --- | --- | --- |

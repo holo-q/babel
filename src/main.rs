@@ -217,17 +217,21 @@ async fn main() -> Result<()> {
             anxious,
             force,
         } => {
-            cli::mv::cmd_mv(
-                &mut core,
-                source,
-                dest,
-                dry_run,
-                history_only,
-                anxious,
-                force,
-                cli.json,
-            )
-            .await
+            if cli.doctor {
+                cli::doctor::cmd_migration_doctor(&core, source, dest, cli.json).await
+            } else {
+                cli::mv::cmd_mv(
+                    &mut core,
+                    source,
+                    dest,
+                    dry_run,
+                    history_only,
+                    anxious,
+                    force,
+                    cli.json,
+                )
+                .await
+            }
         }
 
         Commands::Fingerprint {

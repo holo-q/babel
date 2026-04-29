@@ -7,7 +7,12 @@
 //! - Socket connectivity
 
 use anyhow::Result;
-use std::path::Path;
+use claude_babel::core::BabelCore;
+use claude_babel::harness_ops::{
+    live_panes_from_conflicts, plan_migration, AdapterReadiness, HarnessMigrationReport,
+    MigrationDoctorReport,
+};
+use std::path::{Path, PathBuf};
 
 /// ANSI color codes for output
 mod colors {
@@ -316,4 +321,130 @@ pub async fn cmd_doctor() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Command-level doctor for `babel mv --doctor`.
+///
+/// This is deliberately stronger than a dry-run: it gathers native harness
+/// storage evidence, live pane impact, collision risk, and adapter readiness.
+/// It does not call the legacy Claude-only mover and never mutates state.
+pub async fn cmd_migration_doctor(
+    core: &BabelCore,
+    source: PathBuf,
+    dest: PathBuf,
+    json: bool,
+) -> Result<()> {
+    let source = super::mv::expand_tilde(&source);
+    let dest = super::mv::expand_tilde(&dest);
+
+    let conflicts = core.find_panes_in_path(&source).await?;
+    let live_panes = live_panes_from_conflicts(&conflicts);
+    let report = plan_migration(&source, &dest, live_panes)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_migration_doctor(&report);
+    Ok(())
+}
+
+fn print_migration_doctor(report: &MigrationDoctorReport) {
+    println!(
+        "{}babel mv --doctor{} - Harness Migration Report",
+        colors::BOLD,
+        colors::RESET
+    );
+    println!(
+        "{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}",
+        colors::DIM,
+        colors::RESET
+    );
+    println!("  source: {}", report.old_path.display());
+    println!("  dest:   {}", report.new_path.display());
+    println!("  policy: {}", report.indexing_policy);
+    println!("  mode:   no mutation; legacy babel mv is not used");
+
+    section("Live Panes");
+    if report.live_panes.is_empty() {
+        ok("No live panes under source");
+    } else {
+        for pane in &report.live_panes {
+            let marker = if pane.migratable { "ok" } else { "block" };
+            println!(
+                "  {} {:<5} pane:{:<5} {:<12} cwd:{}",
+                marker,
+                pane.harness,
+                pane.pane_id,
+                pane.state,
+                pane.cwd.display()
+            );
+        }
+    }
+
+    section("Harnesses");
+    for harness in &report.harnesses {
+        print_harness_report(harness);
+    }
+
+    section("Risks");
+    if report.risks.is_empty() {
+        ok("No risks reported");
+    } else {
+        for risk in &report.risks {
+            let harness = risk
+                .harness
+                .map(|kind| kind.to_string())
+                .unwrap_or_else(|| "global".to_string());
+            println!(
+                "  {:<7} {:<16} {}",
+                risk.severity.label(),
+                harness,
+                risk.message
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "Summary: {} operation(s), {} blocker(s), {} warning(s)",
+        report.operations().len(),
+        report
+            .risks
+            .iter()
+            .filter(|risk| matches!(
+                risk.severity,
+                claude_babel::harness_ops::RiskSeverity::Blocker
+            ))
+            .count(),
+        report.warning_count()
+    );
+}
+
+fn print_harness_report(report: &HarnessMigrationReport) {
+    let readiness = match report.readiness {
+        AdapterReadiness::ApplyReady => "apply-ready",
+        AdapterReadiness::DoctorOnly => "doctor-only",
+        AdapterReadiness::ReconOnly => "recon-only",
+        AdapterReadiness::Unsupported => "unsupported",
+    };
+    println!(
+        "  {:<16} {:<12} sessions:{:<3} refs:{:<3} ops:{}",
+        report.harness,
+        readiness,
+        report.sessions_found,
+        report.path_references_found,
+        report.operations.len()
+    );
+
+    for root in &report.state_roots {
+        println!("    root {}", root.display());
+    }
+    for op in &report.operations {
+        println!("    op   {:<28} {} ({})", op.action, op.target, op.detail);
+    }
+    for note in &report.notes {
+        println!("    note {}", note);
+    }
 }
