@@ -159,6 +159,36 @@ These harnesses do not meet the orchestration bar. Babel should not contort itse
 | Aider | ![Aider accent](docs/swatches/aider.svg) `#14B014` | Unsupported | No lifecycle hooks | None until hooks exist |
 | Antigravity | ![Antigravity accent](docs/swatches/antigravity.svg) `#3186FF` | Unsupported | Rules/workflows exist, but no lifecycle hook surface | None until lifecycle hooks exist |
 
+### Deprecated And Consumed
+
+These projects are prior art and reference material. Babel's direction is to consume the useful jutsus into one harness-aware system: move, resume, handoff, search, archive, migration, bridge contracts, and verification. Once absorbed, they are deprecated as standalone answers for this stack, not dismissed as bad work.
+
+| Project | Link | Jutsus to consume |
+| --- | --- | --- |
+| `claudepath` | https://pypi.org/project/claudepath/ | Claude project move/remap, dry-run, merge, backups, restore |
+| `ccmv` | https://github.com/seflue/ccmv | Claude mv semantics, settings/MCP/trust rewrite, nested subproject handling, rollback |
+| `cc-port` | https://github.com/it-bens/cc-port | Claude move/export/import/push/pull, manifests, archives, rollback, live-session checks |
+| Project Directory Migration skill | https://mcpmarket.com/tools/skills/project-directory-migration | Migration checklist, backup discipline, symlink compatibility, environment fixups |
+| `cursor-history` | https://github.com/S2thend/cursor-history | Cursor session browse/search/export/backup/restore/migration |
+| `cursor-chat-recovery-kit` | https://github.com/vitalyis/cursor-chat-recovery-kit | Cursor workspace rename recovery and chat reattachment |
+| SpecStory Cursor integration | https://docs.specstory.com/integrations/cursor | Repo-local conversation archive via `.specstory/history/` |
+| WayLog | https://marketplace.visualstudio.com/items?itemName=waylog.waylog | Repo-local AI chat archive across Cursor, Copilot, Roo, Cline, Kilo, Codex extension, Lingma, CodeBuddy |
+| `cdxresume` | https://github.com/sasazame/cdxresume | Codex session browser/resume over `~/.codex/sessions` |
+| `cli-continues` | https://github.com/yigitkonur/cli-continues | Cross-agent handoff/resume docs across the full harness roster |
+| CASR | https://github.com/Dicklesworthstone/cross_agent_session_resumer | Canonical IR, provider-native session conversion, native resume targets |
+| Codbash | https://github.com/vakovalskii/codbash | Multi-harness dashboard, search, replay, resume, tag, import/export, handoff, Claude/Codex conversion |
+| `mnemo` | https://github.com/Pilan-AI/mnemo | Native storage parsers, SQLite/FTS index, MCP context tools |
+| `coding_agent_session_search` | https://github.com/Dicklesworthstone/coding_agent_session_search | Broad multi-harness session search and TUI patterns |
+| CCManager | https://github.com/kbwo/ccmanager | Session/worktree management and Claude context copy into new worktrees |
+| Chronicle / `claude-history-manager` | https://github.com/josephyaduvanshi/claude-history-manager | Native desktop browsing/indexing/resume for Claude, Codex, Gemini |
+| HAPI | https://github.com/tiann/hapi | Remote/mobile controller patterns for Claude, Codex, Cursor, Gemini, OpenCode |
+| Agor | https://github.com/preset-io/agor | Multiplayer session canvas, worktrees, conversation tracking |
+| Agent Deck | https://github.com/asheshgoplani/agent-deck | Terminal session manager patterns across Claude, Gemini, OpenCode, Codex |
+| AgentOS | https://github.com/saadnvd1/agent-os | Mobile-first web UI for CLI agents |
+| PAL MCP | https://github.com/BeehiveInnovations/pal-mcp-server | Multi-CLI bridge, context continuity, CLI-to-CLI handoff |
+| Iranti | https://www.iranti.dev/ | Shared durable memory layer across agents and MCP/HTTP clients |
+| SessionBase | https://github.com/sessionbase/sessionbase | Cross-agent session listing/push/export substrate |
+
 ## Integration Points
 
 ### Kitty Protocol
