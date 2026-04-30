@@ -212,12 +212,13 @@ async fn main() -> Result<()> {
         Commands::Mv {
             source,
             dest,
+            doctor,
             dry_run,
             history_only,
             anxious,
             force,
         } => {
-            if cli.doctor {
+            if cli.doctor || doctor {
                 cli::doctor::cmd_migration_doctor(&core, source, dest, cli.json).await
             } else {
                 cli::mv::cmd_mv(

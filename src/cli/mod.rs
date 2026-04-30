@@ -660,6 +660,7 @@ pub enum Commands {
     ///
     /// Usage:
     ///   babel mv --doctor ~/OldProject ~/NewProject  # Universal diagnostic operation graph
+    ///   babel mv ~/OldProject ~/NewProject --doctor  # Same, positional-friendly form
     ///   babel mv --dry ~/OldProject ~/NewProject     # Legacy Claude-only preview
     ///   babel mv --history-only ~/Old ~/New          # Legacy Claude-only history update
     #[command()]
@@ -669,6 +670,10 @@ pub enum Commands {
 
         /// Destination directory path
         dest: PathBuf,
+
+        /// Diagnostic operation mode for mv: produce an evidence report and do not mutate
+        #[arg(long)]
+        doctor: bool,
 
         /// Preview changes without executing (shows what would be modified)
         #[arg(long = "dry", id = "dry_run")]
@@ -1258,4 +1263,36 @@ pub enum WSetCommands {
         /// Description (omit to show current)
         description: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn mv_doctor_accepts_global_and_command_local_forms() {
+        let global = Cli::try_parse_from([
+            "babel",
+            "--doctor",
+            "mv",
+            "Workspace/Daemons/claude-babel/",
+            "holoq/repo-os/babel/",
+        ])
+        .unwrap();
+        assert!(global.doctor);
+
+        let trailing = Cli::try_parse_from([
+            "babel",
+            "mv",
+            "Workspace/Daemons/claude-babel/",
+            "holoq/repo-os/babel/",
+            "--doctor",
+        ])
+        .unwrap();
+        assert!(matches!(
+            trailing.command,
+            Commands::Mv { doctor: true, .. }
+        ));
+    }
 }
