@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 Cargo.lock
+/tmp/
 
 # Prior-art repos consumed as local reference boards. These are intentionally
 # untracked: Babel extracts patterns from them, not vendored code.

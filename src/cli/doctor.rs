@@ -529,6 +529,8 @@ fn is_inactive_unsupported(report: &HarnessMigrationReport) -> bool {
         && report.sessions_found == 0
         && report.state_roots.is_empty()
         && matches!(report.readiness, AdapterReadiness::Unsupported)
+        && report.notes.len() == 1
+        && report.notes[0].starts_with("no path-move adapter has been extracted")
 }
 
 fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String {

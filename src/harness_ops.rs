@@ -17,14 +17,23 @@ use crate::agent_kind::{AgentKind, HarnessSupport};
 use crate::core::ConflictingPane;
 
 mod aider;
+mod amp;
+mod antigravity;
 mod apply;
 mod claude;
+mod cline;
 mod codex;
+mod crush;
 mod cursor;
+mod factory;
 mod gemini;
+mod github_copilot;
+mod kilo;
+mod kimi;
+mod kiro;
 mod opencode;
 mod qwen;
-mod vscode;
+mod roo;
 
 pub use apply::{apply_migration_plan, MigrationApplyOptions, MigrationApplyReport};
 
@@ -85,17 +94,6 @@ impl HarnessOpsContext {
                 .join(".config/Cursor/User/globalStorage/state.vscdb"),
             self.home.join(".config/Cursor/User/workspaceStorage"),
         ]
-    }
-
-    pub(super) fn vscode_roots(&self) -> Vec<PathBuf> {
-        vec![
-            self.home.join(".config/Code/User/globalStorage"),
-            self.home.join(".config/Code/User/workspaceStorage"),
-        ]
-    }
-
-    pub(super) fn opencode_roots(&self) -> Vec<PathBuf> {
-        vec![self.home.join(".local/share/opencode/opencode.db")]
     }
 }
 
@@ -542,26 +540,26 @@ pub fn plan_migration_with_context(
         &mut risks,
     )?);
     harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(gemini::plan(context, &path_needles)?);
+    harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(qwen::plan(context, &path_needles)?);
+    harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
+    harnesses.push(gemini::plan(context, &path_needles)?);
+    harnesses.push(crush::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(cursor::plan(context));
-    harnesses.push(vscode::plan(
-        context,
-        AgentKind::Cline,
-        "Cline task history lives in VS Code extension storage; close the IDE before any future migration.",
-    ));
-    harnesses.push(vscode::plan(
-        context,
-        AgentKind::RooCode,
-        "Roo has no lifecycle hooks today, but its VS Code storage may still need preservation on project moves.",
-    ));
-    harnesses.push(vscode::plan(
-        context,
-        AgentKind::KiloCode,
-        "Kilo has no lifecycle hooks today, but its VS Code storage may still need preservation on project moves.",
-    ));
+    harnesses.push(cline::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(opencode::plan(context));
-    harnesses.push(aider::plan());
+    harnesses.push(amp::plan(context, &old_abs, &new_abs, &path_needles)?);
+    harnesses.push(kiro::plan(context, &old_abs, &new_abs, &path_needles)?);
+    harnesses.push(github_copilot::plan(context, &path_needles, &mut risks)?);
+    harnesses.push(roo::plan(context, &path_needles)?);
+    harnesses.push(kilo::plan(context, &old_abs, &new_abs, &path_needles)?);
+    harnesses.push(aider::plan_for_source(&old_abs));
+    harnesses.push(antigravity::plan(
+        context,
+        &old_abs,
+        &new_abs,
+        &path_needles,
+    )?);
 
     for kind in AgentKind::ALL {
         if harnesses.iter().any(|report| report.harness == *kind) {
@@ -749,75 +747,6 @@ fn plan_claude(
         edits,
         notes,
     ))
-}
-
-fn plan_text_storage_harness(
-    root: PathBuf,
-    harness: AgentKind,
-    needles: &[String],
-    note: &str,
-) -> Result<HarnessMigrationReport> {
-    let scan = scan_text_refs(&root, needles)?;
-    let mut edits = Vec::new();
-    let mut notes = vec![note.to_string()];
-
-    if !root.exists() {
-        notes.push(format!("state root missing: {}", root.display()));
-    } else if scan.truncated {
-        notes.push(format!(
-            "scan stopped after {} files; use a narrower adapter before applying",
-            scan.files_scanned
-        ));
-    }
-    if scan.large_files_sampled > 0 {
-        notes.push(format!(
-            "sampled {} large file(s) instead of full-reading them",
-            scan.large_files_sampled
-        ));
-    }
-
-    if scan.path_references_found > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            harness,
-            "rewrite_native_path_refs",
-            root.display().to_string(),
-            "",
-            "",
-            scan.path_references_found,
-        ));
-    }
-
-    Ok(HarnessMigrationReport::from_edits(
-        harness,
-        AdapterReadiness::DoctorOnly,
-        vec![root],
-        0,
-        scan.path_references_found,
-        edits,
-        notes,
-    ))
-}
-
-fn plan_roots_only_harness(
-    harness: AgentKind,
-    roots: Vec<PathBuf>,
-    note: &str,
-) -> HarnessMigrationReport {
-    let existing_roots: Vec<PathBuf> = roots.into_iter().filter(|root| root.exists()).collect();
-    let mut notes = vec![note.to_string()];
-    if existing_roots.is_empty() {
-        notes.push("no known state roots detected".to_string());
-    }
-
-    HarnessMigrationReport::from_edits(
-        harness,
-        AdapterReadiness::ReconOnly,
-        existing_roots,
-        0,
-        0,
-        Vec::new(),
-        notes,
-    )
 }
 
 #[derive(Debug)]
