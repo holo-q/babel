@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent_kind::{AgentKind, HarnessSupport};
 use crate::core::ConflictingPane;
 
+mod codex;
+
 const MAX_SCAN_FILES: usize = 5_000;
 const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
 const LARGE_FILE_SAMPLE_BYTES: usize = 512 * 1024;
@@ -41,8 +43,20 @@ impl HarnessOpsContext {
         self.home.join(".claude")
     }
 
+    fn codex_base(&self) -> PathBuf {
+        self.home.join(".codex")
+    }
+
     fn codex_sessions(&self) -> PathBuf {
         self.home.join(".codex/sessions")
+    }
+
+    fn codex_archived_sessions(&self) -> PathBuf {
+        self.home.join(".codex/archived_sessions")
+    }
+
+    fn codex_shell_snapshots(&self) -> PathBuf {
+        self.home.join(".codex/shell_snapshots")
     }
 
     fn qwen_base(&self) -> PathBuf {
@@ -259,12 +273,7 @@ pub fn plan_migration_with_context(
         &path_needles,
         &mut risks,
     )?);
-    harnesses.push(plan_text_storage_harness(
-        context.codex_sessions(),
-        AgentKind::Codex,
-        &path_needles,
-        "Codex sessions are JSONL-native, but apply rewrite needs a fixture before it is trusted.",
-    )?);
+    harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(plan_text_storage_harness(
         context.gemini_tmp(),
         AgentKind::Gemini,
@@ -946,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_gemini_are_doctor_only_text_scans() {
+    fn codex_uses_native_session_identity_and_project_config() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let old = home.join("project");
@@ -955,8 +964,39 @@ mod tests {
 
         let ctx = HarnessOpsContext::from_home(home.to_path_buf());
         write_file(
-            &ctx.codex_sessions().join("2026/04/29/session.jsonl"),
-            &format!("{{\"cwd\":\"{}\"}}\n", old.display()),
+            &ctx.codex_sessions()
+                .join("2026/04/29/rollout-2026-04-29T12-00-00-codex-session.jsonl"),
+            &format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n",
+                old.display()
+            ),
+        );
+        write_file(
+            &ctx.codex_sessions()
+                .join("2026/04/29/rollout-2026-04-29T12-00-00-unrelated.jsonl"),
+            &format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"unrelated\",\"cwd\":\"{}\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"message\":\"{}\"}}}}\n",
+                home.join("other").display(),
+                old.display()
+            ),
+        );
+        write_file(
+            &ctx.codex_base().join("history.jsonl"),
+            &format!(
+                "{{\"session_id\":\"codex-session\",\"text\":\"{}\"}}\n",
+                old.display()
+            ),
+        );
+        write_file(
+            &ctx.codex_base().join("config.toml"),
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                old.display()
+            ),
+        );
+        write_file(
+            &ctx.codex_shell_snapshots().join("codex-session.1.sh"),
+            &format!("cd {}\n", old.display()),
         );
         write_file(
             &ctx.gemini_tmp().join("hash/chats/session.json"),
@@ -964,15 +1004,33 @@ mod tests {
         );
 
         let report = plan_migration_with_context(&ctx, &old, &new, Vec::new()).unwrap();
-        for kind in [AgentKind::Codex, AgentKind::Gemini] {
-            let harness = report
-                .harnesses
-                .iter()
-                .find(|harness| harness.harness == kind)
-                .unwrap();
-            assert_eq!(harness.path_references_found, 1);
-            assert!(matches!(harness.readiness, AdapterReadiness::DoctorOnly));
-            assert!(harness.operations.iter().all(|op| !op.apply_ready));
-        }
+        let codex = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Codex)
+            .unwrap();
+        assert_eq!(codex.sessions_found, 1);
+        assert_eq!(codex.path_references_found, 5);
+        assert!(matches!(codex.readiness, AdapterReadiness::DoctorOnly));
+        assert!(codex.operations.iter().all(|op| !op.apply_ready));
+        assert!(codex
+            .operations
+            .iter()
+            .any(|op| op.action == "rewrite_session_meta_cwd"));
+        assert!(codex
+            .operations
+            .iter()
+            .any(|op| op.action == "rewrite_project_config_keys"));
+        assert!(codex
+            .operations
+            .iter()
+            .any(|op| op.action == "preserve_session_shell_snapshots"));
+
+        let gemini = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Gemini)
+            .unwrap();
+        assert_eq!(gemini.path_references_found, 1);
     }
 }
