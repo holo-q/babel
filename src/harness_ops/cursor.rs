@@ -38,32 +38,77 @@ pub(super) fn plan(context: &HarnessOpsContext) -> HarnessMigrationReport {
     let discovery = discover(context);
     let mut edits = Vec::new();
 
-    for db in &discovery.sqlite_dbs {
-        let session_count = db.composer_rows.max(db.legacy_rows);
-        if session_count == 0 && db.path_ref_rows == 0 {
-            continue;
-        }
-        edits.push(MigrationEdit::preserve_session_keyed_files(
+    let interesting_dbs = discovery
+        .sqlite_dbs
+        .iter()
+        .filter(|db| db.composer_rows.max(db.legacy_rows) > 0 || db.path_ref_rows > 0)
+        .collect::<Vec<_>>();
+    if !interesting_dbs.is_empty() {
+        let global_db_count = interesting_dbs
+            .iter()
+            .filter(|db| db.path.to_string_lossy().contains("/globalStorage/"))
+            .count();
+        let workspace_db_count = interesting_dbs
+            .iter()
+            .filter(|db| db.path.to_string_lossy().contains("/workspaceStorage/"))
+            .count();
+        let composer_rows = interesting_dbs
+            .iter()
+            .map(|db| db.composer_rows)
+            .sum::<usize>();
+        let bubble_rows = interesting_dbs
+            .iter()
+            .map(|db| db.bubble_rows)
+            .sum::<usize>();
+        let legacy_rows = interesting_dbs
+            .iter()
+            .map(|db| db.legacy_rows)
+            .sum::<usize>();
+        let session_rows = interesting_dbs
+            .iter()
+            .map(|db| db.composer_rows.max(db.legacy_rows))
+            .sum::<usize>();
+        let path_ref_rows = interesting_dbs
+            .iter()
+            .map(|db| db.path_ref_rows)
+            .sum::<usize>();
+        edits.push(MigrationEdit::preserve_project_local_history_action(
             AgentKind::Cursor,
             "preserve_cursor_sqlite_state",
-            db.path.clone(),
-            session_count,
-            db.path_ref_rows,
+            "Cursor SQLite state",
+            format!(
+                "{} database(s): {} global, {} workspace; rows composer={}, bubble={}, legacy={}, session-bearing={}, path-ref={}",
+                interesting_dbs.len(),
+                global_db_count,
+                workspace_db_count,
+                composer_rows,
+                bubble_rows,
+                legacy_rows,
+                session_rows,
+                path_ref_rows
+            ),
         ));
     }
 
-    for workspace in &discovery.workspaces {
-        if !workspace.state_db.exists() {
-            continue;
-        }
-        let folder = workspace
-            .folder
-            .as_deref()
-            .unwrap_or("workspace folder unknown");
-        edits.push(MigrationEdit::preserve_project_local_history(
+    let workspace_state_count = discovery
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.state_db.exists())
+        .count();
+    if workspace_state_count > 0 {
+        let mapped_count = discovery
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.state_db.exists() && workspace.folder.is_some())
+            .count();
+        let unknown_count = workspace_state_count.saturating_sub(mapped_count);
+        edits.push(MigrationEdit::preserve_project_local_history_action(
             AgentKind::Cursor,
-            workspace.state_db.display().to_string(),
-            format!("workspaceStorage maps to {folder}; preserve workspace.json with state.vscdb"),
+            "preserve_cursor_workspace_storage",
+            "Cursor workspaceStorage",
+            format!(
+                "{workspace_state_count} workspaceStorage shard(s): {mapped_count} folder-mapped, {unknown_count} unknown; preserve workspace.json + state.vscdb pairs"
+            ),
         ));
     }
 

@@ -302,9 +302,23 @@ impl MigrationEdit {
         target: impl Into<String>,
         detail: impl Into<String>,
     ) -> Self {
+        Self::preserve_project_local_history_action(
+            harness,
+            "preserve_project_local_history",
+            target,
+            detail,
+        )
+    }
+
+    pub fn preserve_project_local_history_action(
+        harness: AgentKind,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             harness,
-            action: "preserve_project_local_history".to_string(),
+            action: action.into(),
             kind: MigrationEditKind::PreserveProjectLocalHistory {
                 target: target.into(),
                 detail: detail.into(),
