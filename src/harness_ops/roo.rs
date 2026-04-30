@@ -41,9 +41,8 @@ pub(super) fn plan(
 ) -> Result<HarnessMigrationReport> {
     let discovery = discover(context, needles)?;
     let mut notes = vec![
-        "Roo Code is a Cline-family VS Code extension; references agree on globalStorage/<extension>/tasks/<task_id> with ui_messages.json plus api_conversation_history.json/task_metadata.json sidecars.".to_string(),
-        "This migration doctor preserves extension storage only and never claims live Roo task control.".to_string(),
-        "Semantics consumed: references/mnemo indexes rooveterinaryinc.roo-cline with the shared Cline/Roo/Kilo task parser; coding_agent_session_search probes the same Code/Cursor globalStorage roots.".to_string(),
+        "storage: VS Code-family globalStorage/rooveterinaryinc.roo-cline/tasks/<taskId>"
+            .to_string(),
     ];
 
     if discovery.existing_roots.is_empty() {
@@ -51,20 +50,12 @@ pub(super) fn plan(
     }
     if !discovery.probed_roots.is_empty() {
         notes.push(format!(
-            "probed Roo roots: {}",
-            discovery
-                .probed_roots
-                .iter()
-                .map(|root| root.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "probed {} Roo root candidate(s)",
+            discovery.probed_roots.len()
         ));
     }
     if discovery.truncated {
-        notes.push(
-            "path-reference scan hit the shared scan cap; keep Roo apply disabled until a Roo-specific rewrite fixture exists"
-                .to_string(),
-        );
+        notes.push("path-reference scan hit the shared scan cap".to_string());
     }
     if discovery.large_files_sampled > 0 {
         notes.push(format!(

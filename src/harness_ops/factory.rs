@@ -98,11 +98,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Factory Droid runtime events use Claude-compatible session_id values; Babel can identify live panes without inventing identity.".to_string(),
-        "Factory public docs confirm -s/--session-id resume and transcript_path/session_id/cwd fields, but do not fully freeze local transcript migration semantics.".to_string(),
-        "Factory storage evidence is mixed: examples point at ~/.factory/projects, while local parsers also observe ~/.factory/sessions with sibling .settings.json files.".to_string(),
-        "apply_ready stays false until projects-vs-sessions coexistence, workspace slug rewrites, and cloudSessionSync behavior have first-party or fixture-backed migration rules.".to_string(),
-        "References used: cli-continues src/parsers/droid.ts; cli-continues docs/parser-documentation/{storage-format,message-schema,access-recipes}/06-droid.md; coding_agent_session_search/tests/connector_factory.rs; cli-continues src/__tests__/droid-parser.test.ts.".to_string(),
+        "storage candidates: ~/.factory/projects and ~/.factory/sessions".to_string(),
+        "session records may have sibling .settings.json files".to_string(),
     ];
 
     for root in [&projects_root, &sessions_root] {

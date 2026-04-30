@@ -131,11 +131,8 @@ pub(super) fn plan(
         ));
     }
 
-    let mut notes = vec![
-        "Codex identity is session_meta.payload.cwd in rollout JSONL; path-bearing transcripts are reported separately.".to_string(),
-        "References used: cdxresume and cli-continues parse Codex 0.32+ rollout files from ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.".to_string(),
-        "Codex edits are now typed generic migration intents; apply waits on the shared transaction executor, not per-harness mutation code.".to_string(),
-    ];
+    let mut notes =
+        vec!["session identity field: session_meta.payload.cwd in rollout JSONL".to_string()];
     for root in [
         context.codex_sessions(),
         context.codex_archived_sessions(),

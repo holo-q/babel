@@ -137,9 +137,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Kimi storage is path-keyed: kimi.json work_dirs plus sessions/<workdir-hash>/<session-id>/.".to_string(),
-        "Kimi session_id is stable and comes from the session directory name; storage migration is filesystem/JSONL state.".to_string(),
-        "References used: CASS Kimi connector, cli-continues Kimi parser docs/tests, and Babel README harness roster.".to_string(),
+        "storage: kimi.json work_dirs plus sessions/<workdir-hash>/<session-id>/".to_string(),
+        "session id source: session directory name".to_string(),
     ];
     if !discovery.share_dir.exists() {
         notes.push(format!(
@@ -484,7 +483,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("session_id is stable")));
+            .any(|note| note.contains("session directory name")));
         if let Some(value) = old_env {
             std::env::set_var("KIMI_SHARE_DIR", value);
         }

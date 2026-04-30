@@ -50,9 +50,7 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Kiro is doctor-only: credible text surfaces exist, but current CLI SQLite schema is unresolved and no mutation contract is safe.".to_string(),
-        "Native roots checked: IDE workspace JSON under Application Support/config app data, legacy workspace-sessions, and ACP JSON/JSONL under ~/.kiro/sessions/cli.".to_string(),
-        "References used: mnemo index_kiro.go for legacy workspace-sessions/sessionId/workspacePath/history; cli-continues parser for kiro.kiroagent workspace-sessions and ACP persisted JSON/JSONL; cli-continues research notes for unresolved normal-chat SQLite.".to_string(),
+        "storage candidates: IDE workspace JSON, legacy workspace-sessions, and ~/.kiro/sessions/cli".to_string(),
     ];
     if discovery.roots.is_empty() {
         notes.push("no known Kiro state roots detected".to_string());

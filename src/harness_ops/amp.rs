@@ -109,10 +109,9 @@ pub(super) fn plan(
         + discovery.project_local_path_ref_files;
 
     let mut notes = vec![
-        "Amp storage migration is a local-filesystem doctor pass; the in-process plugin bridge does not define a transcript rewrite surface.".to_string(),
-        "Consumed references: mnemo indexes ~/.local/share/amp/threads/*.json; cli-continues documents observed ~/.local/share/amp and ~/.config/amp layouts; CASR adds AMP_HOME/AMP_DATA_HOME and legacy sourcegraph.amp/threads3 roots.".to_string(),
-        "Thread IDs are provider-owned T-* identities; local JSON files are observed storage, while `amp threads continue` is the stable continuation surface.".to_string(),
-        "Amp typed edits stay apply_ready=false until Babel has a generic executor that can rewrite JSON/JSONL with backup, verification, and active-process refusal.".to_string(),
+        "storage candidates: ~/.local/share/amp, ~/.config/amp, AMP_HOME, and AMP_DATA_HOME"
+            .to_string(),
+        "thread ids are provider-owned T-* identities".to_string(),
     ];
 
     if discovery.roots.is_empty() {

@@ -459,7 +459,7 @@ fn print_migration_doctor(report: &MigrationDoctorReport) {
     println!(
         "  {}   {}",
         dim("mode"),
-        yellow("doctor only - no mutation; legacy babel mv is not used")
+        yellow("doctor only - no mutation")
     );
 
     section("Live Panes");

@@ -134,11 +134,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Gemini storage is native-first: ~/.gemini/tmp/<project-id>/chats plus legacy ~/.gemini/sessions; no global Babel index is consulted.".to_string(),
-        "References consumed: mnemo index_gemini.go, cli-continues Gemini storage/parser docs, claude-history-manager Gemini provider/parser, cross_agent_session_resumer Gemini provider, and coding_agent_session_search connector tests.".to_string(),
-        "Current Gemini CLI writes JSONL append logs in ~/.gemini/tmp/<project-id>/chats; older references and installs may still expose session-*.json object files.".to_string(),
-        "projects.json is treated as cwd -> project-id registry when present; SHA256(source path) is also probed because current Gemini project ids are hash/path based.".to_string(),
-        "Gemini adapter currently receives only source path needles from the parent planner, so destination project-hash moves and concrete text rewrites are reported as doctor-only intents, not apply-ready mutations.".to_string(),
+        "storage: ~/.gemini/tmp/<project-id>/chats plus legacy ~/.gemini/sessions".to_string(),
+        "project identity: projects.json cwd mapping when present; SHA256(source path) is also probed".to_string(),
     ];
 
     for root in [&tmp, &legacy_sessions, &projects_json, &history] {

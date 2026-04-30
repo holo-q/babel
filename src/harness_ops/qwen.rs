@@ -75,9 +75,8 @@ pub(super) fn plan(
     existing_roots.dedup();
 
     let mut notes = vec![
-        "Qwen runtime base defaults to ~/.qwen; cli-continues documents QWEN_RUNTIME_DIR as the canonical upstream override, but Babel's context currently only supplies home-rooted planning.".to_string(),
-        "References used: coding_agent_session_search/tests/connector_qwen.rs fixtures cover ~/.qwen/tmp/<project>/config.json plus chats/session-*.json; cli-continues covers ~/.qwen/projects/<sanitized-cwd>/chats/*.jsonl and the evolving tmp/history roots.".to_string(),
-        "Qwen chat transcripts are tree-structured JSONL via uuid/parentUuid, so doctor preserves chat trees separately from path-bearing config/workspace references.".to_string(),
+        "storage root: ~/.qwen".to_string(),
+        "chat transcripts are tree-structured JSONL keyed by uuid/parentUuid".to_string(),
     ];
     if existing_roots.is_empty() {
         notes.push("no known Qwen state roots detected".to_string());

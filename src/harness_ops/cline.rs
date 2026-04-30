@@ -113,29 +113,19 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Cline extension id is saoudrizwan.claude-dev; authoritative VS Code storage is <host>/User/globalStorage/saoudrizwan.claude-dev/.".to_string(),
-        "Storage contract found: state/taskHistory.json indexes task ids; tasks/<task-id>/ holds ui_messages.json, api_conversation_history.json, and task_metadata.json.".to_string(),
-        "Workspace identity can appear in taskHistory cwdOnTaskInitialization/workspace and task_metadata rootPath/cwd; taskHistory is an index and task folders are recoverable source state.".to_string(),
-        "Cline has no safe generic move executor yet; every edit remains doctor-only with apply_ready=false.".to_string(),
+        "storage: <host>/User/globalStorage/saoudrizwan.claude-dev/".to_string(),
+        "task index: state/taskHistory.json; task folders hold ui_messages, api_conversation_history, and task_metadata".to_string(),
     ];
     if discovery.storage_roots.is_empty() {
         notes.push(format!(
-            "no Cline extension globalStorage root detected; probed: {}",
-            cline_storage_candidates(context)
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "no Cline extension globalStorage root detected; probed {} candidate(s)",
+            cline_storage_candidates(context).len()
         ));
     }
     if discovery.workspace_storage_roots.is_empty() {
         notes.push(format!(
-            "no VS Code workspaceStorage root detected for Cline host candidates; probed: {}",
-            workspace_storage_candidates(context)
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "no VS Code workspaceStorage root detected for Cline host candidates; probed {} candidate(s)",
+            workspace_storage_candidates(context).len()
         ));
     }
     if discovery.truncated {

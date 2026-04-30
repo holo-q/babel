@@ -58,14 +58,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "GitHub Copilot CLI is doctor-only and identity-unsupported: no stable migration session/task id is available for Babel to bind."
-            .to_string(),
-        "No cwd+timestamp matching is attempted; storage observations are reported as preservation facts only."
-            .to_string(),
-        "Local references agree on CLI storage under ~/.copilot/session-state/<session>/ with events.jsonl; cli-continues also reads workspace.yaml and honors COPILOT_HOME."
-            .to_string(),
-        "CASS connector tests show Chronicle events.jsonl can carry data.sessionId and data.cwd, but those are storage facts, not a supported migration identity contract."
-            .to_string(),
+        "storage candidate: ~/.copilot/session-state/<session>/events.jsonl".to_string(),
+        "no stable migration session id found in local CLI state".to_string(),
     ];
 
     if !session_state.exists() {

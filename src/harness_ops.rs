@@ -586,10 +586,7 @@ pub fn plan_migration_with_context(
             0,
             0,
             Vec::new(),
-            vec![
-                "no path-move adapter has been extracted from references yet; doctor keeps this explicit instead of guessing"
-                    .to_string(),
-            ],
+            vec!["no path-move adapter available".to_string()],
         ));
     }
 
@@ -657,10 +654,7 @@ fn plan_claude(
             "rename_project_dir",
             source.path.clone(),
             dest.path.clone(),
-            format!(
-                "{} key; preserve {} Claude transcript file(s)",
-                source.scheme, sessions_found
-            ),
+            format!("preserve {} Claude transcript file(s)", sessions_found),
         ));
     }
 
@@ -736,15 +730,6 @@ fn plan_claude(
         });
     }
 
-    notes.push(
-        "Claude apply is deliberately not wired to legacy babel mv; references require copy/verify/rewrite/rollback before mutation is trusted."
-            .to_string(),
-    );
-    notes.push(
-        "cc-port covers history, transcripts, settings, todos, usage-data, plugins/data, tasks, and opaque file-history preservation."
-            .to_string(),
-    );
-
     let mut state_roots = vec![context.claude_base(), context.home.join(".claude.json")];
     state_roots.extend(session_keyed_roots);
     state_roots.extend(user_wide_files);
@@ -777,7 +762,7 @@ fn claude_project_candidates(
     let mut candidates = Vec::new();
     let cc_port = claude_encode_cc_port(project_path);
     candidates.push(ClaudeProjectCandidate {
-        scheme: "cc-port",
+        scheme: "primary",
         path: projects_dir.join(&cc_port),
         encoded: cc_port,
     });
@@ -785,7 +770,7 @@ fn claude_project_candidates(
     let ccmv = claude_encode_ccmv(project_path);
     if candidates.iter().all(|candidate| candidate.encoded != ccmv) {
         candidates.push(ClaudeProjectCandidate {
-            scheme: "ccmv",
+            scheme: "compat",
             path: projects_dir.join(&ccmv),
             encoded: ccmv,
         });

@@ -106,10 +106,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Crush runtime identity is CRUSH_SESSION_ID; storage identity is sessions.id inside crush.db, so path moves must not rename sessions by runtime id.".to_string(),
-        "Primary storage is SQLite: sessions, messages, and files tables; messages.parts stores typed JSON fragments rather than line-oriented transcript records.".to_string(),
-        "Project-local storage is <workspace>/.crush/crush.db when present; older references also know ~/.crush/crush.db and global projects.json indexes.".to_string(),
-        "Crush apply stays false because the generic executor cannot safely rewrite SQLite pages or maintain SQL transaction invariants.".to_string(),
+        "storage: SQLite crush.db with sessions, messages, and files tables".to_string(),
+        "project-local database candidate: <workspace>/.crush/crush.db".to_string(),
     ];
     notes.extend(discovery.schema_notes);
     if discovery.candidates.is_empty() {
@@ -509,7 +507,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("CRUSH_SESSION_ID")));
+            .any(|note| note.contains("SQLite crush.db")));
         assert!(report
             .notes
             .iter()

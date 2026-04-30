@@ -37,14 +37,8 @@ pub(super) fn plan(
     let mut existing_roots = Vec::new();
     let mut sessions_found = 0;
     let mut path_references_found = 0;
-    let mut notes = vec![
-        "Kilo Code migration is storage-only today; live task state cannot be migrated or verified from provider events."
-            .to_string(),
-        "References identify Kilo storage as VS Code-family extension JSON under User/globalStorage/kilocode.kilo-code/tasks/<taskId>/ui_messages.json."
-            .to_string(),
-        "Doctor preserves extension storage and reports path refs; apply stays disabled until Kilo workspace semantics and shutdown/backup rules are proven."
-            .to_string(),
-    ];
+    let mut notes =
+        vec!["storage: VS Code-family globalStorage/kilocode.kilo-code/tasks/<taskId>".to_string()];
 
     for root in candidates {
         if !root.exists() {
@@ -223,7 +217,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("migration is storage-only")));
+            .any(|note| note.contains("globalStorage/kilocode.kilo-code")));
     }
 
     #[test]

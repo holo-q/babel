@@ -29,10 +29,8 @@ pub(super) fn plan(context: &HarnessOpsContext) -> HarnessMigrationReport {
     let discovery = discover(context);
     let state_roots = discovery.state_roots.into_iter().collect();
     let mut notes = vec![
-        "OpenCode current storage is SQLite under the XDG data root; legacy JSON lives under storage/{session,message,part}.".to_string(),
-        "OpenCode plugins run in-process, so Babel must treat plugin/config installation as a runtime caveat, not as a transcript rewrite surface.".to_string(),
-        "References used: mnemo index_opencode.go, cli-continues OpenCode storage notes/parser, hapi OpenCode storage scanner, CASR OpenCode provider, coding_agent_session_search OpenCode fixtures.".to_string(),
-        "OpenCode apply remains disabled: SQLite rows are updated in place and may be WAL-backed while OpenCode is running; doctor reports preservation facts only.".to_string(),
+        "storage: SQLite under XDG data root; legacy JSON under storage/{session,message,part}"
+            .to_string(),
     ];
     notes.extend(discovery.notes);
     for missing in discovery.missing_roots {

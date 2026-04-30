@@ -134,12 +134,9 @@ pub(super) fn plan(context: &HarnessOpsContext) -> HarnessMigrationReport {
     }
 
     let mut notes = vec![
-        "Cursor storage is SQLite-backed; Babel opens databases read-only and does not add a new DB dependency beyond the repository's existing rusqlite dependency.".to_string(),
-        "Modern Cursor Agent sessions live in cursorDiskKV: composerData:<id> rows plus bubbleId:<composerId>:<bubbleId> rows.".to_string(),
-        "Legacy chat data can appear in ItemTable keys such as composer.composerData and workbench.panel.aichat.view.aichat.chatdata.".to_string(),
-        "workspaceStorage/<hash>/workspace.json is the concrete hash-to-folder map; state.vscdb beside it is project-local history.".to_string(),
-        "Close Cursor before any future write/copy operation; Cursor may hold state.vscdb locks and recovery references back up databases/images before replacement.".to_string(),
-        "No Cursor rewrite operation is apply-ready here: the adapter is not passed source/destination paths by the parent planner, and SQLite JSON mutation needs a narrower transaction contract.".to_string(),
+        "storage: globalStorage/state.vscdb plus workspaceStorage/<hash>/{workspace.json,state.vscdb}".to_string(),
+        "session rows: cursorDiskKV composerData:<id> plus bubbleId:<composerId>:<bubbleId>".to_string(),
+        "close Cursor before mutation; state.vscdb may be locked while the app is running".to_string(),
     ];
 
     if discovery.state_roots.is_empty() {

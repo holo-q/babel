@@ -63,9 +63,8 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "Antigravity is doctor-only: current conversation payloads are protobuf .pb plus brain artifacts; raw protobuf rewrite semantics are not public.".to_string(),
-        "Native roots checked: ~/.gemini/antigravity/{conversations,brain,code_tracker} and platform Antigravity state.vscdb paths.".to_string(),
-        "References used: mnemo index_antigravity.go for legacy code_tracker JSONL with binary prefix stripping; cli-continues parser/docs for current conversations/*.pb, brain/<id>/ artifacts, trajectory state.vscdb, and optional live RPC.".to_string(),
+        "storage candidates: ~/.gemini/antigravity/{conversations,brain,code_tracker} and platform state.vscdb paths".to_string(),
+        "conversation payloads are protobuf .pb plus brain artifacts".to_string(),
     ];
     if discovery.roots.is_empty() {
         notes.push("no known Antigravity state roots detected".to_string());

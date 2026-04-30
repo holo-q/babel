@@ -36,25 +36,17 @@ fn plan_with_project_files(
     };
 
     let detail = if source_path_available {
-        "preserve direct project-local .aider* files; Aider's indexed source_path is the chat history file and workspace is its parent"
+        "preserve direct project-local .aider* files"
     } else {
         "preserve project-local .aider* files when the planner receives the source path"
     };
 
-    let mut notes = vec![
-        "Aider migration support remains explicitly unsupported here; this is only a project-local state preservation hint."
-            .to_string(),
-        "references/coding_agent_session_search/tests/connector_aider.rs shows .aider.chat.history.md as source_path and the parent directory as workspace."
-            .to_string(),
-        "Aider is mostly a filesystem move problem; no global session rewrite adapter is expected for v1."
-            .to_string(),
-    ];
+    let mut notes = vec!["storage: project-local .aider* files".to_string()];
     if source_path_available && project_files.is_empty() {
         notes.push("no direct project-local .aider* files detected under source path".to_string());
     } else if !source_path_available {
         notes.push(
-            "minimal contract upgrade: call aider::plan_for_source(old_path) from the migration planner to enumerate concrete .aider* files"
-                .to_string(),
+            "source path unavailable; concrete .aider* files were not enumerated".to_string(),
         );
     }
 
@@ -100,7 +92,7 @@ mod tests {
     use crate::harness_ops::MigrationEditKind;
 
     #[test]
-    fn aider_no_source_keeps_migration_unsupported_explicit() {
+    fn aider_no_source_reports_project_local_storage_hint() {
         let report = plan();
 
         assert!(matches!(report.readiness, AdapterReadiness::Unsupported));
@@ -108,7 +100,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("migration support remains explicitly unsupported")));
+            .any(|note| note.contains("project-local .aider")));
         assert!(report
             .operations
             .iter()
@@ -139,7 +131,7 @@ mod tests {
                 MigrationEditKind::PreserveProjectLocalHistory { target, detail }
                     if target.contains(AIDER_CHAT_HISTORY)
                         && target.contains(".aider.input.history")
-                        && detail.contains("source_path")
+                        && detail.contains("project-local .aider")
             )
         }));
     }
