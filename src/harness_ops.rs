@@ -16,7 +16,14 @@ use serde::{Deserialize, Serialize};
 use crate::agent_kind::{AgentKind, HarnessSupport};
 use crate::core::ConflictingPane;
 
+mod aider;
+mod claude;
 mod codex;
+mod cursor;
+mod gemini;
+mod opencode;
+mod qwen;
+mod vscode;
 
 const MAX_SCAN_FILES: usize = 5_000;
 const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
@@ -39,35 +46,35 @@ impl HarnessOpsContext {
         })
     }
 
-    fn claude_base(&self) -> PathBuf {
+    pub(super) fn claude_base(&self) -> PathBuf {
         self.home.join(".claude")
     }
 
-    fn codex_base(&self) -> PathBuf {
+    pub(super) fn codex_base(&self) -> PathBuf {
         self.home.join(".codex")
     }
 
-    fn codex_sessions(&self) -> PathBuf {
+    pub(super) fn codex_sessions(&self) -> PathBuf {
         self.home.join(".codex/sessions")
     }
 
-    fn codex_archived_sessions(&self) -> PathBuf {
+    pub(super) fn codex_archived_sessions(&self) -> PathBuf {
         self.home.join(".codex/archived_sessions")
     }
 
-    fn codex_shell_snapshots(&self) -> PathBuf {
+    pub(super) fn codex_shell_snapshots(&self) -> PathBuf {
         self.home.join(".codex/shell_snapshots")
     }
 
-    fn qwen_base(&self) -> PathBuf {
+    pub(super) fn qwen_base(&self) -> PathBuf {
         self.home.join(".qwen")
     }
 
-    fn gemini_tmp(&self) -> PathBuf {
+    pub(super) fn gemini_tmp(&self) -> PathBuf {
         self.home.join(".gemini/tmp")
     }
 
-    fn cursor_roots(&self) -> Vec<PathBuf> {
+    pub(super) fn cursor_roots(&self) -> Vec<PathBuf> {
         vec![
             self.home.join(".cursor/projects"),
             self.home.join(".cursor/chats"),
@@ -77,14 +84,14 @@ impl HarnessOpsContext {
         ]
     }
 
-    fn vscode_roots(&self) -> Vec<PathBuf> {
+    pub(super) fn vscode_roots(&self) -> Vec<PathBuf> {
         vec![
             self.home.join(".config/Code/User/globalStorage"),
             self.home.join(".config/Code/User/workspaceStorage"),
         ]
     }
 
-    fn opencode_roots(&self) -> Vec<PathBuf> {
+    pub(super) fn opencode_roots(&self) -> Vec<PathBuf> {
         vec![self.home.join(".local/share/opencode/opencode.db")]
     }
 }
@@ -377,7 +384,7 @@ pub struct HarnessMigrationReport {
 }
 
 impl HarnessMigrationReport {
-    fn from_edits(
+    pub(super) fn from_edits(
         harness: AgentKind,
         readiness: AdapterReadiness,
         state_roots: Vec<PathBuf>,
@@ -519,7 +526,7 @@ pub fn plan_migration_with_context(
     }
 
     let mut harnesses = Vec::new();
-    harnesses.push(plan_claude(
+    harnesses.push(claude::plan(
         context,
         &old_abs,
         &new_abs,
@@ -527,40 +534,26 @@ pub fn plan_migration_with_context(
         &mut risks,
     )?);
     harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(plan_text_storage_harness(
-        context.gemini_tmp(),
-        AgentKind::Gemini,
-        &path_needles,
-        "Gemini project identity is hash/path based; doctor reports references before apply exists.",
-    )?);
-    harnesses.push(plan_text_storage_harness(
-        context.qwen_base(),
-        AgentKind::QwenCode,
-        &path_needles,
-        "Qwen has compatible hook identity, but path-move storage rewrite still needs native fixtures.",
-    )?);
-    harnesses.push(plan_cursor(context));
-    harnesses.push(plan_shared_vscode_harness(
+    harnesses.push(gemini::plan(context, &path_needles)?);
+    harnesses.push(qwen::plan(context, &path_needles)?);
+    harnesses.push(cursor::plan(context));
+    harnesses.push(vscode::plan(
         context,
         AgentKind::Cline,
         "Cline task history lives in VS Code extension storage; close the IDE before any future migration.",
     ));
-    harnesses.push(plan_shared_vscode_harness(
+    harnesses.push(vscode::plan(
         context,
         AgentKind::RooCode,
         "Roo has no lifecycle hooks today, but its VS Code storage may still need preservation on project moves.",
     ));
-    harnesses.push(plan_shared_vscode_harness(
+    harnesses.push(vscode::plan(
         context,
         AgentKind::KiloCode,
         "Kilo has no lifecycle hooks today, but its VS Code storage may still need preservation on project moves.",
     ));
-    harnesses.push(plan_roots_only_harness(
-        AgentKind::OpenCode,
-        context.opencode_roots(),
-        "OpenCode uses an in-process plugin model and local database storage; no mutation adapter exists.",
-    ));
-    harnesses.push(plan_project_local_harness(AgentKind::Aider));
+    harnesses.push(opencode::plan(context));
+    harnesses.push(aider::plan());
 
     for kind in AgentKind::ALL {
         if harnesses.iter().any(|report| report.harness == *kind) {
@@ -797,42 +790,6 @@ fn plan_text_storage_harness(
     ))
 }
 
-fn plan_cursor(context: &HarnessOpsContext) -> HarnessMigrationReport {
-    let roots: Vec<PathBuf> = context
-        .cursor_roots()
-        .into_iter()
-        .filter(|root| root.exists())
-        .collect();
-
-    let mut notes = vec![
-        "Cursor is reconnaissance-only until workspaceStorage/globalStorage fixtures exist."
-            .to_string(),
-        "cursor-chat-recovery-kit closes Cursor, backs up current state.vscdb, copies old state.vscdb/images, then restarts Cursor."
-            .to_string(),
-    ];
-    if roots.is_empty() {
-        notes.push("no Cursor state roots detected".to_string());
-    }
-
-    HarnessMigrationReport::from_edits(
-        AgentKind::Cursor,
-        AdapterReadiness::ReconOnly,
-        roots,
-        0,
-        0,
-        Vec::new(),
-        notes,
-    )
-}
-
-fn plan_shared_vscode_harness(
-    context: &HarnessOpsContext,
-    harness: AgentKind,
-    note: &str,
-) -> HarnessMigrationReport {
-    plan_roots_only_harness(harness, context.vscode_roots(), note)
-}
-
 fn plan_roots_only_harness(
     harness: AgentKind,
     roots: Vec<PathBuf>,
@@ -852,25 +809,6 @@ fn plan_roots_only_harness(
         0,
         Vec::new(),
         notes,
-    )
-}
-
-fn plan_project_local_harness(harness: AgentKind) -> HarnessMigrationReport {
-    HarnessMigrationReport::from_edits(
-        harness,
-        AdapterReadiness::DoctorOnly,
-        Vec::new(),
-        0,
-        0,
-        vec![MigrationEdit::preserve_project_local_history(
-            harness,
-            "source directory contents",
-            "project-local chat/history files should move with the project itself",
-        )],
-        vec![
-            "Aider is mostly a filesystem move problem; no global session rewrite adapter is expected for v1."
-                .to_string(),
-        ],
     )
 }
 
