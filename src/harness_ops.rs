@@ -17,6 +17,7 @@ use crate::agent_kind::{AgentKind, HarnessSupport};
 use crate::core::ConflictingPane;
 
 mod aider;
+mod apply;
 mod claude;
 mod codex;
 mod cursor;
@@ -24,6 +25,8 @@ mod gemini;
 mod opencode;
 mod qwen;
 mod vscode;
+
+pub use apply::{apply_migration_plan, MigrationApplyOptions, MigrationApplyReport};
 
 const MAX_SCAN_FILES: usize = 5_000;
 const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
@@ -310,6 +313,11 @@ impl MigrationEdit {
             },
             apply_ready: false,
         }
+    }
+
+    pub fn with_apply_ready(mut self, apply_ready: bool) -> Self {
+        self.apply_ready = apply_ready;
+        self
     }
 
     fn target(&self) -> String {
@@ -1246,5 +1254,98 @@ mod tests {
             .find(|harness| harness.harness == AgentKind::Gemini)
             .unwrap();
         assert_eq!(gemini.path_references_found, 1);
+    }
+
+    #[test]
+    fn generic_apply_consumes_typed_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        fs::create_dir_all(&old).unwrap();
+
+        let jsonl = root.join("history.jsonl");
+        write_file(
+            &jsonl,
+            &format!("{{\"project\":\"{}\",\"display\":\"x\"}}\n", old.display()),
+        );
+        let toml = root.join("config.toml");
+        write_file(
+            &toml,
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                old.display()
+            ),
+        );
+        let text = root.join("notes.txt");
+        write_file(&text, &format!("cwd={}\n", old.display()));
+
+        let edits = vec![
+            MigrationEdit::rewrite_jsonl_field(
+                AgentKind::Claude,
+                "rewrite_history_paths",
+                jsonl.clone(),
+                "$.project",
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
+            MigrationEdit::rewrite_toml_table_key(
+                AgentKind::Codex,
+                "rewrite_project_config_keys",
+                toml.clone(),
+                "projects",
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Gemini,
+                "rewrite_native_path_refs",
+                text.display().to_string(),
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
+        ];
+        let report = MigrationDoctorReport {
+            old_path: old.clone(),
+            new_path: new.clone(),
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Claude,
+                AdapterReadiness::ApplyReady,
+                vec![root.to_path_buf()],
+                0,
+                3,
+                edits,
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(apply.edits_seen, 3);
+        assert!(!apply.has_blockers());
+        assert!(fs::read_to_string(&jsonl)
+            .unwrap()
+            .contains(&new.display().to_string()));
+        assert!(fs::read_to_string(&toml)
+            .unwrap()
+            .contains(&new.display().to_string()));
+        assert!(fs::read_to_string(&text)
+            .unwrap()
+            .contains(&new.display().to_string()));
     }
 }
