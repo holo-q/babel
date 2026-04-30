@@ -69,19 +69,31 @@ async fn main() -> Result<()> {
         tracing::debug!("debug logging enabled via --debug flag");
     }
 
-    // Connect to daemon or use ephemeral mode
-    let mut core = BabelCore::connect().await;
+    let is_migration_doctor = match &cli.command {
+        Commands::Mv { doctor, .. } => cli.doctor || *doctor,
+        _ => false,
+    };
+
+    // Connect to daemon or use ephemeral mode. Migration doctor uses a lighter
+    // local connection so a missing daemon does not preface the report with
+    // scrollback/activity parser diagnostics.
+    let mut core = if is_migration_doctor {
+        BabelCore::connect_lightweight().await
+    } else {
+        BabelCore::connect().await
+    };
 
     // Print mode indicator to stderr for commands that use BabelCore
     // Skip for daemon/tui/monitor/mcp/hook which have their own connection handling
-    let show_mode = !matches!(
-        cli.command,
-        Commands::Daemon { .. }
-            | Commands::Tui
-            | Commands::Monitor { .. }
-            | Commands::Mcp
-            | Commands::Hook { .. }
-    );
+    let show_mode = !is_migration_doctor
+        && !matches!(
+            cli.command,
+            Commands::Daemon { .. }
+                | Commands::Tui
+                | Commands::Monitor { .. }
+                | Commands::Mcp
+                | Commands::Hook { .. }
+        );
     if show_mode && !cli.json {
         eprintln!("[{}]", core.mode_label());
     }

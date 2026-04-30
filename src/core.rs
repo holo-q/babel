@@ -70,6 +70,24 @@ impl BabelCore {
     /// - rebuild_fingerprint_index() for scrollback matching
     #[instrument(level = "debug")]
     pub async fn connect() -> Self {
+        Self::connect_with_local_refresh(false, true).await
+    }
+
+    /// Connect without expensive local scrollback parsing.
+    ///
+    /// Command-level doctors need a clean evidence report, not a local daemon
+    /// imitation that probes every pane and emits scrollparse diagnostics before
+    /// the report starts. When babeld is running this still uses its cached state;
+    /// when it is not, local mode only gathers pane/cwd structure.
+    #[instrument(level = "debug")]
+    pub async fn connect_lightweight() -> Self {
+        Self::connect_with_local_refresh(true, false).await
+    }
+
+    async fn connect_with_local_refresh(
+        skip_activity_fetch: bool,
+        rebuild_fingerprint_index: bool,
+    ) -> Self {
         if is_daemon_running().await {
             debug!("connected to babeld");
             Self {
@@ -79,8 +97,7 @@ impl BabelCore {
             debug!("daemon not available, initializing local state");
             let mut state = BabelState::new();
 
-            // Initialize same way daemon does (full refresh with activity states)
-            if let Err(e) = state.refresh_panes(false).await {
+            if let Err(e) = state.refresh_panes(skip_activity_fetch).await {
                 trace_error!("pane refresh failed", error = %e);
                 warn!("failed to refresh panes: {}", e);
             }
@@ -88,9 +105,11 @@ impl BabelCore {
                 trace_error!("summary index rebuild failed", error = %e);
                 warn!("failed to build summary index: {}", e);
             }
-            if let Err(e) = state.rebuild_fingerprint_index() {
-                trace_error!("fingerprint index rebuild failed", error = %e);
-                warn!("failed to build fingerprint index: {}", e);
+            if rebuild_fingerprint_index {
+                if let Err(e) = state.rebuild_fingerprint_index() {
+                    trace_error!("fingerprint index rebuild failed", error = %e);
+                    warn!("failed to build fingerprint index: {}", e);
+                }
             }
 
             Self {

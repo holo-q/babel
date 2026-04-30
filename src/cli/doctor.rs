@@ -9,9 +9,10 @@
 use anyhow::Result;
 use claude_babel::core::BabelCore;
 use claude_babel::harness_ops::{
-    live_panes_from_conflicts, plan_migration, AdapterReadiness, HarnessMigrationReport,
+    plan_migration, AdapterReadiness, HarnessMigrationReport, LivePaneImpact,
     MigrationDoctorReport, RiskSeverity,
 };
+use claude_babel::utility::agent_discovery::AgentPane;
 use std::path::{Path, PathBuf};
 
 /// ANSI color codes for output
@@ -381,8 +382,8 @@ pub async fn cmd_migration_doctor(
     let source = super::mv::expand_tilde(&source);
     let dest = super::mv::expand_tilde(&dest);
 
-    let conflicts = core.find_panes_in_path(&source).await?;
-    let live_panes = live_panes_from_conflicts(&conflicts);
+    let panes = core.panes().await?;
+    let live_panes = live_panes_from_panes(&source, panes);
     let report = plan_migration(&source, &dest, live_panes)?;
 
     if json {
@@ -392,6 +393,40 @@ pub async fn cmd_migration_doctor(
 
     print_migration_doctor(&report);
     Ok(())
+}
+
+fn live_panes_from_panes(source: &Path, panes: Vec<AgentPane>) -> Vec<LivePaneImpact> {
+    let source = source
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(source));
+
+    panes
+        .into_iter()
+        .filter(|pane| pane.cwd.starts_with(&source))
+        .map(|pane| {
+            let state = pane
+                .activity_state
+                .map(|state| format!("{state:?}"))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let migratable = !matches!(state.as_str(), "Thinking" | "ToolUse" | "BackgroundTask");
+            let relative_path = pane
+                .cwd
+                .strip_prefix(&source)
+                .unwrap_or(Path::new(""))
+                .to_path_buf();
+
+            LivePaneImpact {
+                pane_id: pane.id(),
+                socket: pane.socket().to_string(),
+                harness: pane.agent_kind,
+                session_id: pane.session_id.clone(),
+                cwd: pane.cwd,
+                relative_path,
+                state,
+                migratable,
+            }
+        })
+        .collect()
 }
 
 fn print_migration_doctor(report: &MigrationDoctorReport) {
