@@ -9,7 +9,7 @@ use crate::agent_kind::AgentKind;
 
 use super::{
     is_probably_text_state_file, text_file_contains_any, AdapterReadiness, HarnessMigrationReport,
-    HarnessOpsContext, PlannedOperation, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
 };
 
 #[derive(Default)]
@@ -19,7 +19,9 @@ struct CodexDiscovery {
     session_path_ref_files: usize,
     history_ref_entries: usize,
     session_index_ref_entries: usize,
-    project_config_ref_files: usize,
+    config_toml_ref_files: usize,
+    config_json_ref_files: usize,
+    internal_storage_ref_files: usize,
     shell_snapshot_files: usize,
     shell_snapshot_ref_files: usize,
     files_scanned: usize,
@@ -54,93 +56,85 @@ pub(super) fn plan(
     state_roots.sort();
     state_roots.dedup();
 
-    let mut operations = Vec::new();
+    let mut edits = Vec::new();
     if !discovery.matched_sessions.is_empty() {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "rewrite_session_meta_cwd".to_string(),
-            target: context.codex_sessions().display().to_string(),
-            detail: format!(
-                "{} session(s) have cwd under source; set cwd to {}",
-                discovery.matched_sessions.len(),
-                new_path.display()
-            ),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_jsonl_field(
+            AgentKind::Codex,
+            "rewrite_session_meta_cwd",
+            context.codex_sessions(),
+            "$.payload.cwd where $.type == \"session_meta\"",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.matched_sessions.len(),
+        ));
     }
-    if discovery.project_config_ref_files > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "rewrite_project_config_keys".to_string(),
-            target: context.codex_base().display().to_string(),
-            detail: format!(
-                "{} Codex config file(s) contain trusted project entries or path refs",
-                discovery.project_config_ref_files
-            ),
-            apply_ready: false,
-        });
+    if discovery.config_toml_ref_files > 0 {
+        edits.push(MigrationEdit::rewrite_toml_table_key(
+            AgentKind::Codex,
+            "rewrite_project_config_keys",
+            context.codex_base().join("config.toml"),
+            "projects",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.config_toml_ref_files,
+        ));
+    }
+    if discovery.config_json_ref_files > 0 || discovery.internal_storage_ref_files > 0 {
+        edits.push(MigrationEdit::rewrite_text_refs(
+            AgentKind::Codex,
+            "rewrite_project_config_refs",
+            context.codex_base().display().to_string(),
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.config_json_ref_files + discovery.internal_storage_ref_files,
+        ));
     }
     if discovery.session_path_ref_files > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "rewrite_session_path_refs".to_string(),
-            target: context.codex_sessions().display().to_string(),
-            detail: format!(
-                "{} session file(s) contain source path references",
-                discovery.session_path_ref_files
-            ),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_text_refs(
+            AgentKind::Codex,
+            "rewrite_session_path_refs",
+            context.codex_sessions().display().to_string(),
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.session_path_ref_files,
+        ));
     }
     if discovery.history_ref_entries > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "rewrite_history_path_refs".to_string(),
-            target: context
-                .codex_base()
-                .join("history.jsonl")
-                .display()
-                .to_string(),
-            detail: format!(
-                "{} history entrie(s) contain source path references",
-                discovery.history_ref_entries
-            ),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_jsonl_field(
+            AgentKind::Codex,
+            "rewrite_history_path_refs",
+            context.codex_base().join("history.jsonl"),
+            "line containing source path",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.history_ref_entries,
+        ));
     }
     if discovery.session_index_ref_entries > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "rewrite_session_index_path_refs".to_string(),
-            target: context
-                .codex_base()
-                .join("session_index.jsonl")
-                .display()
-                .to_string(),
-            detail: format!(
-                "{} session-index entrie(s) contain source path references",
-                discovery.session_index_ref_entries
-            ),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_jsonl_field(
+            AgentKind::Codex,
+            "rewrite_session_index_path_refs",
+            context.codex_base().join("session_index.jsonl"),
+            "line containing source path",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            discovery.session_index_ref_entries,
+        ));
     }
     if discovery.shell_snapshot_files > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Codex,
-            action: "preserve_session_shell_snapshots".to_string(),
-            target: context.codex_shell_snapshots().display().to_string(),
-            detail: format!(
-                "{} shell snapshot file(s) are keyed by matched session id(s); {} contain source path refs",
-                discovery.shell_snapshot_files, discovery.shell_snapshot_ref_files
-            ),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::preserve_session_keyed_files(
+            AgentKind::Codex,
+            "preserve_session_shell_snapshots",
+            context.codex_shell_snapshots(),
+            discovery.shell_snapshot_files,
+            discovery.shell_snapshot_ref_files,
+        ));
     }
 
     let mut notes = vec![
         "Codex identity is session_meta.payload.cwd in rollout JSONL; path-bearing transcripts are reported separately.".to_string(),
         "References used: cdxresume and cli-continues parse Codex 0.32+ rollout files from ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.".to_string(),
-        "Codex apply is still disabled until rewrite/backup/rollback fixtures exist for session_meta, config.toml project keys, history, and shell snapshots.".to_string(),
+        "Codex edits are now typed generic migration intents; apply waits on the shared transaction executor, not per-harness mutation code.".to_string(),
     ];
     for root in [
         context.codex_sessions(),
@@ -182,18 +176,20 @@ pub(super) fn plan(
     let path_references_found = discovery.session_path_ref_files
         + discovery.history_ref_entries
         + discovery.session_index_ref_entries
-        + discovery.project_config_ref_files
+        + discovery.config_toml_ref_files
+        + discovery.config_json_ref_files
+        + discovery.internal_storage_ref_files
         + discovery.shell_snapshot_ref_files;
 
-    Ok(HarnessMigrationReport {
-        harness: AgentKind::Codex,
-        readiness: AdapterReadiness::DoctorOnly,
+    Ok(HarnessMigrationReport::from_edits(
+        AgentKind::Codex,
+        AdapterReadiness::DoctorOnly,
         state_roots,
-        sessions_found: discovery.matched_sessions.len(),
+        discovery.matched_sessions.len(),
         path_references_found,
-        operations,
+        edits,
         notes,
-    })
+    ))
 }
 
 fn discover(
@@ -216,16 +212,12 @@ fn discover(
         count_jsonl_line_refs(&context.codex_base().join("history.jsonl"), needles)?;
     discovery.session_index_ref_entries =
         count_jsonl_line_refs(&context.codex_base().join("session_index.jsonl"), needles)?;
-    discovery.project_config_ref_files = [
-        context.codex_base().join("config.toml"),
-        context.codex_base().join("config.json"),
-        context.codex_base().join("internal_storage.json"),
-    ]
-    .into_iter()
-    .map(|path| text_file_ref_count(&path, needles))
-    .collect::<Result<Vec<_>>>()?
-    .into_iter()
-    .sum();
+    discovery.config_toml_ref_files =
+        text_file_ref_count(&context.codex_base().join("config.toml"), needles)?;
+    discovery.config_json_ref_files =
+        text_file_ref_count(&context.codex_base().join("config.json"), needles)?;
+    discovery.internal_storage_ref_files =
+        text_file_ref_count(&context.codex_base().join("internal_storage.json"), needles)?;
 
     collect_shell_snapshots(context, needles, &mut discovery)?;
     Ok(discovery)

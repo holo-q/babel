@@ -137,14 +137,267 @@ pub struct PlannedOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationEdit {
+    pub harness: AgentKind,
+    pub action: String,
+    pub kind: MigrationEditKind,
+    pub apply_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MigrationEditKind {
+    RenamePath {
+        from: PathBuf,
+        to: PathBuf,
+        preserve: String,
+    },
+    RewriteJsonlField {
+        path: PathBuf,
+        selector: String,
+        from: String,
+        to: String,
+        count: usize,
+    },
+    RewriteTomlTableKey {
+        path: PathBuf,
+        table: String,
+        from_key: String,
+        to_key: String,
+        count: usize,
+    },
+    RewriteTextRefs {
+        target: String,
+        from: String,
+        to: String,
+        count: usize,
+    },
+    PreserveSessionKeyedFiles {
+        root: PathBuf,
+        session_count: usize,
+        path_ref_count: usize,
+    },
+    PreserveProjectLocalHistory {
+        target: String,
+        detail: String,
+    },
+}
+
+impl MigrationEdit {
+    pub fn rename_path(
+        harness: AgentKind,
+        action: impl Into<String>,
+        from: PathBuf,
+        to: PathBuf,
+        preserve: impl Into<String>,
+    ) -> Self {
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::RenamePath {
+                from,
+                to,
+                preserve: preserve.into(),
+            },
+            apply_ready: false,
+        }
+    }
+
+    pub fn rewrite_jsonl_field(
+        harness: AgentKind,
+        action: impl Into<String>,
+        path: PathBuf,
+        selector: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        count: usize,
+    ) -> Self {
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::RewriteJsonlField {
+                path,
+                selector: selector.into(),
+                from: from.into(),
+                to: to.into(),
+                count,
+            },
+            apply_ready: false,
+        }
+    }
+
+    pub fn rewrite_toml_table_key(
+        harness: AgentKind,
+        action: impl Into<String>,
+        path: PathBuf,
+        table: impl Into<String>,
+        from_key: impl Into<String>,
+        to_key: impl Into<String>,
+        count: usize,
+    ) -> Self {
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::RewriteTomlTableKey {
+                path,
+                table: table.into(),
+                from_key: from_key.into(),
+                to_key: to_key.into(),
+                count,
+            },
+            apply_ready: false,
+        }
+    }
+
+    pub fn rewrite_text_refs(
+        harness: AgentKind,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        count: usize,
+    ) -> Self {
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::RewriteTextRefs {
+                target: target.into(),
+                from: from.into(),
+                to: to.into(),
+                count,
+            },
+            apply_ready: false,
+        }
+    }
+
+    pub fn preserve_session_keyed_files(
+        harness: AgentKind,
+        action: impl Into<String>,
+        root: PathBuf,
+        session_count: usize,
+        path_ref_count: usize,
+    ) -> Self {
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::PreserveSessionKeyedFiles {
+                root,
+                session_count,
+                path_ref_count,
+            },
+            apply_ready: false,
+        }
+    }
+
+    pub fn preserve_project_local_history(
+        harness: AgentKind,
+        target: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            harness,
+            action: "preserve_project_local_history".to_string(),
+            kind: MigrationEditKind::PreserveProjectLocalHistory {
+                target: target.into(),
+                detail: detail.into(),
+            },
+            apply_ready: false,
+        }
+    }
+
+    fn target(&self) -> String {
+        match &self.kind {
+            MigrationEditKind::RenamePath { from, to, .. } => {
+                format!("{} -> {}", from.display(), to.display())
+            }
+            MigrationEditKind::RewriteJsonlField { path, .. }
+            | MigrationEditKind::RewriteTomlTableKey { path, .. } => path.display().to_string(),
+            MigrationEditKind::RewriteTextRefs { target, .. }
+            | MigrationEditKind::PreserveProjectLocalHistory { target, .. } => target.clone(),
+            MigrationEditKind::PreserveSessionKeyedFiles { root, .. } => root.display().to_string(),
+        }
+    }
+
+    fn detail(&self) -> String {
+        match &self.kind {
+            MigrationEditKind::RenamePath { preserve, .. } => preserve.clone(),
+            MigrationEditKind::RewriteJsonlField {
+                selector, count, ..
+            } => {
+                format!("rewrite {count} JSONL record(s) at {selector}")
+            }
+            MigrationEditKind::RewriteTomlTableKey {
+                table,
+                from_key,
+                to_key,
+                count,
+                ..
+            } => {
+                format!("rewrite {count} TOML [{table}] key(s): {from_key} -> {to_key}")
+            }
+            MigrationEditKind::RewriteTextRefs { count, .. } => {
+                format!("rewrite {count} text target(s) containing source path references")
+            }
+            MigrationEditKind::PreserveSessionKeyedFiles {
+                session_count,
+                path_ref_count,
+                ..
+            } => {
+                format!(
+                    "{session_count} session-keyed file(s); {path_ref_count} contain source path refs"
+                )
+            }
+            MigrationEditKind::PreserveProjectLocalHistory { detail, .. } => detail.clone(),
+        }
+    }
+}
+
+impl From<&MigrationEdit> for PlannedOperation {
+    fn from(edit: &MigrationEdit) -> Self {
+        Self {
+            harness: edit.harness,
+            action: edit.action.clone(),
+            target: edit.target(),
+            detail: edit.detail(),
+            apply_ready: edit.apply_ready,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessMigrationReport {
     pub harness: AgentKind,
     pub readiness: AdapterReadiness,
     pub state_roots: Vec<PathBuf>,
     pub sessions_found: usize,
     pub path_references_found: usize,
+    pub edits: Vec<MigrationEdit>,
     pub operations: Vec<PlannedOperation>,
     pub notes: Vec<String>,
+}
+
+impl HarnessMigrationReport {
+    fn from_edits(
+        harness: AgentKind,
+        readiness: AdapterReadiness,
+        state_roots: Vec<PathBuf>,
+        sessions_found: usize,
+        path_references_found: usize,
+        edits: Vec<MigrationEdit>,
+        notes: Vec<String>,
+    ) -> Self {
+        let operations = edits.iter().map(PlannedOperation::from).collect();
+        Self {
+            harness,
+            readiness,
+            state_roots,
+            sessions_found,
+            path_references_found,
+            edits,
+            operations,
+            notes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,18 +566,18 @@ pub fn plan_migration_with_context(
         if harnesses.iter().any(|report| report.harness == *kind) {
             continue;
         }
-        harnesses.push(HarnessMigrationReport {
-            harness: *kind,
-            readiness: AdapterReadiness::Unsupported,
-            state_roots: Vec::new(),
-            sessions_found: 0,
-            path_references_found: 0,
-            operations: Vec::new(),
-            notes: vec![
+        harnesses.push(HarnessMigrationReport::from_edits(
+            *kind,
+            AdapterReadiness::Unsupported,
+            Vec::new(),
+            0,
+            0,
+            Vec::new(),
+            vec![
                 "no path-move adapter has been extracted from references yet; doctor keeps this explicit instead of guessing"
                     .to_string(),
             ],
-        });
+        ));
     }
 
     risks.push(MigrationRisk {
@@ -375,7 +628,7 @@ fn plan_claude(
     let user_wide_refs = user_wide_files.iter().try_fold(0, |count, file| {
         Ok::<_, anyhow::Error>(count + scan_text_refs(file, needles)?.path_references_found)
     })?;
-    let mut operations = Vec::new();
+    let mut edits = Vec::new();
     let mut notes = Vec::new();
 
     for source in &existing_sources {
@@ -386,16 +639,16 @@ fn plan_claude(
         else {
             continue;
         };
-        operations.push(PlannedOperation {
-            harness: AgentKind::Claude,
-            action: "rename_project_dir".to_string(),
-            target: format!("{} -> {}", source.path.display(), dest.path.display()),
-            detail: format!(
+        edits.push(MigrationEdit::rename_path(
+            AgentKind::Claude,
+            "rename_project_dir",
+            source.path.clone(),
+            dest.path.clone(),
+            format!(
                 "{} key; preserve {} Claude transcript file(s)",
                 source.scheme, sessions_found
             ),
-            apply_ready: false,
-        });
+        ));
     }
 
     if existing_sources.is_empty() {
@@ -410,33 +663,37 @@ fn plan_claude(
     }
 
     if history_refs > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Claude,
-            action: "rewrite_history_paths".to_string(),
-            target: history_path.display().to_string(),
-            detail: format!("rewrite {} history entrie(s)", history_refs),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_jsonl_field(
+            AgentKind::Claude,
+            "rewrite_history_paths",
+            history_path.clone(),
+            "$.project",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            history_refs,
+        ));
     }
 
     if session_refs > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Claude,
-            action: "rewrite_session_keyed_refs".to_string(),
-            target: "~/.claude/{todos,usage-data,plugins/data,tasks}".to_string(),
-            detail: format!("rewrite {} session-keyed file(s)", session_refs),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_text_refs(
+            AgentKind::Claude,
+            "rewrite_session_keyed_refs",
+            "~/.claude/{todos,usage-data,plugins/data,tasks}",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            session_refs,
+        ));
     }
 
     if user_wide_refs > 0 {
-        operations.push(PlannedOperation {
-            harness: AgentKind::Claude,
-            action: "rewrite_user_wide_refs".to_string(),
-            target: "~/.claude.json and Claude plugin/settings files".to_string(),
-            detail: format!("rewrite {} user-wide file(s)", user_wide_refs),
-            apply_ready: false,
-        });
+        edits.push(MigrationEdit::rewrite_text_refs(
+            AgentKind::Claude,
+            "rewrite_user_wide_refs",
+            "~/.claude.json and Claude plugin/settings files",
+            old_path.display().to_string(),
+            new_path.display().to_string(),
+            user_wide_refs,
+        ));
     }
 
     for dest in dest_candidates
@@ -482,15 +739,15 @@ fn plan_claude(
     state_roots.sort();
     state_roots.dedup();
 
-    Ok(HarnessMigrationReport {
-        harness: AgentKind::Claude,
-        readiness: AdapterReadiness::DoctorOnly,
+    Ok(HarnessMigrationReport::from_edits(
+        AgentKind::Claude,
+        AdapterReadiness::DoctorOnly,
         state_roots,
         sessions_found,
-        path_references_found: history_refs + session_refs + user_wide_refs,
-        operations,
+        history_refs + session_refs + user_wide_refs,
+        edits,
         notes,
-    })
+    ))
 }
 
 fn plan_text_storage_harness(
@@ -500,7 +757,7 @@ fn plan_text_storage_harness(
     note: &str,
 ) -> Result<HarnessMigrationReport> {
     let scan = scan_text_refs(&root, needles)?;
-    let mut operations = Vec::new();
+    let mut edits = Vec::new();
     let mut notes = vec![note.to_string()];
 
     if !root.exists() {
@@ -519,27 +776,25 @@ fn plan_text_storage_harness(
     }
 
     if scan.path_references_found > 0 {
-        operations.push(PlannedOperation {
+        edits.push(MigrationEdit::rewrite_text_refs(
             harness,
-            action: "rewrite_native_path_refs".to_string(),
-            target: root.display().to_string(),
-            detail: format!(
-                "{} file(s) contain source path references",
-                scan.path_references_found
-            ),
-            apply_ready: false,
-        });
+            "rewrite_native_path_refs",
+            root.display().to_string(),
+            "",
+            "",
+            scan.path_references_found,
+        ));
     }
 
-    Ok(HarnessMigrationReport {
+    Ok(HarnessMigrationReport::from_edits(
         harness,
-        readiness: AdapterReadiness::DoctorOnly,
-        state_roots: vec![root],
-        sessions_found: 0,
-        path_references_found: scan.path_references_found,
-        operations,
+        AdapterReadiness::DoctorOnly,
+        vec![root],
+        0,
+        scan.path_references_found,
+        edits,
         notes,
-    })
+    ))
 }
 
 fn plan_cursor(context: &HarnessOpsContext) -> HarnessMigrationReport {
@@ -559,15 +814,15 @@ fn plan_cursor(context: &HarnessOpsContext) -> HarnessMigrationReport {
         notes.push("no Cursor state roots detected".to_string());
     }
 
-    HarnessMigrationReport {
-        harness: AgentKind::Cursor,
-        readiness: AdapterReadiness::ReconOnly,
-        state_roots: roots,
-        sessions_found: 0,
-        path_references_found: 0,
-        operations: Vec::new(),
+    HarnessMigrationReport::from_edits(
+        AgentKind::Cursor,
+        AdapterReadiness::ReconOnly,
+        roots,
+        0,
+        0,
+        Vec::new(),
         notes,
-    }
+    )
 }
 
 fn plan_shared_vscode_harness(
@@ -589,36 +844,34 @@ fn plan_roots_only_harness(
         notes.push("no known state roots detected".to_string());
     }
 
-    HarnessMigrationReport {
+    HarnessMigrationReport::from_edits(
         harness,
-        readiness: AdapterReadiness::ReconOnly,
-        state_roots: existing_roots,
-        sessions_found: 0,
-        path_references_found: 0,
-        operations: Vec::new(),
+        AdapterReadiness::ReconOnly,
+        existing_roots,
+        0,
+        0,
+        Vec::new(),
         notes,
-    }
+    )
 }
 
 fn plan_project_local_harness(harness: AgentKind) -> HarnessMigrationReport {
-    HarnessMigrationReport {
+    HarnessMigrationReport::from_edits(
         harness,
-        readiness: AdapterReadiness::DoctorOnly,
-        state_roots: Vec::new(),
-        sessions_found: 0,
-        path_references_found: 0,
-        operations: vec![PlannedOperation {
+        AdapterReadiness::DoctorOnly,
+        Vec::new(),
+        0,
+        0,
+        vec![MigrationEdit::preserve_project_local_history(
             harness,
-            action: "preserve_project_local_history".to_string(),
-            target: "source directory contents".to_string(),
-            detail: "project-local chat/history files should move with the project itself".to_string(),
-            apply_ready: false,
-        }],
-        notes: vec![
+            "source directory contents",
+            "project-local chat/history files should move with the project itself",
+        )],
+        vec![
             "Aider is mostly a filesystem move problem; no global session rewrite adapter is expected for v1."
                 .to_string(),
         ],
-    }
+    )
 }
 
 #[derive(Debug)]
@@ -907,10 +1160,18 @@ mod tests {
             .operations
             .iter()
             .any(|op| op.action == "rename_project_dir" && !op.apply_ready));
+        assert!(claude.edits.iter().any(|edit| {
+            edit.action == "rename_project_dir"
+                && matches!(&edit.kind, MigrationEditKind::RenamePath { .. })
+        }));
         assert!(claude
             .operations
             .iter()
             .any(|op| op.action == "rewrite_history_paths" && !op.apply_ready));
+        assert!(claude.edits.iter().any(|edit| {
+            edit.action == "rewrite_history_paths"
+                && matches!(&edit.kind, MigrationEditKind::RewriteJsonlField { .. })
+        }));
         assert!(!report.has_blockers());
     }
 
@@ -1017,14 +1278,29 @@ mod tests {
             .operations
             .iter()
             .any(|op| op.action == "rewrite_session_meta_cwd"));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_session_meta_cwd"
+                && matches!(&edit.kind, MigrationEditKind::RewriteJsonlField { .. })
+        }));
         assert!(codex
             .operations
             .iter()
             .any(|op| op.action == "rewrite_project_config_keys"));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_project_config_keys"
+                && matches!(&edit.kind, MigrationEditKind::RewriteTomlTableKey { .. })
+        }));
         assert!(codex
             .operations
             .iter()
             .any(|op| op.action == "preserve_session_shell_snapshots"));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "preserve_session_shell_snapshots"
+                && matches!(
+                    &edit.kind,
+                    MigrationEditKind::PreserveSessionKeyedFiles { .. }
+                )
+        }));
 
         let gemini = report
             .harnesses
