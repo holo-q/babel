@@ -36,7 +36,7 @@ pub(super) fn plan(
             },
             harness: Some(AgentKind::GithubCopilot),
             message:
-                "GitHub Copilot CLI hooks do not expose a stable session/task id; Babel must not infer identity from cwd or timestamps"
+                "GitHub Copilot CLI does not expose a stable migration session/task id; Babel must not infer identity from cwd or timestamps"
                     .to_string(),
         });
     }
@@ -58,13 +58,13 @@ pub(super) fn plan(
     }
 
     let mut notes = vec![
-        "GitHub Copilot CLI is doctor-only and identity-unsupported: the documented hook payload has no stable session/task id for Babel to bind."
+        "GitHub Copilot CLI is doctor-only and identity-unsupported: no stable migration session/task id is available for Babel to bind."
             .to_string(),
         "No cwd+timestamp matching is attempted; storage observations are reported as preservation facts only."
             .to_string(),
         "Local references agree on CLI storage under ~/.copilot/session-state/<session>/ with events.jsonl; cli-continues also reads workspace.yaml and honors COPILOT_HOME."
             .to_string(),
-        "CASS connector tests show Chronicle events.jsonl can carry data.sessionId and data.cwd, but those are storage facts, not a supported hook identity contract."
+        "CASS connector tests show Chronicle events.jsonl can carry data.sessionId and data.cwd, but those are storage facts, not a supported migration identity contract."
             .to_string(),
     ];
 

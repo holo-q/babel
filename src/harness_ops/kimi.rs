@@ -138,8 +138,8 @@ pub(super) fn plan(
 
     let mut notes = vec![
         "Kimi storage is path-keyed: kimi.json work_dirs plus sessions/<workdir-hash>/<session-id>/.".to_string(),
-        "Kimi session_id is stable and comes from the session directory name; Babel hook config uses TOML but storage migration is filesystem/JSONL state.".to_string(),
-        "References used: CASS Kimi connector, cli-continues Kimi parser docs/tests, and Babel README hook roster.".to_string(),
+        "Kimi session_id is stable and comes from the session directory name; storage migration is filesystem/JSONL state.".to_string(),
+        "References used: CASS Kimi connector, cli-continues Kimi parser docs/tests, and Babel README harness roster.".to_string(),
     ];
     if !discovery.share_dir.exists() {
         notes.push(format!(

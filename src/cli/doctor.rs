@@ -24,6 +24,7 @@ mod colors {
     pub const YELLOW: &str = "\x1b[33m";
     pub const CYAN: &str = "\x1b[36m";
     pub const DIM: &str = "\x1b[2m";
+    pub const DIM_STRIKE: &str = "\x1b[2;9m";
     pub const BOLD: &str = "\x1b[1m";
     pub const RESET: &str = "\x1b[0m";
 }
@@ -54,6 +55,10 @@ fn styled(style: &str, text: impl std::fmt::Display) -> String {
 
 fn dim(text: impl std::fmt::Display) -> String {
     styled(colors::DIM, text)
+}
+
+fn dim_strike(text: impl std::fmt::Display) -> String {
+    styled(colors::DIM_STRIKE, text)
 }
 
 fn bold(text: impl std::fmt::Display) -> String {
@@ -488,10 +493,25 @@ fn print_migration_doctor(report: &MigrationDoctorReport) {
 }
 
 fn print_harness_report(report: &HarnessMigrationReport) {
+    let inactive = is_inactive_report(report);
+    let harness = if inactive {
+        dim_strike(report.harness)
+    } else {
+        harness_name(report.harness)
+    };
+    let readiness = if inactive {
+        if report.state_roots.is_empty() {
+            dim("not-detected")
+        } else {
+            dim("no-matching-state")
+        }
+    } else {
+        readiness_label(&report.readiness)
+    };
     println!(
         "  {:<24} {:<24} {} {:<3} {} {:<3} {} {}",
-        harness_name(report.harness),
-        readiness_label(&report.readiness),
+        harness,
+        readiness,
         dim("sessions:"),
         report.sessions_found,
         dim("refs:"),
@@ -524,13 +544,15 @@ fn print_harness_report(report: &HarnessMigrationReport) {
 }
 
 fn is_inactive_unsupported(report: &HarnessMigrationReport) -> bool {
-    report.operations.is_empty()
-        && report.path_references_found == 0
-        && report.sessions_found == 0
+    is_inactive_report(report)
         && report.state_roots.is_empty()
         && matches!(report.readiness, AdapterReadiness::Unsupported)
         && report.notes.len() == 1
         && report.notes[0].starts_with("no path-move adapter has been extracted")
+}
+
+fn is_inactive_report(report: &HarnessMigrationReport) -> bool {
+    report.operations.is_empty() && report.path_references_found == 0 && report.sessions_found == 0
 }
 
 fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String {

@@ -42,7 +42,7 @@ pub(super) fn plan(
     let discovery = discover(context, needles)?;
     let mut notes = vec![
         "Roo Code is a Cline-family VS Code extension; references agree on globalStorage/<extension>/tasks/<task_id> with ui_messages.json plus api_conversation_history.json/task_metadata.json sidecars.".to_string(),
-        "Lifecycle orchestration remains unsupported: Babel still has no Roo hooks, so this planner preserves extension storage only and never claims live task control.".to_string(),
+        "This migration doctor preserves extension storage only and never claims live Roo task control.".to_string(),
         "Semantics consumed: references/mnemo indexes rooveterinaryinc.roo-cline with the shared Cline/Roo/Kilo task parser; coding_agent_session_search probes the same Code/Cursor globalStorage roots.".to_string(),
     ];
 

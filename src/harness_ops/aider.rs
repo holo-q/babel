@@ -42,7 +42,7 @@ fn plan_with_project_files(
     };
 
     let mut notes = vec![
-        "Aider has no lifecycle hooks in Babel; support remains explicitly unsupported and this is only a migration doctor hint."
+        "Aider migration support remains explicitly unsupported here; this is only a project-local state preservation hint."
             .to_string(),
         "references/coding_agent_session_search/tests/connector_aider.rs shows .aider.chat.history.md as source_path and the parent directory as workspace."
             .to_string(),
@@ -100,7 +100,7 @@ mod tests {
     use crate::harness_ops::MigrationEditKind;
 
     #[test]
-    fn aider_no_source_keeps_lifecycle_unsupported_explicit() {
+    fn aider_no_source_keeps_migration_unsupported_explicit() {
         let report = plan();
 
         assert!(matches!(report.readiness, AdapterReadiness::Unsupported));
@@ -108,7 +108,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("no lifecycle hooks")));
+            .any(|note| note.contains("migration support remains explicitly unsupported")));
         assert!(report
             .operations
             .iter()

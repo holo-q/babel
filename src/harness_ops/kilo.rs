@@ -1,10 +1,9 @@
 //! Kilo Code migration doctor adapter.
 //!
-//! Kilo is currently in Babel's unsupported lifecycle tier: no hooks, no
-//! stable live identity surface, and no apply contract. The storage still
-//! matters during project moves, so this adapter keeps the migration doctor
-//! honest by reporting concrete extension roots and path-reference counts
-//! without pretending mutation is safe.
+//! Kilo migration support is storage-only: no stable live identity surface and
+//! no apply contract. The storage still matters during project moves, so this
+//! adapter keeps the migration doctor honest by reporting concrete extension
+//! roots and path-reference counts without pretending mutation is safe.
 
 use std::path::{Path, PathBuf};
 
@@ -39,7 +38,7 @@ pub(super) fn plan(
     let mut sessions_found = 0;
     let mut path_references_found = 0;
     let mut notes = vec![
-        "Kilo Code has no Babel lifecycle hooks today; live pane state cannot be migrated or verified from provider events."
+        "Kilo Code migration is storage-only today; live task state cannot be migrated or verified from provider events."
             .to_string(),
         "References identify Kilo storage as VS Code-family extension JSON under User/globalStorage/kilocode.kilo-code/tasks/<taskId>/ui_messages.json."
             .to_string(),
@@ -224,7 +223,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("no Babel lifecycle hooks")));
+            .any(|note| note.contains("migration is storage-only")));
     }
 
     #[test]

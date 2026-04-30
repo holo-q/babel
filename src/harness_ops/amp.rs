@@ -109,7 +109,7 @@ pub(super) fn plan(
         + discovery.project_local_path_ref_files;
 
     let mut notes = vec![
-        "Amp lifecycle integration is an in-process plugin bridge contract, not a stdin hook drop-in; storage migration is a separate local-filesystem doctor pass.".to_string(),
+        "Amp storage migration is a local-filesystem doctor pass; the in-process plugin bridge does not define a transcript rewrite surface.".to_string(),
         "Consumed references: mnemo indexes ~/.local/share/amp/threads/*.json; cli-continues documents observed ~/.local/share/amp and ~/.config/amp layouts; CASR adds AMP_HOME/AMP_DATA_HOME and legacy sourcegraph.amp/threads3 roots.".to_string(),
         "Thread IDs are provider-owned T-* identities; local JSON files are observed storage, while `amp threads continue` is the stable continuation surface.".to_string(),
         "Amp typed edits stay apply_ready=false until Babel has a generic executor that can rewrite JSON/JSONL with backup, verification, and active-process refusal.".to_string(),
