@@ -644,19 +644,14 @@ fn claude_project_candidates(
 }
 
 fn claude_encode_cc_port(path: &Path) -> String {
-    path.to_string_lossy()
+    normalized_path_for_key(path)
         .replace('/', "-")
         .replace('.', "-")
         .replace(' ', "-")
 }
 
 fn claude_encode_ccmv(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    let normalized = if raw.len() > 1 {
-        raw.strip_suffix('/').unwrap_or(&raw)
-    } else {
-        &raw
-    };
+    let normalized = normalized_path_for_key(path);
     normalized
         .chars()
         .map(|ch| {
@@ -667,6 +662,15 @@ fn claude_encode_ccmv(path: &Path) -> String {
             }
         })
         .collect()
+}
+
+fn normalized_path_for_key(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.len() > 1 {
+        raw.trim_end_matches('/').to_string()
+    } else {
+        raw.to_string()
+    }
 }
 
 fn claude_session_keyed_roots(context: &HarnessOpsContext) -> Vec<PathBuf> {
@@ -926,6 +930,19 @@ mod tests {
             .risks
             .iter()
             .any(|risk| risk.message.contains("destination project folder")));
+    }
+
+    #[test]
+    fn claude_project_keys_ignore_trailing_slashes() {
+        let path = Path::new("/home/nuck/holoq/repo-os/claude-babel/");
+        assert_eq!(
+            claude_encode_cc_port(path),
+            "-home-nuck-holoq-repo-os-claude-babel"
+        );
+        assert_eq!(
+            claude_encode_ccmv(path),
+            "-home-nuck-holoq-repo-os-claude-babel"
+        );
     }
 
     #[test]

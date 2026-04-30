@@ -10,14 +10,17 @@ use anyhow::Result;
 use claude_babel::core::BabelCore;
 use claude_babel::harness_ops::{
     live_panes_from_conflicts, plan_migration, AdapterReadiness, HarnessMigrationReport,
-    MigrationDoctorReport,
+    MigrationDoctorReport, RiskSeverity,
 };
 use std::path::{Path, PathBuf};
 
 /// ANSI color codes for output
 mod colors {
+    pub const BLUE: &str = "\x1b[34m";
     pub const GREEN: &str = "\x1b[32m";
+    pub const MAGENTA: &str = "\x1b[35m";
     pub const RED: &str = "\x1b[31m";
+    pub const WHITE: &str = "\x1b[37m";
     pub const YELLOW: &str = "\x1b[33m";
     pub const CYAN: &str = "\x1b[36m";
     pub const DIM: &str = "\x1b[2m";
@@ -43,6 +46,42 @@ fn info(msg: &str) {
 
 fn section(name: &str) {
     println!("\n{}{}{}:", colors::BOLD, name, colors::RESET);
+}
+
+fn styled(style: &str, text: impl std::fmt::Display) -> String {
+    format!("{}{}{}", style, text, colors::RESET)
+}
+
+fn dim(text: impl std::fmt::Display) -> String {
+    styled(colors::DIM, text)
+}
+
+fn bold(text: impl std::fmt::Display) -> String {
+    styled(colors::BOLD, text)
+}
+
+fn cyan(text: impl std::fmt::Display) -> String {
+    styled(colors::CYAN, text)
+}
+
+fn green(text: impl std::fmt::Display) -> String {
+    styled(colors::GREEN, text)
+}
+
+fn yellow(text: impl std::fmt::Display) -> String {
+    styled(colors::YELLOW, text)
+}
+
+fn red(text: impl std::fmt::Display) -> String {
+    styled(colors::RED, text)
+}
+
+fn magenta(text: impl std::fmt::Display) -> String {
+    styled(colors::MAGENTA, text)
+}
+
+fn blue(text: impl std::fmt::Display) -> String {
+    styled(colors::BLUE, text)
 }
 
 /// Check if the babel daemon is running and responsive
@@ -351,6 +390,14 @@ pub async fn cmd_migration_doctor(
 }
 
 fn print_migration_doctor(report: &MigrationDoctorReport) {
+    let blocker_count = report
+        .risks
+        .iter()
+        .filter(|risk| matches!(risk.severity, RiskSeverity::Blocker))
+        .count();
+    let warning_count = report.warning_count();
+    let op_count = report.operations().len();
+
     println!(
         "{}babel mv --doctor{} - Harness Migration Report",
         colors::BOLD,
@@ -361,31 +408,57 @@ fn print_migration_doctor(report: &MigrationDoctorReport) {
         colors::DIM,
         colors::RESET
     );
-    println!("  source: {}", report.old_path.display());
-    println!("  dest:   {}", report.new_path.display());
-    println!("  policy: {}", report.indexing_policy);
-    println!("  mode:   no mutation; legacy babel mv is not used");
+    println!(
+        "  {} {}",
+        dim("summary"),
+        format_summary_chips(op_count, blocker_count, warning_count)
+    );
+    println!("  {} {}", dim("source"), cyan(report.old_path.display()));
+    println!("  {}   {}", dim("dest"), cyan(report.new_path.display()));
+    println!("  {} {}", dim("policy"), report.indexing_policy);
+    println!(
+        "  {}   {}",
+        dim("mode"),
+        yellow("doctor only - no mutation; legacy babel mv is not used")
+    );
 
     section("Live Panes");
     if report.live_panes.is_empty() {
         ok("No live panes under source");
     } else {
         for pane in &report.live_panes {
-            let marker = if pane.migratable { "ok" } else { "block" };
+            let marker = if pane.migratable {
+                green("ok")
+            } else {
+                red("block")
+            };
             println!(
-                "  {} {:<5} pane:{:<5} {:<12} cwd:{}",
+                "  {} {:<16} {} {:<5} {:<12} {}",
                 marker,
-                pane.harness,
+                harness_name(pane.harness),
+                dim("pane:"),
                 pane.pane_id,
-                pane.state,
-                pane.cwd.display()
+                state_label(&pane.state, pane.migratable),
+                cyan(pane.cwd.display())
             );
         }
     }
 
     section("Harnesses");
+    let mut inactive_unsupported = Vec::new();
     for harness in &report.harnesses {
+        if is_inactive_unsupported(harness) {
+            inactive_unsupported.push(harness.harness.to_string());
+            continue;
+        }
         print_harness_report(harness);
+    }
+    if !inactive_unsupported.is_empty() {
+        println!(
+            "  {} {}",
+            dim("unsupported/no-adapter:"),
+            dim(inactive_unsupported.join(", "))
+        );
     }
 
     section("Risks");
@@ -398,9 +471,9 @@ fn print_migration_doctor(report: &MigrationDoctorReport) {
                 .map(|kind| kind.to_string())
                 .unwrap_or_else(|| "global".to_string());
             println!(
-                "  {:<7} {:<16} {}",
-                risk.severity.label(),
-                harness,
+                "  {:<16} {:<16} {}",
+                severity_label(&risk.severity),
+                dim(harness),
                 risk.message
             );
         }
@@ -408,43 +481,148 @@ fn print_migration_doctor(report: &MigrationDoctorReport) {
 
     println!();
     println!(
-        "Summary: {} operation(s), {} blocker(s), {} warning(s)",
-        report.operations().len(),
-        report
-            .risks
-            .iter()
-            .filter(|risk| matches!(
-                risk.severity,
-                claude_babel::harness_ops::RiskSeverity::Blocker
-            ))
-            .count(),
-        report.warning_count()
+        "{} {}",
+        bold("Summary:"),
+        format_summary_chips(op_count, blocker_count, warning_count)
     );
 }
 
 fn print_harness_report(report: &HarnessMigrationReport) {
-    let readiness = match report.readiness {
-        AdapterReadiness::ApplyReady => "apply-ready",
-        AdapterReadiness::DoctorOnly => "doctor-only",
-        AdapterReadiness::ReconOnly => "recon-only",
-        AdapterReadiness::Unsupported => "unsupported",
-    };
     println!(
-        "  {:<16} {:<12} sessions:{:<3} refs:{:<3} ops:{}",
-        report.harness,
-        readiness,
+        "  {:<24} {:<24} {} {:<3} {} {:<3} {} {}",
+        harness_name(report.harness),
+        readiness_label(&report.readiness),
+        dim("sessions:"),
         report.sessions_found,
-        report.path_references_found,
-        report.operations.len()
+        dim("refs:"),
+        ref_count_label(report.path_references_found),
+        dim("ops:"),
+        op_count_label(report.operations.len())
     );
 
     for root in &report.state_roots {
-        println!("    root {}", root.display());
+        println!("    {} {}", dim("root"), cyan(root.display()));
     }
     for op in &report.operations {
-        println!("    op   {:<28} {} ({})", op.action, op.target, op.detail);
+        let readiness = if op.apply_ready {
+            green("apply")
+        } else {
+            yellow("plan")
+        };
+        println!(
+            "    {} {:<28} {:<7} {} {}",
+            magenta("op"),
+            bold(&op.action),
+            readiness,
+            format_operation_target(&op.target),
+            dim(format!("({})", op.detail))
+        );
     }
     for note in &report.notes {
-        println!("    note {}", note);
+        println!("    {} {}", blue("note"), dim(note));
+    }
+}
+
+fn is_inactive_unsupported(report: &HarnessMigrationReport) -> bool {
+    report.operations.is_empty()
+        && report.path_references_found == 0
+        && report.sessions_found == 0
+        && report.state_roots.is_empty()
+        && matches!(report.readiness, AdapterReadiness::Unsupported)
+}
+
+fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String {
+    let blockers = if blockers == 0 {
+        green(format!("{} blocker(s)", blockers))
+    } else {
+        red(format!("{} blocker(s)", blockers))
+    };
+    let warnings = if warnings == 0 {
+        green(format!("{} warning(s)", warnings))
+    } else {
+        yellow(format!("{} warning(s)", warnings))
+    };
+    format!(
+        "{}  {}  {}",
+        magenta(format!("{} op(s)", ops)),
+        blockers,
+        warnings
+    )
+}
+
+fn readiness_label(readiness: &AdapterReadiness) -> String {
+    match readiness {
+        AdapterReadiness::ApplyReady => green("apply-ready"),
+        AdapterReadiness::DoctorOnly => yellow("doctor-only"),
+        AdapterReadiness::ReconOnly => blue("recon-only"),
+        AdapterReadiness::Unsupported => dim("unsupported"),
+    }
+}
+
+fn severity_label(severity: &RiskSeverity) -> String {
+    match severity {
+        RiskSeverity::Info => blue("info"),
+        RiskSeverity::Warning => yellow("warning"),
+        RiskSeverity::Blocker => red("blocker"),
+    }
+}
+
+fn ref_count_label(count: usize) -> String {
+    if count == 0 {
+        dim(count)
+    } else {
+        yellow(count)
+    }
+}
+
+fn op_count_label(count: usize) -> String {
+    if count == 0 {
+        dim(count)
+    } else {
+        magenta(count)
+    }
+}
+
+fn state_label(state: &str, migratable: bool) -> String {
+    if !migratable {
+        return red(state);
+    }
+    if state == "Unknown" {
+        yellow(state)
+    } else {
+        green(state)
+    }
+}
+
+fn harness_name(harness: claude_babel::AgentKind) -> String {
+    if let Some((r, g, b)) = parse_hex_color(harness.accent_color()) {
+        let brightness = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000;
+        if brightness < 80 {
+            return styled(colors::WHITE, harness);
+        }
+        format!("\x1b[38;2;{};{};{}m{}{}", r, g, b, harness, colors::RESET)
+    } else {
+        bold(harness)
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
+    let hex = hex.trim();
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() < 6 {
+        return None;
+    }
+    let hex = &hex[..6];
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+fn format_operation_target(target: &str) -> String {
+    if let Some((from, to)) = target.split_once(" -> ") {
+        format!("{} {} {}", cyan(from), dim("->"), cyan(to))
+    } else {
+        cyan(target)
     }
 }
