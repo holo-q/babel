@@ -534,19 +534,14 @@ fn print_harness_report(report: &HarnessMigrationReport) {
     } else {
         harness_name(report.harness)
     };
-    let readiness = if inactive {
-        if report.state_roots.is_empty() {
-            dim("not-detected")
-        } else {
-            dim("no-matching-state")
-        }
+    let heading_detail = if inactive {
+        primary_state_location(report).unwrap_or_else(|| dim("not-detected"))
     } else {
         readiness_label(&report.readiness)
     };
+    println!("  {:<24} {}", harness, heading_detail,);
     println!(
-        "  {:<24} {:<24} {} {:<3} {} {:<3} {} {}",
-        harness,
-        readiness,
+        "    {} {:<3} {} {:<3} {} {}",
         dim("sessions:"),
         report.sessions_found,
         dim("refs:"),
@@ -583,11 +578,30 @@ fn is_inactive_unsupported(report: &HarnessMigrationReport) -> bool {
         && report.state_roots.is_empty()
         && matches!(report.readiness, AdapterReadiness::Unsupported)
         && report.notes.len() == 1
-        && report.notes[0].starts_with("no path-move adapter has been extracted")
+        && report.notes[0].starts_with("no path-move adapter available")
 }
 
 fn is_inactive_report(report: &HarnessMigrationReport) -> bool {
     report.operations.is_empty() && report.path_references_found == 0 && report.sessions_found == 0
+}
+
+fn primary_state_location(report: &HarnessMigrationReport) -> Option<String> {
+    if let Some(root) = report.state_roots.first() {
+        return Some(cyan(root.display()));
+    }
+
+    let prefixes = [
+        "storage root: ",
+        "storage candidate: ",
+        "storage candidates: ",
+        "storage: ",
+    ];
+    report.notes.iter().find_map(|note| {
+        prefixes
+            .iter()
+            .find_map(|prefix| note.strip_prefix(prefix))
+            .map(dim)
+    })
 }
 
 fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String {
