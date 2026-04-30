@@ -551,7 +551,12 @@ fn print_harness_report(report: &HarnessMigrationReport) {
         }
     } else {
         for root in &report.state_roots {
-            println!("    {} {}", dim("root"), cyan(root.display()));
+            let root = if inactive {
+                dim(root.display())
+            } else {
+                cyan(root.display())
+            };
+            println!("    {} {}", dim("root"), root);
         }
     }
     for op in &report.operations {
