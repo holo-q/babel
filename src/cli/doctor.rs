@@ -534,14 +534,9 @@ fn print_harness_report(report: &HarnessMigrationReport) {
     } else {
         harness_name(report.harness)
     };
-    let heading_detail = if inactive {
-        primary_state_location(report).unwrap_or_else(|| dim("not-detected"))
-    } else {
-        readiness_label(&report.readiness)
-    };
-    println!("  {:<24} {}", harness, heading_detail,);
     println!(
-        "    {} {:<3} {} {:<3} {} {}",
+        "  {:<24} {} {:<3} {} {:<3} {} {}",
+        harness,
         dim("sessions:"),
         report.sessions_found,
         dim("refs:"),
@@ -550,8 +545,14 @@ fn print_harness_report(report: &HarnessMigrationReport) {
         op_count_label(report.operations.len())
     );
 
-    for root in &report.state_roots {
-        println!("    {} {}", dim("root"), cyan(root.display()));
+    if report.state_roots.is_empty() {
+        if let Some(location) = synthetic_state_location(report) {
+            println!("    {} {}", dim("root"), dim(location));
+        }
+    } else {
+        for root in &report.state_roots {
+            println!("    {} {}", dim("root"), cyan(root.display()));
+        }
     }
     for op in &report.operations {
         let readiness = if op.apply_ready {
@@ -585,23 +586,17 @@ fn is_inactive_report(report: &HarnessMigrationReport) -> bool {
     report.operations.is_empty() && report.path_references_found == 0 && report.sessions_found == 0
 }
 
-fn primary_state_location(report: &HarnessMigrationReport) -> Option<String> {
-    if let Some(root) = report.state_roots.first() {
-        return Some(cyan(root.display()));
-    }
-
+fn synthetic_state_location(report: &HarnessMigrationReport) -> Option<&str> {
     let prefixes = [
         "storage root: ",
         "storage candidate: ",
         "storage candidates: ",
         "storage: ",
     ];
-    report.notes.iter().find_map(|note| {
-        prefixes
-            .iter()
-            .find_map(|prefix| note.strip_prefix(prefix))
-            .map(dim)
-    })
+    report
+        .notes
+        .iter()
+        .find_map(|note| prefixes.iter().find_map(|prefix| note.strip_prefix(prefix)))
 }
 
 fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String {
