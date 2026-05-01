@@ -200,6 +200,7 @@ pub enum VerificationSpec {
     },
     JsonlFieldRewritten {
         path: PathBuf,
+        files: Vec<PathBuf>,
         selector: String,
         from: String,
         to: String,
@@ -243,6 +244,7 @@ pub enum MigrationEditKind {
     },
     RewriteJsonlField {
         path: PathBuf,
+        files: Vec<PathBuf>,
         selector: String,
         from: String,
         to: String,
@@ -313,6 +315,28 @@ impl MigrationEdit {
         to: impl Into<String>,
         count: usize,
     ) -> Self {
+        Self::rewrite_jsonl_field_in_files(
+            harness,
+            action,
+            path,
+            Vec::new(),
+            selector,
+            from,
+            to,
+            count,
+        )
+    }
+
+    pub fn rewrite_jsonl_field_in_files(
+        harness: AgentKind,
+        action: impl Into<String>,
+        path: PathBuf,
+        files: Vec<PathBuf>,
+        selector: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        count: usize,
+    ) -> Self {
         let path: PathBuf = path;
         let selector = selector.into();
         let from = from.into();
@@ -322,6 +346,7 @@ impl MigrationEdit {
             action: action.into(),
             kind: MigrationEditKind::RewriteJsonlField {
                 path: path.clone(),
+                files: files.clone(),
                 selector: selector.clone(),
                 from: from.clone(),
                 to: to.clone(),
@@ -331,6 +356,7 @@ impl MigrationEdit {
             recovery: RecoveryClass::OwnedFile,
             verification: VerificationSpec::JsonlFieldRewritten {
                 path,
+                files,
                 selector,
                 from,
                 to,
@@ -557,9 +583,16 @@ impl MigrationEdit {
         match &self.kind {
             MigrationEditKind::RenamePath { preserve, .. } => preserve.clone(),
             MigrationEditKind::RewriteJsonlField {
-                selector, count, ..
+                selector,
+                count,
+                files,
+                ..
             } => {
-                format!("rewrite {count} JSONL record(s) at {selector}")
+                if files.is_empty() {
+                    format!("rewrite {count} JSONL record(s) at {selector}")
+                } else {
+                    format!("rewrite {count} JSONL record(s) at {selector} in pre-scanned file(s)")
+                }
             }
             MigrationEditKind::RewriteTomlTableKey {
                 table,
@@ -830,7 +863,17 @@ fn plan_migration_with_context_and_scope(
         &mut risks,
     )?);
     tracing::debug!("mv.plan: planning Codex storage");
-    harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
+    let codex_mode = match scope {
+        MigrationPlanScope::Doctor => codex::CodexDiscoveryMode::Doctor,
+        MigrationPlanScope::Apply => codex::CodexDiscoveryMode::Apply,
+    };
+    harnesses.push(codex::plan(
+        context,
+        &old_abs,
+        &new_abs,
+        &path_needles,
+        codex_mode,
+    )?);
     tracing::debug!("mv.plan: planning Aider storage");
     harnesses.push(aider::plan_for_source(&old_abs));
 
@@ -1551,6 +1594,89 @@ mod tests {
             .find(|harness| harness.harness == AgentKind::Gemini)
             .unwrap();
         assert_eq!(gemini.path_references_found, 1);
+    }
+
+    #[test]
+    fn codex_apply_planning_uses_thread_index_without_rollout_tree_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let old = home.join("project");
+        let new = home.join("project-renamed");
+        fs::create_dir_all(&old).unwrap();
+
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+        let matched_rollout = ctx
+            .codex_sessions()
+            .join("2026/04/29/rollout-2026-04-29T12-00-00-codex-session.jsonl");
+        write_file(
+            &matched_rollout,
+            &format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n",
+                old.display(),
+            ),
+        );
+        write_file(
+            &ctx.codex_sessions()
+                .join("2026/04/29/rollout-2026-04-29T12-00-00-unrelated.jsonl"),
+            &format!(
+                "{{\"type\":\"event_msg\",\"payload\":{{\"message\":\"unrelated body mention {}\"}}}}\n",
+                old.display(),
+            ),
+        );
+        write_file(
+            &ctx.codex_base().join("config.toml"),
+            &format!(
+                "sqlite_home = \"{}\"\n",
+                ctx.codex_base().join("sqlite-home").display(),
+            ),
+        );
+        {
+            let state_db = ctx.codex_base().join("sqlite-home/state_5.sqlite");
+            fs::create_dir_all(state_db.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&state_db).unwrap();
+            conn.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, rollout_path, cwd) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "codex-session",
+                    matched_rollout.to_string_lossy(),
+                    old.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let report = plan_migration_with_context_and_scope(
+            &ctx,
+            &old,
+            &new,
+            Vec::new(),
+            MigrationPlanScope::Apply,
+        )
+        .unwrap();
+        let codex = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Codex)
+            .unwrap();
+
+        assert_eq!(codex.sessions_found, 1);
+        assert!(!codex
+            .operations
+            .iter()
+            .any(|op| op.action == "rewrite_session_path_refs"));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_session_meta_cwd"
+                && matches!(
+                    &edit.kind,
+                    MigrationEditKind::RewriteJsonlField { files, .. }
+                    if files == &vec![matched_rollout.clone()]
+                )
+        }));
     }
 
     #[test]

@@ -30,6 +30,20 @@ struct CodexDiscovery {
     files_scanned: usize,
     truncated: bool,
     large_files_sampled: usize,
+    state_dbs_seen: usize,
+}
+
+#[derive(Default)]
+struct CodexStateDbDiscovery {
+    refs: Vec<(PathBuf, usize)>,
+    sessions: Vec<CodexSession>,
+    dbs_seen: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CodexDiscoveryMode {
+    Apply,
+    Doctor,
 }
 
 struct CodexSession {
@@ -42,8 +56,9 @@ pub(super) fn plan(
     old_path: &Path,
     new_path: &Path,
     needles: &[String],
+    mode: CodexDiscoveryMode,
 ) -> Result<HarnessMigrationReport> {
-    let discovery = discover(context, old_path, needles)?;
+    let discovery = discover(context, old_path, needles, mode)?;
     let mut state_roots = vec![
         context.codex_base(),
         context.codex_sessions(),
@@ -68,10 +83,15 @@ pub(super) fn plan(
     let mut edits = Vec::new();
     if !discovery.matched_sessions.is_empty() {
         edits.push(
-            MigrationEdit::rewrite_jsonl_field(
+            MigrationEdit::rewrite_jsonl_field_in_files(
                 AgentKind::Codex,
                 "rewrite_session_meta_cwd",
                 context.codex_sessions(),
+                discovery
+                    .matched_sessions
+                    .iter()
+                    .map(|session| session.path.clone())
+                    .collect(),
                 "$.payload.cwd where $.type == \"session_meta\"",
                 old_path.display().to_string(),
                 new_path.display().to_string(),
@@ -262,10 +282,12 @@ fn discover(
     context: &HarnessOpsContext,
     old_path: &Path,
     needles: &[String],
+    mode: CodexDiscoveryMode,
 ) -> Result<CodexDiscovery> {
     tracing::debug!(
         old_path = %old_path.display(),
         needles = needles.len(),
+        mode = ?mode,
         "mv.plan.codex: discovery starting"
     );
     let mut discovery = CodexDiscovery {
@@ -273,11 +295,10 @@ fn discover(
         ..Default::default()
     };
     let child_prefix = format!("{}/", old_path.display());
-    let session_roots = discovery.session_roots.clone();
-
-    for root in session_roots {
-        collect_sessions_from_root(&root, old_path, &child_prefix, needles, &mut discovery)?;
-    }
+    let state_db = collect_state_db_thread_refs(context, old_path, &child_prefix)?;
+    discovery.state_dbs_seen = state_db.dbs_seen;
+    discovery.state_db_thread_refs = state_db.refs;
+    extend_unique_sessions(&mut discovery.matched_sessions, state_db.sessions);
 
     discovery.history_ref_entries =
         count_jsonl_line_refs(&context.codex_base().join("history.jsonl"), needles)?;
@@ -289,7 +310,24 @@ fn discover(
         text_file_ref_count(&context.codex_base().join("config.json"), needles)?;
     discovery.internal_storage_ref_files =
         text_file_ref_count(&context.codex_base().join("internal_storage.json"), needles)?;
-    discovery.state_db_thread_refs = collect_state_db_thread_refs(context, needles)?;
+
+    let db_found_cwd_without_rollout_paths =
+        !discovery.state_db_thread_refs.is_empty() && discovery.matched_sessions.is_empty();
+    let should_scan_rollouts = matches!(mode, CodexDiscoveryMode::Doctor)
+        || discovery.state_dbs_seen == 0
+        || db_found_cwd_without_rollout_paths;
+    if should_scan_rollouts {
+        let session_roots = discovery.session_roots.clone();
+        for root in session_roots {
+            collect_sessions_from_root(&root, old_path, &child_prefix, needles, &mut discovery)?;
+        }
+    } else {
+        tracing::debug!(
+            state_dbs_seen = discovery.state_dbs_seen,
+            matched_sessions = discovery.matched_sessions.len(),
+            "mv.plan.codex: skipping rollout tree scan; state DB is authoritative for apply"
+        );
+    }
 
     collect_shell_snapshots(context, needles, &mut discovery)?;
     tracing::debug!(
@@ -299,6 +337,7 @@ fn discover(
         history_ref_entries = discovery.history_ref_entries,
         session_index_ref_entries = discovery.session_index_ref_entries,
         state_db_refs = discovery.state_db_thread_refs.len(),
+        state_dbs_seen = discovery.state_dbs_seen,
         shell_snapshot_files = discovery.shell_snapshot_files,
         truncated = discovery.truncated,
         "mv.plan.codex: discovery complete"
@@ -308,16 +347,19 @@ fn discover(
 
 fn collect_state_db_thread_refs(
     context: &HarnessOpsContext,
-    needles: &[String],
-) -> Result<Vec<(PathBuf, usize)>> {
-    let mut refs = Vec::new();
+    old_path: &Path,
+    child_prefix: &str,
+) -> Result<CodexStateDbDiscovery> {
+    let mut discovery = CodexStateDbDiscovery::default();
     for path in codex_state_dbs(context)? {
-        let count = count_threads_cwd_refs(&path, needles)?;
+        discovery.dbs_seen += 1;
+        let (count, matches) = collect_threads_cwd_refs(&path, old_path, child_prefix)?;
         if count > 0 {
-            refs.push((path, count));
+            discovery.refs.push((path, count));
+            discovery.sessions.extend(matches);
         }
     }
-    Ok(refs)
+    Ok(discovery)
 }
 
 fn codex_state_dbs(context: &HarnessOpsContext) -> Result<Vec<PathBuf>> {
@@ -375,7 +417,11 @@ fn normalize_codex_sqlite_home(path: PathBuf, codex_base: &Path) -> PathBuf {
     }
 }
 
-fn count_threads_cwd_refs(path: &Path, needles: &[String]) -> Result<usize> {
+fn collect_threads_cwd_refs(
+    path: &Path,
+    old_path: &Path,
+    child_prefix: &str,
+) -> Result<(usize, Vec<CodexSession>)> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -386,19 +432,46 @@ fn count_threads_cwd_refs(path: &Path, needles: &[String]) -> Result<usize> {
         |row| row.get(0),
     )?;
     if !exists {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
 
-    let mut statement = conn.prepare("SELECT cwd FROM threads")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    let mut total = 0;
-    for row in rows {
-        let cwd = row?;
-        if needles.iter().any(|needle| cwd.contains(needle)) {
-            total += 1;
+    let has_rollout_path: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='rollout_path')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_rollout_path {
+        let mut statement = conn.prepare("SELECT cwd FROM threads")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut count = 0;
+        for row in rows {
+            if cwd_matches(Some(&row?), old_path, child_prefix) {
+                count += 1;
+            }
         }
+        return Ok((count, Vec::new()));
     }
-    Ok(total)
+
+    let mut statement =
+        conn.prepare("SELECT id, rollout_path, cwd FROM threads WHERE cwd = ?1 OR cwd LIKE ?2")?;
+    let child_like = format!("{child_prefix}%");
+    let rows = statement.query_map([old_path.display().to_string(), child_like], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (id, rollout_path, cwd) = row?;
+        debug_assert!(cwd_matches(Some(&cwd), old_path, child_prefix));
+        sessions.push(CodexSession {
+            id,
+            path: PathBuf::from(rollout_path),
+        });
+    }
+    Ok((sessions.len(), sessions))
 }
 
 fn collect_sessions_from_root(
@@ -472,6 +545,18 @@ fn collect_sessions_from_root(
         "mv.plan.codex: session root scan complete"
     );
     Ok(())
+}
+
+fn extend_unique_sessions(target: &mut Vec<CodexSession>, sessions: Vec<CodexSession>) {
+    let mut seen = target
+        .iter()
+        .map(|session| session.path.clone())
+        .collect::<BTreeSet<_>>();
+    for session in sessions {
+        if seen.insert(session.path.clone()) {
+            target.push(session);
+        }
+    }
 }
 
 fn read_session_identity(

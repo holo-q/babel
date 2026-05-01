@@ -477,12 +477,14 @@ fn apply_edit(
         ),
         MigrationEditKind::RewriteJsonlField {
             path,
+            files,
             selector,
             from,
             to,
             ..
         } => apply_jsonl_rewrite(
             path,
+            files,
             selector,
             from,
             to,
@@ -598,6 +600,7 @@ fn apply_rename_path(
 
 fn apply_jsonl_rewrite(
     path: &Path,
+    exact_files: &[PathBuf],
     selector: &str,
     from: &str,
     to: &str,
@@ -608,10 +611,11 @@ fn apply_jsonl_rewrite(
     tracing::debug!(
         label = %label,
         target = %path.display(),
+        exact_files = exact_files.len(),
         selector,
         "mv.apply: expanding JSONL rewrite targets"
     );
-    let files = jsonl_targets(path)?;
+    let files = jsonl_targets(path, exact_files)?;
     tracing::debug!(
         label = %label,
         target = %path.display(),
@@ -848,13 +852,14 @@ fn verify_edit(edit: &MigrationEdit) -> Result<()> {
         }
         VerificationSpec::JsonlFieldRewritten {
             path,
+            files,
             selector,
             from,
             to,
             expected_count,
         } => {
-            let old_count = count_jsonl_matches(path, selector, from)?;
-            let new_count = count_jsonl_matches(path, selector, to)?;
+            let old_count = count_jsonl_matches(path, files, selector, from)?;
+            let new_count = count_jsonl_matches(path, files, selector, to)?;
             if old_count > 0 || new_count < *expected_count {
                 bail!(
                     "JSONL verification failed for {}: old={}, new={}, expected_new>={}",
@@ -984,7 +989,15 @@ fn count_sqlite_text_column_refs(
     Ok(conn.query_row(&sql, params![needle], |row| row.get(0))?)
 }
 
-fn jsonl_targets(path: &Path) -> Result<Vec<PathBuf>> {
+fn jsonl_targets(path: &Path, exact_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if !exact_files.is_empty() {
+        tracing::debug!(
+            target = %path.display(),
+            exact_files = exact_files.len(),
+            "mv.apply: JSONL target uses pre-scanned files"
+        );
+        return Ok(exact_files.to_vec());
+    }
     if path.is_file() {
         tracing::debug!(target = %path.display(), "mv.apply: JSONL target is a file");
         return Ok(vec![path.to_path_buf()]);
@@ -1101,9 +1114,14 @@ fn rewrite_jsonl_file(
     Ok(changed)
 }
 
-fn count_jsonl_matches(path: &Path, selector: &str, needle: &str) -> Result<usize> {
+fn count_jsonl_matches(
+    path: &Path,
+    exact_files: &[PathBuf],
+    selector: &str,
+    needle: &str,
+) -> Result<usize> {
     let mut count = 0;
-    for file in jsonl_targets(path)? {
+    for file in jsonl_targets(path, exact_files)? {
         let reader = BufReader::new(fs::File::open(&file)?);
         for line in reader.lines() {
             let line = line?;
