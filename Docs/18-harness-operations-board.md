@@ -59,11 +59,27 @@ is not v1 for operations. Indexes add synchronization and freshness burden. For
 move/resume correctness, Babel reads native storage directly and reports counts
 or candidate paths in doctor mode.
 
+## OpenAI Codex Source Check
+
+Upstream `openai/codex` was checked at `6784db5` on 2026-05-01. The current
+native resume surface is split:
+
+- rollout JSONL under `~/.codex/sessions` carries transcript items, turn
+  context, collaboration mode, plan deltas, and path-bearing metadata
+- `~/.codex/state_*.sqlite` carries the thread index used for list/resume,
+  including `threads.cwd`
+- `thread_goals` is keyed by `thread_id`; it does not need a project-path rewrite
+  for a directory move
+
+So Codex move support must preserve the rollout files and rewrite both
+`session_meta.payload.cwd` and `state_*.sqlite:threads.cwd`.
+
 ## Current Adapter Readiness
 
 - Claude Code: doctor-only planner now; future apply must follow copy/verify,
   rewrite, rollback, and live-process refusal.
-- Codex CLI: JSONL session scan is useful for doctor; apply needs fixtures.
+- Codex CLI: rollout JSONL plus `state_*.sqlite:threads.cwd`; generic apply has
+  fixtures for JSONL, TOML, text refs, and SQLite text-column rewrites.
 - Gemini CLI: project-hash storage is known; apply needs fixtures.
 - Qwen Code: compatible hook identity; path storage needs fixtures.
 - Cursor Agent: state roots are known, but SQLite/workspaceStorage migration
@@ -74,4 +90,3 @@ or candidate paths in doctor mode.
   drop-ins.
 - Aider: mostly project-local history; moving the directory should preserve the
   important files.
-

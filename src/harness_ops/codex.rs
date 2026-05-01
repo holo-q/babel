@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::agent_kind::AgentKind;
 
@@ -22,6 +23,7 @@ struct CodexDiscovery {
     config_toml_ref_files: usize,
     config_json_ref_files: usize,
     internal_storage_ref_files: usize,
+    state_db_thread_refs: Vec<(PathBuf, usize)>,
     shell_snapshot_files: usize,
     shell_snapshot_ref_files: usize,
     files_scanned: usize,
@@ -52,6 +54,12 @@ pub(super) fn plan(
         context.codex_base().join("internal_storage.json"),
         context.codex_shell_snapshots(),
     ];
+    state_roots.extend(
+        discovery
+            .state_db_thread_refs
+            .iter()
+            .map(|(path, _)| path.clone()),
+    );
     state_roots.retain(|path| path.exists());
     state_roots.sort();
     state_roots.dedup();
@@ -115,6 +123,21 @@ pub(super) fn plan(
                 old_path.display().to_string(),
                 new_path.display().to_string(),
                 discovery.internal_storage_ref_files,
+            )
+            .with_apply_ready(true),
+        );
+    }
+    for (path, refs) in &discovery.state_db_thread_refs {
+        edits.push(
+            MigrationEdit::rewrite_sqlite_text_column(
+                AgentKind::Codex,
+                "rewrite_thread_index_cwd",
+                path.clone(),
+                "threads",
+                "cwd",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                *refs,
             )
             .with_apply_ready(true),
         );
@@ -215,6 +238,11 @@ pub(super) fn plan(
         + discovery.config_toml_ref_files
         + discovery.config_json_ref_files
         + discovery.internal_storage_ref_files
+        + discovery
+            .state_db_thread_refs
+            .iter()
+            .map(|(_, refs)| *refs)
+            .sum::<usize>()
         + discovery.shell_snapshot_ref_files;
 
     Ok(HarnessMigrationReport::from_edits(
@@ -254,9 +282,69 @@ fn discover(
         text_file_ref_count(&context.codex_base().join("config.json"), needles)?;
     discovery.internal_storage_ref_files =
         text_file_ref_count(&context.codex_base().join("internal_storage.json"), needles)?;
+    discovery.state_db_thread_refs = collect_state_db_thread_refs(context, needles)?;
 
     collect_shell_snapshots(context, needles, &mut discovery)?;
     Ok(discovery)
+}
+
+fn collect_state_db_thread_refs(
+    context: &HarnessOpsContext,
+    needles: &[String],
+) -> Result<Vec<(PathBuf, usize)>> {
+    let mut refs = Vec::new();
+    for path in codex_state_dbs(context)? {
+        let count = count_threads_cwd_refs(&path, needles)?;
+        if count > 0 {
+            refs.push((path, count));
+        }
+    }
+    Ok(refs)
+}
+
+fn codex_state_dbs(context: &HarnessOpsContext) -> Result<Vec<PathBuf>> {
+    let base = context.codex_base();
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(base)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("state_") && name.ends_with(".sqlite") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn count_threads_cwd_refs(path: &Path, needles: &[String]) -> Result<usize> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(0);
+    }
+
+    let mut statement = conn.prepare("SELECT cwd FROM threads")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut total = 0;
+    for row in rows {
+        let cwd = row?;
+        if needles.iter().any(|needle| cwd.contains(needle)) {
+            total += 1;
+        }
+    }
+    Ok(total)
 }
 
 fn collect_sessions_from_root(

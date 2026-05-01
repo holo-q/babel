@@ -207,6 +207,14 @@ pub enum VerificationSpec {
         to: String,
         expected_removed_min: usize,
     },
+    SqliteTextColumnRewritten {
+        path: PathBuf,
+        table: String,
+        column: String,
+        from: String,
+        to: String,
+        expected_count: usize,
+    },
     SessionCountPreserved {
         harness: AgentKind,
         count: usize,
@@ -238,6 +246,14 @@ pub enum MigrationEditKind {
     },
     RewriteTextRefs {
         target: String,
+        from: String,
+        to: String,
+        count: usize,
+    },
+    RewriteSqliteTextColumn {
+        path: PathBuf,
+        table: String,
+        column: String,
         from: String,
         to: String,
         count: usize,
@@ -379,6 +395,45 @@ impl MigrationEdit {
         }
     }
 
+    pub fn rewrite_sqlite_text_column(
+        harness: AgentKind,
+        action: impl Into<String>,
+        path: PathBuf,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        count: usize,
+    ) -> Self {
+        let table = table.into();
+        let column = column.into();
+        let from = from.into();
+        let to = to.into();
+        Self {
+            harness,
+            action: action.into(),
+            kind: MigrationEditKind::RewriteSqliteTextColumn {
+                path: path.clone(),
+                table: table.clone(),
+                column: column.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                count,
+            },
+            capability: ApplyCapability::DoctorOnly,
+            recovery: RecoveryClass::SessionDependencyFile,
+            verification: VerificationSpec::SqliteTextColumnRewritten {
+                path,
+                table,
+                column,
+                from,
+                to,
+                expected_count: count,
+            },
+            apply_ready: false,
+        }
+    }
+
     pub fn preserve_session_keyed_files(
         harness: AgentKind,
         action: impl Into<String>,
@@ -464,7 +519,8 @@ impl MigrationEdit {
                 format!("{} -> {}", from.display(), to.display())
             }
             MigrationEditKind::RewriteJsonlField { path, .. }
-            | MigrationEditKind::RewriteTomlTableKey { path, .. } => path.display().to_string(),
+            | MigrationEditKind::RewriteTomlTableKey { path, .. }
+            | MigrationEditKind::RewriteSqliteTextColumn { path, .. } => path.display().to_string(),
             MigrationEditKind::RewriteTextRefs { target, .. }
             | MigrationEditKind::PreserveProjectLocalHistory { target, .. } => target.clone(),
             MigrationEditKind::PreserveSessionKeyedFiles { root, .. } => root.display().to_string(),
@@ -490,6 +546,14 @@ impl MigrationEdit {
             }
             MigrationEditKind::RewriteTextRefs { count, .. } => {
                 format!("rewrite {count} text target(s) containing source path references")
+            }
+            MigrationEditKind::RewriteSqliteTextColumn {
+                table,
+                column,
+                count,
+                ..
+            } => {
+                format!("rewrite {count} SQLite row(s) at {table}.{column}")
             }
             MigrationEditKind::PreserveSessionKeyedFiles {
                 session_count,
@@ -1261,7 +1325,8 @@ mod tests {
             &ctx.codex_sessions()
                 .join("2026/04/29/rollout-2026-04-29T12-00-00-codex-session.jsonl"),
             &format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n",
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"{}\",\"collaboration_mode\":{{\"mode\":\"plan\"}}}}}}\n",
+                old.display(),
                 old.display()
             ),
         );
@@ -1288,6 +1353,20 @@ mod tests {
                 old.display()
             ),
         );
+        {
+            fs::create_dir_all(ctx.codex_base()).unwrap();
+            let conn = rusqlite::Connection::open(ctx.codex_base().join("state_5.sqlite")).unwrap();
+            conn.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, cwd) VALUES (?1, ?2)",
+                rusqlite::params!["codex-session", old.to_string_lossy()],
+            )
+            .unwrap();
+        }
         write_file(
             &ctx.codex_shell_snapshots().join("codex-session.1.sh"),
             &format!("cd {}\n", old.display()),
@@ -1304,7 +1383,7 @@ mod tests {
             .find(|harness| harness.harness == AgentKind::Codex)
             .unwrap();
         assert_eq!(codex.sessions_found, 1);
-        assert_eq!(codex.path_references_found, 5);
+        assert_eq!(codex.path_references_found, 6);
         assert!(matches!(codex.readiness, AdapterReadiness::ApplyReady));
         assert!(codex.operations.iter().any(|op| op.apply_ready));
         assert!(codex
@@ -1322,6 +1401,17 @@ mod tests {
         assert!(codex.edits.iter().any(|edit| {
             edit.action == "rewrite_project_config_keys"
                 && matches!(&edit.kind, MigrationEditKind::RewriteTomlTableKey { .. })
+        }));
+        assert!(codex
+            .operations
+            .iter()
+            .any(|op| op.action == "rewrite_thread_index_cwd" && op.apply_ready));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_thread_index_cwd"
+                && matches!(
+                    &edit.kind,
+                    MigrationEditKind::RewriteSqliteTextColumn { .. }
+                )
         }));
         assert!(codex
             .operations
@@ -1354,7 +1444,10 @@ mod tests {
         let jsonl = root.join("history.jsonl");
         write_file(
             &jsonl,
-            &format!("{{\"project\":\"{}\",\"display\":\"x\"}}\n", old.display()),
+            &format!(
+                "{{\"project\":\"{}\",\"display\":\"x\",\"collaboration_mode\":{{\"mode\":\"plan\"}}}}\n",
+                old.display()
+            ),
         );
         let toml = root.join("config.toml");
         write_file(
@@ -1366,6 +1459,20 @@ mod tests {
         );
         let text = root.join("notes.txt");
         write_file(&text, &format!("cwd={}\n", old.display()));
+        let sqlite = root.join("state_5.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&sqlite).unwrap();
+            conn.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, cwd) VALUES (?1, ?2)",
+                rusqlite::params!["session", old.to_string_lossy()],
+            )
+            .unwrap();
+        }
 
         let edits = vec![
             MigrationEdit::rewrite_jsonl_field(
@@ -1397,6 +1504,17 @@ mod tests {
                 1,
             )
             .with_apply_ready(true),
+            MigrationEdit::rewrite_sqlite_text_column(
+                AgentKind::Codex,
+                "rewrite_thread_index_cwd",
+                sqlite.clone(),
+                "threads",
+                "cwd",
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
         ];
         let report = MigrationDoctorReport {
             old_path: old.clone(),
@@ -1408,7 +1526,7 @@ mod tests {
                 AdapterReadiness::ApplyReady,
                 vec![root.to_path_buf()],
                 0,
-                3,
+                4,
                 edits,
                 Vec::new(),
             )],
@@ -1424,19 +1542,29 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(apply.edits_seen, 3);
+        assert_eq!(apply.edits_seen, 4);
         assert!(!apply.has_blockers());
         assert!(fs::read_to_string(&jsonl)
             .unwrap()
             .contains(&new.display().to_string()));
+        assert!(fs::read_to_string(&jsonl)
+            .unwrap()
+            .contains("\"mode\":\"plan\""));
         assert!(fs::read_to_string(&toml)
             .unwrap()
             .contains(&new.display().to_string()));
         assert!(fs::read_to_string(&text)
             .unwrap()
             .contains(&new.display().to_string()));
+        let conn = rusqlite::Connection::open(sqlite).unwrap();
+        let cwd: String = conn
+            .query_row("SELECT cwd FROM threads WHERE id = 'session'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cwd, new.to_string_lossy().to_string());
         assert!(apply.manifest_path.unwrap().exists());
-        assert_eq!(apply.verified.len(), 3);
+        assert_eq!(apply.verified.len(), 4);
     }
 
     #[test]

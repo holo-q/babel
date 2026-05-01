@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -408,6 +409,23 @@ fn apply_edit(
             report,
             format!("{}:{}", edit.harness.slug(), edit.action),
         ),
+        MigrationEditKind::RewriteSqliteTextColumn {
+            path,
+            table,
+            column,
+            from,
+            to,
+            ..
+        } => apply_sqlite_text_column_rewrite(
+            path,
+            table,
+            column,
+            from,
+            to,
+            tx,
+            report,
+            format!("{}:{}", edit.harness.slug(), edit.action),
+        ),
         MigrationEditKind::PreserveSessionKeyedFiles { root, .. } => {
             report
                 .skipped
@@ -565,6 +583,54 @@ fn apply_text_ref_rewrite(
     Ok(())
 }
 
+fn apply_sqlite_text_column_rewrite(
+    path: &Path,
+    table: &str,
+    column: &str,
+    from: &str,
+    to: &str,
+    tx: &mut MigrationTransaction,
+    report: &mut MigrationApplyReport,
+    label: String,
+) -> Result<()> {
+    if !path.exists() {
+        report.blockers.push(format!(
+            "{label}: SQLite database missing: {}",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    let backup_indices = snapshot_sqlite_family(path, tx)?;
+    let table = quote_sql_ident(table)?;
+    let column = quote_sql_ident(column)?;
+    let sql = format!(
+        "UPDATE {table} SET {column} = replace({column}, ?1, ?2) WHERE instr({column}, ?1) > 0"
+    );
+
+    let mut conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
+    let changed = {
+        let tx_sql = conn.transaction()?;
+        let changed = tx_sql.execute(&sql, params![from, to])?;
+        tx_sql.commit()?;
+        changed
+    };
+    drop(conn);
+
+    for index in backup_indices {
+        tx.mark_file_after(index)?;
+    }
+    report.applied.push(format!(
+        "{label}: rewrote {changed} SQLite row(s) in {}",
+        path.display()
+    ));
+    Ok(())
+}
+
 fn verify_edit(edit: &MigrationEdit) -> Result<()> {
     match &edit.verification {
         VerificationSpec::PathMoved { from, to } => {
@@ -619,9 +685,70 @@ fn verify_edit(edit: &MigrationEdit) -> Result<()> {
                 bail!("text reference verification failed for {target}: old refs remain");
             }
         }
+        VerificationSpec::SqliteTextColumnRewritten {
+            path,
+            table,
+            column,
+            from,
+            to,
+            expected_count,
+        } => {
+            let old_refs = count_sqlite_text_column_refs(path, table, column, from)?;
+            let new_refs = count_sqlite_text_column_refs(path, table, column, to)?;
+            if old_refs > 0 || new_refs < *expected_count {
+                bail!(
+                    "SQLite verification failed for {} {table}.{column}: old={}, new={}, expected_new>={}",
+                    path.display(),
+                    old_refs,
+                    new_refs,
+                    expected_count
+                );
+            }
+        }
         VerificationSpec::SessionCountPreserved { .. } | VerificationSpec::PreserveOnly => {}
     }
     Ok(())
+}
+
+fn snapshot_sqlite_family(path: &Path, tx: &mut MigrationTransaction) -> Result<Vec<usize>> {
+    let mut indices = vec![tx.snapshot_file(path)?];
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+        if sidecar.exists() {
+            indices.push(tx.snapshot_file(&sidecar)?);
+        }
+    }
+    Ok(indices)
+}
+
+fn quote_sql_ident(value: &str) -> Result<String> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        bail!("unsafe SQLite identifier: {value}");
+    }
+    Ok(format!("\"{}\"", value.replace('"', "\"\"")))
+}
+
+fn count_sqlite_text_column_refs(
+    path: &Path,
+    table: &str,
+    column: &str,
+    needle: &str,
+) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let table = quote_sql_ident(table)?;
+    let column = quote_sql_ident(column)?;
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE instr({column}, ?1) > 0");
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(conn.query_row(&sql, params![needle], |row| row.get(0))?)
 }
 
 fn jsonl_targets(path: &Path) -> Result<Vec<PathBuf>> {
