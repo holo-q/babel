@@ -1781,6 +1781,7 @@ mod tests {
                 dry_run: false,
                 force: false,
                 transaction_root: Some(home.join("transactions")),
+                print_progress: false,
             },
         )
         .unwrap();
@@ -1847,6 +1848,7 @@ mod tests {
                 dry_run: false,
                 force: false,
                 transaction_root: Some(root.join("transactions")),
+                print_progress: false,
             },
         )
         .unwrap();
@@ -1967,6 +1969,7 @@ mod tests {
                 dry_run: false,
                 force: false,
                 transaction_root: Some(root.join("transactions")),
+                print_progress: false,
             },
         )
         .unwrap();
@@ -2026,6 +2029,7 @@ mod tests {
                 dry_run: false,
                 force: false,
                 transaction_root: Some(root.join("transactions")),
+                print_progress: false,
             },
         )
         .unwrap();
@@ -2087,6 +2091,7 @@ mod tests {
                 dry_run: false,
                 force: false,
                 transaction_root: Some(root.join("transactions")),
+                print_progress: false,
             },
         )
         .unwrap_err();

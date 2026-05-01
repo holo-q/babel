@@ -18,6 +18,8 @@ pub struct MigrationApplyOptions {
     pub dry_run: bool,
     pub force: bool,
     pub transaction_root: Option<PathBuf>,
+    #[serde(default)]
+    pub print_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +367,10 @@ pub fn apply_migration_plan(
     let mut tx = MigrationTransaction::start(plan, options)?;
     report.manifest_path = Some(tx.manifest_path.clone());
     tx.set_status(TransactionStatus::Applying)?;
+    if options.print_progress {
+        println!("Applying mutations:");
+        println!("  manifest {}", tx.manifest_path.display());
+    }
 
     let apply_result = (|| -> Result<()> {
         for edit in &edits {
@@ -379,7 +385,30 @@ pub fn apply_migration_plan(
                     recovery = ?edit.recovery,
                     "mv.apply: applying edit"
                 );
+                let applied_before = report.applied.len();
+                let skipped_before = report.skipped.len();
+                let blockers_before = report.blockers.len();
+                if options.print_progress {
+                    println!(
+                        "  → {}:{} {} {}",
+                        edit.harness.slug(),
+                        edit.action,
+                        edit_kind_label(&edit.kind),
+                        edit.target()
+                    );
+                }
                 apply_edit(edit, &mut tx, &mut report)?;
+                if options.print_progress {
+                    for line in &report.applied[applied_before..] {
+                        println!("    ✓ {line}");
+                    }
+                    for line in &report.skipped[skipped_before..] {
+                        println!("    - {line}");
+                    }
+                    for line in &report.blockers[blockers_before..] {
+                        println!("    ! {line}");
+                    }
+                }
                 tracing::debug!(
                     harness = %edit.harness.slug(),
                     action = %edit.action,
@@ -389,6 +418,9 @@ pub fn apply_migration_plan(
         }
 
         tx.set_status(TransactionStatus::Verifying)?;
+        if options.print_progress {
+            println!("Verifying mutations:");
+        }
         for edit in &edits {
             if edit.capability == ApplyCapability::ApplyReady
                 && recovery_is_executor_owned(edit.recovery)
@@ -404,6 +436,9 @@ pub fn apply_migration_plan(
                 report
                     .verified
                     .push(format!("{}:{}", edit.harness.slug(), edit.action));
+                if options.print_progress {
+                    println!("    ✓ {}:{}", edit.harness.slug(), edit.action);
+                }
                 tracing::debug!(
                     harness = %edit.harness.slug(),
                     action = %edit.action,

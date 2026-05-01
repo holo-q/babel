@@ -149,6 +149,7 @@ pub async fn cmd_mv(
             dry_run,
             force: false,
             transaction_root: None,
+            print_progress: !json && !dry_run,
         },
     )?;
     tracing::debug!(
