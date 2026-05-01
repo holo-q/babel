@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use filetime::{set_file_times, FileTime};
+use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +100,7 @@ struct MigrationTransaction {
     dir: PathBuf,
     manifest_path: PathBuf,
     manifest: TransactionManifest,
-    print_progress: bool,
+    progress: Option<ProgressBar>,
 }
 
 impl MigrationTransaction {
@@ -125,7 +126,7 @@ impl MigrationTransaction {
         let tx = Self {
             dir,
             manifest_path,
-            print_progress: options.print_progress,
+            progress: None,
             manifest: TransactionManifest {
                 id,
                 status: TransactionStatus::Planned,
@@ -145,9 +146,13 @@ impl MigrationTransaction {
     }
 
     fn progress(&self, message: impl AsRef<str>) {
-        if self.print_progress {
-            println!("    · {}", message.as_ref());
+        if let Some(progress) = &self.progress {
+            progress.println(format!("    · {}", message.as_ref()));
         }
+    }
+
+    fn set_progress_bar(&mut self, progress: Option<ProgressBar>) {
+        self.progress = progress;
     }
 
     fn set_status(&mut self, status: TransactionStatus) -> Result<()> {
@@ -385,10 +390,12 @@ pub fn apply_migration_plan(
     let mut tx = MigrationTransaction::start(plan, options)?;
     report.manifest_path = Some(tx.manifest_path.clone());
     tx.set_status(TransactionStatus::Applying)?;
-    if options.print_progress {
-        println!("Applying mutations:");
-        println!("  manifest {}", tx.manifest_path.display());
-    }
+    let apply_progress = migration_progress_bar(options.print_progress, report.edits_apply_ready);
+    tx.set_progress_bar(apply_progress.clone());
+    progress_print(
+        &apply_progress,
+        format!("babel mv manifest {}", tx.manifest_path.display()),
+    );
 
     let apply_result = (|| -> Result<()> {
         let mut mutated_edits = Vec::new();
@@ -407,27 +414,31 @@ pub fn apply_migration_plan(
                 let applied_before = report.applied.len();
                 let skipped_before = report.skipped.len();
                 let blockers_before = report.blockers.len();
-                if options.print_progress {
-                    println!(
+                progress_set_message(
+                    &apply_progress,
+                    format!("{}:{}", edit.harness.slug(), edit.action),
+                );
+                progress_print(
+                    &apply_progress,
+                    format!(
                         "  → {}:{} {} {}",
                         edit.harness.slug(),
                         edit.action,
                         edit_kind_label(&edit.kind),
                         edit.target()
-                    );
-                }
+                    ),
+                );
                 let mutated = apply_edit(edit, &mut tx, &mut report)?;
-                if options.print_progress {
-                    for line in &report.applied[applied_before..] {
-                        println!("    ✓ {line}");
-                    }
-                    for line in &report.skipped[skipped_before..] {
-                        println!("    - {line}");
-                    }
-                    for line in &report.blockers[blockers_before..] {
-                        println!("    ! {line}");
-                    }
+                for line in &report.applied[applied_before..] {
+                    progress_print(&apply_progress, format!("    ✓ {line}"));
                 }
+                for line in &report.skipped[skipped_before..] {
+                    progress_print(&apply_progress, format!("    - {line}"));
+                }
+                for line in &report.blockers[blockers_before..] {
+                    progress_print(&apply_progress, format!("    ! {line}"));
+                }
+                progress_inc(&apply_progress, 1);
                 if report.blockers.len() > blockers_before {
                     bail!("{}", report.blockers[blockers_before..].join("\n"));
                 }
@@ -442,11 +453,11 @@ pub fn apply_migration_plan(
                 );
             }
         }
+        progress_finish(&apply_progress, "apply complete");
 
         tx.set_status(TransactionStatus::Verifying)?;
-        if options.print_progress {
-            println!("Verifying mutations:");
-        }
+        let verify_progress = migration_progress_bar(options.print_progress, mutated_edits.len());
+        tx.set_progress_bar(verify_progress.clone());
         for index in mutated_edits {
             let edit = edits[index];
             tracing::debug!(
@@ -460,19 +471,28 @@ pub fn apply_migration_plan(
             report
                 .verified
                 .push(format!("{}:{}", edit.harness.slug(), edit.action));
-            if options.print_progress {
-                println!("    ✓ {}:{}", edit.harness.slug(), edit.action);
-            }
+            progress_set_message(
+                &verify_progress,
+                format!("{}:{}", edit.harness.slug(), edit.action),
+            );
+            progress_print(
+                &verify_progress,
+                format!("    ✓ {}:{}", edit.harness.slug(), edit.action),
+            );
+            progress_inc(&verify_progress, 1);
             tracing::debug!(
                 harness = %edit.harness.slug(),
                 action = %edit.action,
                 "mv.apply: edit verified"
             );
         }
+        progress_finish(&verify_progress, "verify complete");
+        tx.set_progress_bar(None);
         Ok(())
     })();
 
     if let Err(error) = apply_result {
+        progress_abandon(&apply_progress);
         tracing::debug!(error = %error, "mv.apply: apply failed; beginning rollback");
         tx.set_status(TransactionStatus::Failed)?;
         let rollback_result = tx.rollback();
@@ -517,6 +537,50 @@ fn edit_kind_label(kind: &MigrationEditKind) -> &'static str {
         MigrationEditKind::RewriteSqliteTextColumn { .. } => "rewrite_sqlite_text_column",
         MigrationEditKind::PreserveSessionKeyedFiles { .. } => "preserve_session_keyed_files",
         MigrationEditKind::PreserveProjectLocalHistory { .. } => "preserve_project_local_history",
+    }
+}
+
+fn migration_progress_bar(enabled: bool, total: usize) -> Option<ProgressBar> {
+    if !enabled {
+        return None;
+    }
+    let progress = ProgressBar::new(total as u64);
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{bar:28.cyan/blue}] {pos}/{len} {msg}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
+    .progress_chars("#>-");
+    progress.set_style(style);
+    Some(progress)
+}
+
+fn progress_print(progress: &Option<ProgressBar>, message: impl Into<String>) {
+    if let Some(progress) = progress {
+        progress.println(message.into());
+    }
+}
+
+fn progress_set_message(progress: &Option<ProgressBar>, message: impl Into<String>) {
+    if let Some(progress) = progress {
+        progress.set_message(message.into());
+    }
+}
+
+fn progress_inc(progress: &Option<ProgressBar>, delta: u64) {
+    if let Some(progress) = progress {
+        progress.inc(delta);
+    }
+}
+
+fn progress_finish(progress: &Option<ProgressBar>, message: &'static str) {
+    if let Some(progress) = progress {
+        progress.finish_with_message(message);
+    }
+}
+
+fn progress_abandon(progress: &Option<ProgressBar>) {
+    if let Some(progress) = progress {
+        progress.abandon();
     }
 }
 

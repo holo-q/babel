@@ -37,6 +37,7 @@ users = "0.11"
 
 # Terminal output
 console = "0.15"          # Colors, styling, terminal utils (indicatif's sibling)
+indicatif = "0.17"        # Interactive progress bars for long-running migrations
 unicode-width = "0.2"     # Proper alignment with unicode chars
 
 # UI
