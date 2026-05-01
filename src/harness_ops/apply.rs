@@ -613,6 +613,7 @@ fn progress_inc(progress: &Option<ProgressBar>, delta: u64) {
 fn progress_finish(progress: &Option<ProgressBar>, message: &'static str) {
     if let Some(progress) = progress {
         progress.finish_with_message(message);
+        println!();
     }
 }
 
