@@ -42,8 +42,12 @@ struct CodexStateDbDiscovery {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum CodexDiscoveryMode {
-    Apply,
-    Doctor,
+    /// Command planners use native indexes so doctor output and apply atoms stay
+    /// on the same path.
+    Indexed,
+    /// Reserved for whole-application health audits, where the user asked Babel
+    /// to spend time finding stale or orphaned native state.
+    Exhaustive,
 }
 
 struct CodexSession {
@@ -313,7 +317,7 @@ fn discover(
 
     let db_found_cwd_without_rollout_paths =
         !discovery.state_db_thread_refs.is_empty() && discovery.matched_sessions.is_empty();
-    let should_scan_rollouts = matches!(mode, CodexDiscoveryMode::Doctor)
+    let should_scan_rollouts = matches!(mode, CodexDiscoveryMode::Exhaustive)
         || discovery.state_dbs_seen == 0
         || db_found_cwd_without_rollout_paths;
     if should_scan_rollouts {
@@ -325,7 +329,7 @@ fn discover(
         tracing::debug!(
             state_dbs_seen = discovery.state_dbs_seen,
             matched_sessions = discovery.matched_sessions.len(),
-            "mv.plan.codex: skipping rollout tree scan; state DB is authoritative for apply"
+            "mv.plan.codex: skipping rollout tree scan; state DB is authoritative for indexed planning"
         );
     }
 

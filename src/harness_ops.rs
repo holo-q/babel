@@ -863,16 +863,12 @@ fn plan_migration_with_context_and_scope(
         &mut risks,
     )?);
     tracing::debug!("mv.plan: planning Codex storage");
-    let codex_mode = match scope {
-        MigrationPlanScope::Doctor => codex::CodexDiscoveryMode::Doctor,
-        MigrationPlanScope::Apply => codex::CodexDiscoveryMode::Apply,
-    };
     harnesses.push(codex::plan(
         context,
         &old_abs,
         &new_abs,
         &path_needles,
-        codex_mode,
+        codex::CodexDiscoveryMode::Indexed,
     )?);
     tracing::debug!("mv.plan: planning Aider storage");
     harnesses.push(aider::plan_for_source(&old_abs));
@@ -1597,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_apply_planning_uses_thread_index_without_rollout_tree_scan() {
+    fn codex_indexed_planning_uses_thread_index_without_rollout_tree_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let old = home.join("project");
@@ -1650,33 +1646,29 @@ mod tests {
             .unwrap();
         }
 
-        let report = plan_migration_with_context_and_scope(
-            &ctx,
-            &old,
-            &new,
-            Vec::new(),
-            MigrationPlanScope::Apply,
-        )
-        .unwrap();
-        let codex = report
-            .harnesses
-            .iter()
-            .find(|harness| harness.harness == AgentKind::Codex)
-            .unwrap();
+        for scope in [MigrationPlanScope::Apply, MigrationPlanScope::Doctor] {
+            let report =
+                plan_migration_with_context_and_scope(&ctx, &old, &new, Vec::new(), scope).unwrap();
+            let codex = report
+                .harnesses
+                .iter()
+                .find(|harness| harness.harness == AgentKind::Codex)
+                .unwrap();
 
-        assert_eq!(codex.sessions_found, 1);
-        assert!(!codex
-            .operations
-            .iter()
-            .any(|op| op.action == "rewrite_session_path_refs"));
-        assert!(codex.edits.iter().any(|edit| {
-            edit.action == "rewrite_session_meta_cwd"
-                && matches!(
-                    &edit.kind,
-                    MigrationEditKind::RewriteJsonlField { files, .. }
-                    if files == &vec![matched_rollout.clone()]
-                )
-        }));
+            assert_eq!(codex.sessions_found, 1);
+            assert!(!codex
+                .operations
+                .iter()
+                .any(|op| op.action == "rewrite_session_path_refs"));
+            assert!(codex.edits.iter().any(|edit| {
+                edit.action == "rewrite_session_meta_cwd"
+                    && matches!(
+                        &edit.kind,
+                        MigrationEditKind::RewriteJsonlField { files, .. }
+                        if files == &vec![matched_rollout.clone()]
+                    )
+            }));
+        }
     }
 
     #[test]
