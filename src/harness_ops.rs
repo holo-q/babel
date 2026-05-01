@@ -1999,6 +1999,65 @@ mod tests {
     }
 
     #[test]
+    fn generic_apply_preserves_rewritten_file_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        let text = root.join("history.jsonl");
+        write_file(&text, &format!("cwd={}\n", old.display()));
+        let original_time = filetime::FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_times(&text, original_time, original_time).unwrap();
+
+        let edit = MigrationEdit::rewrite_text_refs(
+            AgentKind::Codex,
+            "rewrite_history_path_refs",
+            text.display().to_string(),
+            old.display().to_string(),
+            new.display().to_string(),
+            1,
+        )
+        .with_apply_ready(true);
+        let report = MigrationDoctorReport {
+            old_path: old,
+            new_path: new.clone(),
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Codex,
+                AdapterReadiness::ApplyReady,
+                vec![root.to_path_buf()],
+                0,
+                1,
+                vec![edit],
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+                print_progress: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!apply.has_blockers());
+        assert!(fs::read_to_string(&text)
+            .unwrap()
+            .contains(&new.display().to_string()));
+        let metadata = fs::metadata(&text).unwrap();
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&metadata),
+            original_time
+        );
+    }
+
+    #[test]
     fn generic_apply_skips_preserve_only_edits_without_blocking() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

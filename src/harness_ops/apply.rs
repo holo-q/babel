@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use filetime::{set_file_times, FileTime};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -1269,9 +1270,57 @@ fn replace_json_string_field(
 }
 
 fn write_file_atomic_tx(path: &Path, content: &[u8], tx: &mut MigrationTransaction) -> Result<()> {
+    let original = FileMetadataStamp::read(path)?;
     let snapshot = tx.snapshot_file(path)?;
     write_bytes_atomic(path, content)?;
+    original.restore(path)?;
     tx.mark_file_after(snapshot)
+}
+
+struct FileMetadataStamp {
+    permissions: Option<fs::Permissions>,
+    accessed: Option<FileTime>,
+    modified: Option<FileTime>,
+}
+
+impl FileMetadataStamp {
+    fn read(path: &Path) -> Result<Self> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    permissions: None,
+                    accessed: None,
+                    modified: None,
+                });
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to stat {}", path.display()));
+            }
+        };
+
+        Ok(Self {
+            permissions: Some(metadata.permissions()),
+            accessed: Some(FileTime::from_last_access_time(&metadata)),
+            modified: Some(FileTime::from_last_modification_time(&metadata)),
+        })
+    }
+
+    fn restore(&self, path: &Path) -> Result<()> {
+        if let Some(permissions) = &self.permissions {
+            fs::set_permissions(path, permissions.clone())
+                .with_context(|| format!("failed to restore permissions on {}", path.display()))?;
+        }
+        if let (Some(accessed), Some(modified)) = (self.accessed, self.modified) {
+            set_file_times(path, accessed, modified)
+                .with_context(|| format!("failed to restore timestamps on {}", path.display()))?;
+            tracing::debug!(
+                target = %path.display(),
+                "mv.apply: restored file metadata after content rewrite"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
