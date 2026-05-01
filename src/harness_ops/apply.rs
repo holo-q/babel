@@ -400,9 +400,14 @@ fn apply_edit(
             format!("{}:{}", edit.harness.slug(), edit.action),
         ),
         MigrationEditKind::RewriteTextRefs {
-            target, from, to, ..
+            target,
+            files,
+            from,
+            to,
+            ..
         } => apply_text_ref_rewrite(
             target,
+            files,
             from,
             to,
             tx,
@@ -544,6 +549,7 @@ fn apply_toml_table_key_rewrite(
 
 fn apply_text_ref_rewrite(
     target: &str,
+    exact_files: &[PathBuf],
     from: &str,
     to: &str,
     tx: &mut MigrationTransaction,
@@ -557,15 +563,29 @@ fn apply_text_ref_rewrite(
         return Ok(());
     }
 
-    let path = PathBuf::from(target);
-    if !path.exists() {
-        report.blockers.push(format!(
-            "{label}: text rewrite target is not a concrete path: {target}"
-        ));
-        return Ok(());
-    }
-
-    let files = text_targets(&path)?;
+    let files = if exact_files.is_empty() {
+        let path = PathBuf::from(target);
+        if !path.exists() {
+            report.blockers.push(format!(
+                "{label}: text rewrite target is not a concrete path: {target}"
+            ));
+            return Ok(());
+        }
+        text_targets(&path)?
+    } else {
+        let mut files = Vec::new();
+        for file in exact_files {
+            if !file.exists() {
+                report.blockers.push(format!(
+                    "{label}: text rewrite file missing: {}",
+                    file.display()
+                ));
+                continue;
+            }
+            files.push(file.clone());
+        }
+        files
+    };
     let mut changed = 0;
     for file in files {
         let content = fs::read_to_string(&file)?;
@@ -674,9 +694,19 @@ fn verify_edit(edit: &MigrationEdit) -> Result<()> {
                 bail!("TOML verification failed for {}", path.display());
             }
         }
-        VerificationSpec::TextRefsReduced { target, from, .. } => {
-            let path = PathBuf::from(target);
-            let old_refs = text_targets(&path)?
+        VerificationSpec::TextRefsReduced {
+            target,
+            files,
+            from,
+            ..
+        } => {
+            let targets = if files.is_empty() {
+                let path = PathBuf::from(target);
+                text_targets(&path)?
+            } else {
+                files.clone()
+            };
+            let old_refs = targets
                 .into_iter()
                 .filter_map(|path| fs::read_to_string(path).ok())
                 .filter(|content| content.contains(from))

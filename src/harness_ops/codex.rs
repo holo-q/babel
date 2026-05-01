@@ -18,6 +18,7 @@ struct CodexDiscovery {
     session_roots: Vec<PathBuf>,
     matched_sessions: Vec<CodexSession>,
     session_path_ref_files: usize,
+    matched_session_path_ref_files: Vec<PathBuf>,
     history_ref_entries: usize,
     session_index_ref_entries: usize,
     config_toml_ref_files: usize,
@@ -144,10 +145,11 @@ pub(super) fn plan(
     }
     if discovery.session_path_ref_files > 0 {
         edits.push(
-            MigrationEdit::rewrite_text_refs(
+            MigrationEdit::rewrite_text_refs_in_files(
                 AgentKind::Codex,
                 "rewrite_session_path_refs",
                 context.codex_sessions().display().to_string(),
+                discovery.matched_session_path_ref_files.clone(),
                 old_path.display().to_string(),
                 new_path.display().to_string(),
                 discovery.session_path_ref_files,
@@ -417,6 +419,7 @@ fn collect_sessions_from_root(
         discovery.files_scanned += 1;
         if text_file_contains_any(&path, metadata.len(), needles)? {
             discovery.session_path_ref_files += 1;
+            discovery.matched_session_path_ref_files.push(path.clone());
             if metadata.len() > MAX_SCAN_BYTES {
                 discovery.large_files_sampled += 1;
             }

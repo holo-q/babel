@@ -213,6 +213,7 @@ pub enum VerificationSpec {
     },
     TextRefsReduced {
         target: String,
+        files: Vec<PathBuf>,
         from: String,
         to: String,
         expected_removed_min: usize,
@@ -256,6 +257,7 @@ pub enum MigrationEditKind {
     },
     RewriteTextRefs {
         target: String,
+        files: Vec<PathBuf>,
         from: String,
         to: String,
         count: usize,
@@ -381,6 +383,18 @@ impl MigrationEdit {
         to: impl Into<String>,
         count: usize,
     ) -> Self {
+        Self::rewrite_text_refs_in_files(harness, action, target, Vec::new(), from, to, count)
+    }
+
+    pub fn rewrite_text_refs_in_files(
+        harness: AgentKind,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        files: Vec<PathBuf>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        count: usize,
+    ) -> Self {
         let target = target.into();
         let from = from.into();
         let to = to.into();
@@ -389,6 +403,7 @@ impl MigrationEdit {
             action: action.into(),
             kind: MigrationEditKind::RewriteTextRefs {
                 target: target.clone(),
+                files: files.clone(),
                 from: from.clone(),
                 to: to.clone(),
                 count,
@@ -397,6 +412,7 @@ impl MigrationEdit {
             recovery: RecoveryClass::OwnedFile,
             verification: VerificationSpec::TextRefsReduced {
                 target,
+                files,
                 from,
                 to,
                 expected_removed_min: count,
@@ -554,8 +570,14 @@ impl MigrationEdit {
             } => {
                 format!("rewrite {count} TOML [{table}] key(s): {from_key} -> {to_key}")
             }
-            MigrationEditKind::RewriteTextRefs { count, .. } => {
-                format!("rewrite {count} text target(s) containing source path references")
+            MigrationEditKind::RewriteTextRefs { count, files, .. } => {
+                if files.is_empty() {
+                    format!("rewrite {count} text target(s) containing source path references")
+                } else {
+                    format!(
+                        "rewrite {count} pre-scanned text file(s) containing source path references"
+                    )
+                }
             }
             MigrationEditKind::RewriteSqliteTextColumn {
                 table,
@@ -1458,6 +1480,14 @@ mod tests {
             edit.action == "rewrite_session_meta_cwd"
                 && matches!(&edit.kind, MigrationEditKind::RewriteJsonlField { .. })
         }));
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_session_path_refs"
+                && matches!(
+                    &edit.kind,
+                    MigrationEditKind::RewriteTextRefs { files, .. }
+                    if files.len() == 2
+                )
+        }));
         assert!(codex
             .operations
             .iter()
@@ -1497,6 +1527,66 @@ mod tests {
             .find(|harness| harness.harness == AgentKind::Gemini)
             .unwrap();
         assert_eq!(gemini.path_references_found, 1);
+    }
+
+    #[test]
+    fn generic_apply_rewrites_only_prescanned_text_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        fs::create_dir_all(root.join("state/day")).unwrap();
+
+        let matching = root.join("state/day/matching.jsonl");
+        let unrelated = root.join("state/day/unrelated.jsonl");
+        write_file(&matching, &format!("cwd={}\n", old.display()));
+        write_file(&unrelated, &format!("cwd={}\n", old.display()));
+
+        let edit = MigrationEdit::rewrite_text_refs_in_files(
+            AgentKind::Codex,
+            "rewrite_session_path_refs",
+            root.join("state").display().to_string(),
+            vec![matching.clone()],
+            old.display().to_string(),
+            new.display().to_string(),
+            1,
+        )
+        .with_apply_ready(true);
+        let report = MigrationDoctorReport {
+            old_path: old.clone(),
+            new_path: new.clone(),
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Codex,
+                AdapterReadiness::ApplyReady,
+                vec![root.join("state")],
+                0,
+                1,
+                vec![edit],
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+            },
+        )
+        .unwrap();
+
+        assert!(!apply.has_blockers());
+        assert_eq!(apply.verified.len(), 1);
+        assert!(fs::read_to_string(&matching)
+            .unwrap()
+            .contains(&new.display().to_string()));
+        assert!(fs::read_to_string(&unrelated)
+            .unwrap()
+            .contains(&old.display().to_string()));
     }
 
     #[test]
@@ -1696,6 +1786,7 @@ mod tests {
         .with_apply_ready(true);
         edit.verification = VerificationSpec::TextRefsReduced {
             target: text.display().to_string(),
+            files: Vec::new(),
             from: new.display().to_string(),
             to: old.display().to_string(),
             expected_removed_min: 1,
