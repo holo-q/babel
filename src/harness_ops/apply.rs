@@ -22,6 +22,8 @@ pub struct MigrationApplyOptions {
     pub transaction_root: Option<PathBuf>,
     #[serde(default)]
     pub print_progress: bool,
+    #[serde(default)]
+    pub progress_bars: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +103,7 @@ struct MigrationTransaction {
     manifest_path: PathBuf,
     manifest: TransactionManifest,
     progress: Option<ProgressBar>,
+    print_progress: bool,
 }
 
 impl MigrationTransaction {
@@ -127,6 +130,7 @@ impl MigrationTransaction {
             dir,
             manifest_path,
             progress: None,
+            print_progress: options.print_progress,
             manifest: TransactionManifest {
                 id,
                 status: TransactionStatus::Planned,
@@ -148,6 +152,8 @@ impl MigrationTransaction {
     fn progress(&self, message: impl AsRef<str>) {
         if let Some(progress) = &self.progress {
             progress.println(format!("    · {}", message.as_ref()));
+        } else if self.print_progress {
+            println!("    · {}", message.as_ref());
         }
     }
 
@@ -390,11 +396,17 @@ pub fn apply_migration_plan(
     let mut tx = MigrationTransaction::start(plan, options)?;
     report.manifest_path = Some(tx.manifest_path.clone());
     tx.set_status(TransactionStatus::Applying)?;
-    let apply_progress = migration_progress_bar(options.print_progress, report.edits_apply_ready);
+    let apply_progress = migration_progress_bar(options.progress_bars, report.edits_apply_ready);
     tx.set_progress_bar(apply_progress.clone());
-    progress_print(
+    progress_header(
+        options.print_progress,
         &apply_progress,
-        format!("babel mv manifest {}", tx.manifest_path.display()),
+        "Applying mutations:",
+    );
+    progress_print(
+        options.print_progress,
+        &apply_progress,
+        format!("  manifest {}", tx.manifest_path.display()),
     );
 
     let apply_result = (|| -> Result<()> {
@@ -419,6 +431,7 @@ pub fn apply_migration_plan(
                     format!("{}:{}", edit.harness.slug(), edit.action),
                 );
                 progress_print(
+                    options.print_progress,
                     &apply_progress,
                     format!(
                         "  → {}:{} {} {}",
@@ -430,13 +443,25 @@ pub fn apply_migration_plan(
                 );
                 let mutated = apply_edit(edit, &mut tx, &mut report)?;
                 for line in &report.applied[applied_before..] {
-                    progress_print(&apply_progress, format!("    ✓ {line}"));
+                    progress_print(
+                        options.print_progress,
+                        &apply_progress,
+                        format!("    ✓ {line}"),
+                    );
                 }
                 for line in &report.skipped[skipped_before..] {
-                    progress_print(&apply_progress, format!("    - {line}"));
+                    progress_print(
+                        options.print_progress,
+                        &apply_progress,
+                        format!("    - {line}"),
+                    );
                 }
                 for line in &report.blockers[blockers_before..] {
-                    progress_print(&apply_progress, format!("    ! {line}"));
+                    progress_print(
+                        options.print_progress,
+                        &apply_progress,
+                        format!("    ! {line}"),
+                    );
                 }
                 progress_inc(&apply_progress, 1);
                 if report.blockers.len() > blockers_before {
@@ -456,8 +481,13 @@ pub fn apply_migration_plan(
         progress_finish(&apply_progress, "apply complete");
 
         tx.set_status(TransactionStatus::Verifying)?;
-        let verify_progress = migration_progress_bar(options.print_progress, mutated_edits.len());
+        let verify_progress = migration_progress_bar(options.progress_bars, mutated_edits.len());
         tx.set_progress_bar(verify_progress.clone());
+        progress_header(
+            options.print_progress,
+            &verify_progress,
+            "Verifying mutations:",
+        );
         for index in mutated_edits {
             let edit = edits[index];
             tracing::debug!(
@@ -476,6 +506,7 @@ pub fn apply_migration_plan(
                 format!("{}:{}", edit.harness.slug(), edit.action),
             );
             progress_print(
+                options.print_progress,
                 &verify_progress,
                 format!("    ✓ {}:{}", edit.harness.slug(), edit.action),
             );
@@ -554,9 +585,16 @@ fn migration_progress_bar(enabled: bool, total: usize) -> Option<ProgressBar> {
     Some(progress)
 }
 
-fn progress_print(progress: &Option<ProgressBar>, message: impl Into<String>) {
+fn progress_header(enabled: bool, progress: &Option<ProgressBar>, message: impl Into<String>) {
+    progress_print(enabled, progress, message);
+}
+
+fn progress_print(enabled: bool, progress: &Option<ProgressBar>, message: impl Into<String>) {
+    let message = message.into();
     if let Some(progress) = progress {
-        progress.println(message.into());
+        progress.println(message);
+    } else if enabled {
+        println!("{message}");
     }
 }
 

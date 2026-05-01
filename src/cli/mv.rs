@@ -65,6 +65,7 @@ pub async fn cmd_mv(
     anxious: bool,
     force: bool,
     json: bool,
+    debug: bool,
 ) -> Result<()> {
     let source = expand_tilde(&source);
     let dest = resolve_destination(&source, &expand_tilde(&dest));
@@ -150,6 +151,7 @@ pub async fn cmd_mv(
             force: false,
             transaction_root: None,
             print_progress: !json && !dry_run,
+            progress_bars: !json && !dry_run && !debug,
         },
     )?;
     tracing::debug!(

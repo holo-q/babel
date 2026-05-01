@@ -1873,6 +1873,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(home.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -1940,6 +1941,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2061,6 +2063,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2133,6 +2136,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2204,6 +2208,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2251,6 +2256,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2303,6 +2309,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap();
@@ -2366,6 +2373,7 @@ mod tests {
                 force: false,
                 transaction_root: Some(root.join("transactions")),
                 print_progress: false,
+                progress_bars: false,
             },
         )
         .unwrap_err();

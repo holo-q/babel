@@ -246,6 +246,7 @@ async fn main() -> Result<()> {
                     anxious,
                     force,
                     cli.json,
+                    cli.logging.debug,
                 )
                 .await
             }
