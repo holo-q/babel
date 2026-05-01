@@ -141,6 +141,9 @@ pub struct PlannedOperation {
     pub action: String,
     pub target: String,
     pub detail: String,
+    pub capability: ApplyCapability,
+    pub recovery: RecoveryClass,
+    pub verification: VerificationSpec,
     pub apply_ready: bool,
 }
 
@@ -149,7 +152,66 @@ pub struct MigrationEdit {
     pub harness: AgentKind,
     pub action: String,
     pub kind: MigrationEditKind,
+    pub capability: ApplyCapability,
+    pub recovery: RecoveryClass,
+    pub verification: VerificationSpec,
     pub apply_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyCapability {
+    ApplyReady,
+    DoctorOnly,
+    PreserveOnly,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryClass {
+    OwnedFile,
+    OwnedDir,
+    SessionDependencyFile,
+    SessionDependencyDir,
+    ProjectLocalFollowsMove,
+    SqliteSnapshotOnly,
+    SqliteClosedAppReplace,
+    SharedStateUnsupported,
+    PreserveOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VerificationSpec {
+    PathMoved {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    JsonlFieldRewritten {
+        path: PathBuf,
+        selector: String,
+        from: String,
+        to: String,
+        expected_count: usize,
+    },
+    TomlKeyMoved {
+        path: PathBuf,
+        table: String,
+        from_key: String,
+        to_key: String,
+    },
+    TextRefsReduced {
+        target: String,
+        from: String,
+        to: String,
+        expected_removed_min: usize,
+    },
+    SessionCountPreserved {
+        harness: AgentKind,
+        count: usize,
+    },
+    PreserveOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,10 +265,13 @@ impl MigrationEdit {
             harness,
             action: action.into(),
             kind: MigrationEditKind::RenamePath {
-                from,
-                to,
+                from: from.clone(),
+                to: to.clone(),
                 preserve: preserve.into(),
             },
+            capability: ApplyCapability::DoctorOnly,
+            recovery: RecoveryClass::OwnedDir,
+            verification: VerificationSpec::PathMoved { from, to },
             apply_ready: false,
         }
     }
@@ -220,15 +285,28 @@ impl MigrationEdit {
         to: impl Into<String>,
         count: usize,
     ) -> Self {
+        let path: PathBuf = path;
+        let selector = selector.into();
+        let from = from.into();
+        let to = to.into();
         Self {
             harness,
             action: action.into(),
             kind: MigrationEditKind::RewriteJsonlField {
-                path,
-                selector: selector.into(),
-                from: from.into(),
-                to: to.into(),
+                path: path.clone(),
+                selector: selector.clone(),
+                from: from.clone(),
+                to: to.clone(),
                 count,
+            },
+            capability: ApplyCapability::DoctorOnly,
+            recovery: RecoveryClass::OwnedFile,
+            verification: VerificationSpec::JsonlFieldRewritten {
+                path,
+                selector,
+                from,
+                to,
+                expected_count: count,
             },
             apply_ready: false,
         }
@@ -243,15 +321,27 @@ impl MigrationEdit {
         to_key: impl Into<String>,
         count: usize,
     ) -> Self {
+        let path: PathBuf = path;
+        let table = table.into();
+        let from_key = from_key.into();
+        let to_key = to_key.into();
         Self {
             harness,
             action: action.into(),
             kind: MigrationEditKind::RewriteTomlTableKey {
-                path,
-                table: table.into(),
-                from_key: from_key.into(),
-                to_key: to_key.into(),
+                path: path.clone(),
+                table: table.clone(),
+                from_key: from_key.clone(),
+                to_key: to_key.clone(),
                 count,
+            },
+            capability: ApplyCapability::DoctorOnly,
+            recovery: RecoveryClass::OwnedFile,
+            verification: VerificationSpec::TomlKeyMoved {
+                path,
+                table,
+                from_key,
+                to_key,
             },
             apply_ready: false,
         }
@@ -265,14 +355,25 @@ impl MigrationEdit {
         to: impl Into<String>,
         count: usize,
     ) -> Self {
+        let target = target.into();
+        let from = from.into();
+        let to = to.into();
         Self {
             harness,
             action: action.into(),
             kind: MigrationEditKind::RewriteTextRefs {
-                target: target.into(),
-                from: from.into(),
-                to: to.into(),
+                target: target.clone(),
+                from: from.clone(),
+                to: to.clone(),
                 count,
+            },
+            capability: ApplyCapability::DoctorOnly,
+            recovery: RecoveryClass::OwnedFile,
+            verification: VerificationSpec::TextRefsReduced {
+                target,
+                from,
+                to,
+                expected_removed_min: count,
             },
             apply_ready: false,
         }
@@ -292,6 +393,12 @@ impl MigrationEdit {
                 root,
                 session_count,
                 path_ref_count,
+            },
+            capability: ApplyCapability::PreserveOnly,
+            recovery: RecoveryClass::PreserveOnly,
+            verification: VerificationSpec::SessionCountPreserved {
+                harness,
+                count: session_count,
             },
             apply_ready: false,
         }
@@ -323,12 +430,31 @@ impl MigrationEdit {
                 target: target.into(),
                 detail: detail.into(),
             },
+            capability: ApplyCapability::PreserveOnly,
+            recovery: RecoveryClass::ProjectLocalFollowsMove,
+            verification: VerificationSpec::PreserveOnly,
             apply_ready: false,
         }
     }
 
     pub fn with_apply_ready(mut self, apply_ready: bool) -> Self {
         self.apply_ready = apply_ready;
+        self.capability = if apply_ready {
+            ApplyCapability::ApplyReady
+        } else {
+            ApplyCapability::DoctorOnly
+        };
+        self
+    }
+
+    pub fn with_recovery(mut self, recovery: RecoveryClass) -> Self {
+        self.recovery = recovery;
+        self
+    }
+
+    pub fn with_capability(mut self, capability: ApplyCapability) -> Self {
+        self.apply_ready = matches!(capability, ApplyCapability::ApplyReady);
+        self.capability = capability;
         self
     }
 
@@ -386,6 +512,9 @@ impl From<&MigrationEdit> for PlannedOperation {
             action: edit.action.clone(),
             target: edit.target(),
             detail: edit.detail(),
+            capability: edit.capability,
+            recovery: edit.recovery,
+            verification: edit.verification.clone(),
             apply_ready: edit.apply_ready,
         }
     }
@@ -1261,6 +1390,7 @@ mod tests {
             &MigrationApplyOptions {
                 dry_run: false,
                 force: false,
+                transaction_root: Some(root.join("transactions")),
             },
         )
         .unwrap();
@@ -1275,5 +1405,109 @@ mod tests {
         assert!(fs::read_to_string(&text)
             .unwrap()
             .contains(&new.display().to_string()));
+        assert!(apply.manifest_path.unwrap().exists());
+        assert_eq!(apply.verified.len(), 3);
+    }
+
+    #[test]
+    fn generic_apply_skips_preserve_only_edits_without_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let report = MigrationDoctorReport {
+            old_path: root.join("old"),
+            new_path: root.join("new"),
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Aider,
+                AdapterReadiness::DoctorOnly,
+                vec![root.to_path_buf()],
+                1,
+                0,
+                vec![MigrationEdit::preserve_project_local_history(
+                    AgentKind::Aider,
+                    root.display().to_string(),
+                    "project-local files follow the move",
+                )],
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(apply.edits_seen, 1);
+        assert_eq!(apply.edits_apply_ready, 0);
+        assert!(!apply.has_blockers());
+        assert!(apply.manifest_path.is_none());
+        assert_eq!(apply.skipped.len(), 1);
+    }
+
+    #[test]
+    fn generic_apply_rolls_back_owned_files_when_verification_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        fs::create_dir_all(&old).unwrap();
+        let text = root.join("notes.txt");
+        write_file(&text, &format!("cwd={}\n", old.display()));
+
+        let mut edit = MigrationEdit::rewrite_text_refs(
+            AgentKind::Gemini,
+            "rewrite_native_path_refs",
+            text.display().to_string(),
+            old.display().to_string(),
+            new.display().to_string(),
+            1,
+        )
+        .with_apply_ready(true);
+        edit.verification = VerificationSpec::TextRefsReduced {
+            target: text.display().to_string(),
+            from: new.display().to_string(),
+            to: old.display().to_string(),
+            expected_removed_min: 1,
+        };
+
+        let report = MigrationDoctorReport {
+            old_path: old.clone(),
+            new_path: new,
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Gemini,
+                AdapterReadiness::ApplyReady,
+                vec![root.to_path_buf()],
+                0,
+                1,
+                vec![edit],
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let error = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("rolled back"));
+        assert_eq!(
+            fs::read_to_string(&text).unwrap(),
+            format!("cwd={}\n", old.display())
+        );
     }
 }

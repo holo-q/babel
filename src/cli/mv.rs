@@ -2,9 +2,7 @@
 //!
 //! Mutation is intentionally disabled here. `babel mv --doctor` is the current
 //! supported surface: it inspects native harness storage and reports the
-//! migration graph without moving files. The old mover only understood Claude
-//! storage and used a copy/delete fallback that was not a lossless filesystem
-//! move, so keeping it callable would violate the migration safety contract.
+//! migration graph without moving files.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +21,15 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+pub fn resolve_destination(source: &Path, dest: &Path) -> PathBuf {
+    if dest.is_dir() {
+        if let Some(name) = source.file_name() {
+            return dest.join(name);
+        }
+    }
+    dest.to_path_buf()
+}
+
 pub async fn cmd_mv(
     _core: &mut BabelCore,
     source: PathBuf,
@@ -33,10 +40,41 @@ pub async fn cmd_mv(
     _force: bool,
     _json: bool,
 ) -> Result<()> {
+    let source = expand_tilde(&source);
+    let dest = resolve_destination(&source, &expand_tilde(&dest));
     bail!(
-        "babel mv mutation is disabled until the harness migration executor has backup/verify/rollback semantics.\n\
-         Run `babel mv --doctor {} {}` to inspect affected native harness storage.",
+        "babel mv apply is not available yet.\n\
+         Run `babel mv --doctor {} {}` to inspect the migration plan. No files or harness state were changed.",
         source.display(),
         dest.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_directory_destination_keeps_source_basename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("old-project");
+        let dest_parent = tmp.path().join("new-parent");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&dest_parent).unwrap();
+
+        assert_eq!(
+            resolve_destination(&source, &dest_parent),
+            dest_parent.join("old-project")
+        );
+    }
+
+    #[test]
+    fn explicit_destination_path_is_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("old-project");
+        let explicit = tmp.path().join("new-parent/renamed-project");
+        std::fs::create_dir_all(&source).unwrap();
+
+        assert_eq!(resolve_destination(&source, &explicit), explicit);
+    }
 }

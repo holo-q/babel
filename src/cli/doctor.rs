@@ -380,7 +380,7 @@ pub async fn cmd_migration_doctor(
     json: bool,
 ) -> Result<()> {
     let source = super::mv::expand_tilde(&source);
-    let dest = super::mv::expand_tilde(&dest);
+    let dest = super::mv::resolve_destination(&source, &super::mv::expand_tilde(&dest));
 
     let panes = core.panes().await?;
     let live_panes = live_panes_from_panes(&source, panes);
