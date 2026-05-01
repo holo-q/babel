@@ -4,7 +4,7 @@
 //! transaction executor. Harness adapters only describe typed storage edits; the
 //! executor owns backup, verification, and rollback.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Result};
 
@@ -27,12 +27,33 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 pub fn resolve_destination(source: &Path, dest: &Path) -> PathBuf {
-    if dest.is_dir() {
+    let resolved = if dest.is_dir() {
         if let Some(name) = source.file_name() {
-            return dest.join(name);
+            dest.join(name)
+        } else {
+            dest.to_path_buf()
+        }
+    } else {
+        dest.to_path_buf()
+    };
+    normalize_lexical_path(&resolved)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
         }
     }
-    dest.to_path_buf()
+    normalized
 }
 
 pub async fn cmd_mv(
@@ -199,5 +220,19 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
 
         assert_eq!(resolve_destination(&source, &explicit), explicit);
+    }
+
+    #[test]
+    fn destination_is_lexically_normalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("repo/project");
+        let dest = tmp.path().join("repo/../repo-tool");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        assert_eq!(
+            resolve_destination(&source, &dest),
+            tmp.path().join("repo-tool/project")
+        );
     }
 }

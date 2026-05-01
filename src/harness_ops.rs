@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -1334,11 +1334,29 @@ fn absolute_path(path: &Path) -> PathBuf {
         return canonical;
     }
     if path.is_absolute() {
-        return path.to_path_buf();
+        return normalize_lexical_path(path);
     }
-    std::env::current_dir()
+    let absolute = std::env::current_dir()
         .map(|cwd| cwd.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
+        .unwrap_or_else(|_| path.to_path_buf());
+    normalize_lexical_path(&absolute)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn path_needles(original: &Path, absolute: &Path) -> Vec<String> {
@@ -1456,6 +1474,15 @@ mod tests {
         assert_eq!(
             claude_encode_ccmv(path),
             "-home-nuck-holoq-repo-os-claude-babel"
+        );
+    }
+
+    #[test]
+    fn absolute_path_normalizes_dot_dot_without_existing_destination() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_path(Path::new("repo/../repo-tool/pomet")),
+            cwd.join("repo-tool/pomet")
         );
     }
 
