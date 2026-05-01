@@ -37,6 +37,8 @@ struct RooDiscovery {
 
 pub(super) fn plan(
     context: &HarnessOpsContext,
+    old_path: &Path,
+    new_path: &Path,
     needles: &[String],
 ) -> Result<HarnessMigrationReport> {
     let discovery = discover(context, needles)?;
@@ -64,7 +66,7 @@ pub(super) fn plan(
         ));
     }
 
-    let edits = discovery
+    let mut edits: Vec<_> = discovery
         .task_roots
         .iter()
         .map(|root| {
@@ -77,10 +79,26 @@ pub(super) fn plan(
             )
         })
         .collect();
+    for root in &discovery.existing_roots {
+        let scan = super::scan_text_refs(root, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::RooCode,
+                    "rewrite_roo_path_refs",
+                    root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
+    }
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::RooCode,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         discovery.existing_roots,
         discovery.sessions_found,
         discovery.path_references_found,
@@ -165,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roo_planner_counts_task_storage_and_keeps_apply_disabled() {
+    fn roo_planner_counts_task_storage_and_marks_concrete_refs_apply_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let old_path = home.join("Workspace/old");
@@ -185,21 +203,29 @@ mod tests {
         fs::write(task.join("task_metadata.json"), r#"{"id":"task-1"}"#).unwrap();
 
         let context = HarnessOpsContext::from_home(home.to_path_buf());
-        let report = plan(&context, &[old_path.display().to_string()]).unwrap();
+        let new_path = home.join("Workspace/new");
+        let report = plan(
+            &context,
+            &old_path,
+            &new_path,
+            &[old_path.display().to_string()],
+        )
+        .unwrap();
 
         assert_eq!(report.harness, AgentKind::RooCode);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert_eq!(report.path_references_found, 1);
-        assert_eq!(report.edits.len(), 1);
-        assert!(report.edits.iter().all(|edit| !edit.apply_ready));
+        assert!(report.edits.iter().any(|edit| edit.apply_ready));
     }
 
     #[test]
     fn roo_planner_reports_probed_roots_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let context = HarnessOpsContext::from_home(tmp.path().to_path_buf());
-        let report = plan(&context, &[]).unwrap();
+        let old_path = tmp.path().join("old");
+        let new_path = tmp.path().join("new");
+        let report = plan(&context, &old_path, &new_path, &[]).unwrap();
 
         assert_eq!(report.sessions_found, 0);
         assert!(report.state_roots.is_empty());

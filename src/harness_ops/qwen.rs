@@ -23,6 +23,8 @@ struct QwenDiscovery {
 
 pub(super) fn plan(
     context: &HarnessOpsContext,
+    old_path: &Path,
+    new_path: &Path,
     needles: &[String],
 ) -> Result<HarnessMigrationReport> {
     let roots = qwen_state_roots(context);
@@ -30,35 +32,43 @@ pub(super) fn plan(
 
     let mut edits = Vec::new();
     if discovery.config_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::QwenCode,
-            "rewrite_project_config_workspace_refs",
-            "~/.qwen/{projects,tmp,history}/*/config.json",
-            "",
-            "",
-            discovery.config_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::QwenCode,
+                "rewrite_project_config_workspace_refs",
+                context.qwen_base().display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.config_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_path_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_jsonl_field(
-            AgentKind::QwenCode,
-            "rewrite_chat_record_cwd_refs",
-            context.qwen_base(),
-            "$.cwd and path-bearing chat records under {projects,tmp,history}/*/chats",
-            "",
-            "",
-            discovery.session_path_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::QwenCode,
+                "rewrite_chat_record_cwd_refs",
+                context.qwen_base().display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.session_path_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.other_path_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::QwenCode,
-            "rewrite_auxiliary_state_refs",
-            "~/.qwen/{projects,tmp,history}",
-            "",
-            "",
-            discovery.other_path_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::QwenCode,
+                "rewrite_auxiliary_state_refs",
+                context.qwen_base().display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.other_path_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_files > 0 {
         edits.push(MigrationEdit::preserve_session_keyed_files(
@@ -96,7 +106,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::QwenCode,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         existing_roots,
         discovery.session_files,
         discovery.config_ref_files
@@ -232,10 +242,18 @@ mod tests {
             r#"{"uuid":"u1","sessionId":"qwen-session-2","type":"user","cwd":"/workspace/qwen-real-service"}"#,
         );
 
-        let report = plan(&context, &["/workspace/qwen-real-service".to_string()]).unwrap();
+        let source = PathBuf::from("/workspace/qwen-real-service");
+        let dest = PathBuf::from("/workspace/qwen-moved-service");
+        let report = plan(
+            &context,
+            &source,
+            &dest,
+            &["/workspace/qwen-real-service".to_string()],
+        )
+        .unwrap();
 
         assert_eq!(report.harness, AgentKind::QwenCode);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 2);
         assert_eq!(report.path_references_found, 2);
         assert!(report
@@ -245,7 +263,7 @@ mod tests {
         assert!(report
             .operations
             .iter()
-            .all(|operation| !operation.apply_ready));
+            .any(|operation| operation.apply_ready));
         assert!(report
             .operations
             .iter()

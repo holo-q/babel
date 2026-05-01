@@ -48,14 +48,17 @@ pub(super) fn plan(
 
     for scan in &discovery.thread_root_scans {
         if scan.path_ref_files > 0 {
-            edits.push(MigrationEdit::rewrite_text_refs(
-                AgentKind::Amp,
-                "rewrite_thread_path_refs",
-                scan.root.display().to_string(),
-                old_path.display().to_string(),
-                new_path.display().to_string(),
-                scan.path_ref_files,
-            ));
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Amp,
+                    "rewrite_thread_path_refs",
+                    scan.root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_ref_files,
+                )
+                .with_apply_ready(true),
+            );
         }
         if scan.thread_files > 0 {
             edits.push(MigrationEdit::preserve_session_keyed_files(
@@ -71,28 +74,39 @@ pub(super) fn plan(
     for history in &discovery.history_files {
         let scan = scan_text_refs(history, needles)?;
         if scan.path_references_found > 0 {
-            edits.push(MigrationEdit::rewrite_jsonl_field(
-                AgentKind::Amp,
-                "rewrite_history_cwd_refs",
-                history.clone(),
-                "$.cwd or line containing source path",
-                old_path.display().to_string(),
-                new_path.display().to_string(),
-                scan.path_references_found,
-            ));
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Amp,
+                    "rewrite_history_cwd_refs",
+                    history.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
         }
     }
 
-    let config_ref_count = discovery.config_path_ref_files + discovery.project_local_path_ref_files;
-    if config_ref_count > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Amp,
-            "rewrite_amp_config_refs",
-            "Amp user/workspace settings and session state",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            config_ref_count,
-        ));
+    for config in discovery
+        .config_files
+        .iter()
+        .chain(discovery.project_local_files.iter())
+    {
+        let scan = scan_text_refs(config, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Amp,
+                    "rewrite_amp_config_refs",
+                    config.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
     }
 
     if !discovery.project_local_files.is_empty() {
@@ -136,7 +150,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Amp,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         discovery.roots,
         discovery.matching_thread_files,
         path_references_found,
@@ -381,10 +395,10 @@ mod tests {
         let report = plan(&ctx, &old, &new, &needles).unwrap();
 
         assert_eq!(report.harness, AgentKind::Amp);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert_eq!(report.path_references_found, 3);
-        assert!(report.edits.iter().all(|edit| !edit.apply_ready));
+        assert!(report.edits.iter().any(|edit| edit.apply_ready));
         assert!(report
             .operations
             .iter()

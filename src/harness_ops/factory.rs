@@ -8,8 +8,8 @@ use anyhow::Result;
 use crate::agent_kind::AgentKind;
 
 use super::{
-    is_probably_text_state_file, text_file_contains_any, AdapterReadiness, HarnessMigrationReport,
-    HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    is_probably_text_state_file, scan_text_refs, text_file_contains_any, AdapterReadiness,
+    HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
 };
 
 const FACTORY_PROJECTS: &str = ".factory/projects";
@@ -66,35 +66,37 @@ pub(super) fn plan(
     state_roots.dedup();
 
     let mut edits = Vec::new();
-    if discovery.session_path_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::FactoryDroid,
-            "rewrite_transcript_path_refs",
-            "~/.factory/{projects,sessions}/<workspace>/<session>.jsonl",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.session_path_ref_files,
-        ));
+    for root in [&projects_root, &sessions_root] {
+        let scan = scan_text_refs(root, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::FactoryDroid,
+                    "rewrite_factory_session_refs",
+                    root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
     }
-    if discovery.settings_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::FactoryDroid,
-            "rewrite_session_settings_refs",
-            "~/.factory/{projects,sessions}/<workspace>/<session>.settings.json",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.settings_ref_files,
-        ));
-    }
-    if discovery.root_settings_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::FactoryDroid,
-            "rewrite_factory_settings_refs",
-            "~/.factory/settings*.json and <project>/.factory/settings.local.json",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.root_settings_ref_files,
-        ));
+    for settings in &root_settings {
+        let scan = scan_text_refs(settings, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::FactoryDroid,
+                    "rewrite_factory_settings_refs",
+                    settings.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
     }
 
     let mut notes = vec![
@@ -149,7 +151,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::FactoryDroid,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         state_roots,
         discovery.matched_sessions.len(),
         path_references_found,
@@ -376,18 +378,14 @@ mod tests {
         let report = plan(&ctx, &old, &new, &[old.display().to_string()]).unwrap();
 
         assert_eq!(report.harness, AgentKind::FactoryDroid);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert_eq!(report.path_references_found, 2);
-        assert!(report.operations.iter().all(|op| !op.apply_ready));
+        assert!(report.operations.iter().any(|op| op.apply_ready));
         assert!(report
             .operations
             .iter()
-            .any(|op| op.action == "rewrite_transcript_path_refs"));
-        assert!(report
-            .operations
-            .iter()
-            .any(|op| op.action == "rewrite_session_settings_refs"));
+            .any(|op| op.action == "rewrite_factory_session_refs"));
     }
 
     #[test]

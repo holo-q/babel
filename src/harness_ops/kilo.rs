@@ -96,20 +96,30 @@ pub(super) fn plan(
         }
     }
 
-    if path_references_found > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::KiloCode,
-            "rewrite_kilo_path_refs_after_manual_backup",
-            "VS Code globalStorage/kilocode.kilo-code JSON task/state files",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            path_references_found,
-        ));
+    for root in &existing_roots {
+        let scan = scan_text_refs(root, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::KiloCode,
+                    "rewrite_kilo_path_refs",
+                    root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
     }
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::KiloCode,
-        AdapterReadiness::DoctorOnly,
+        if path_references_found > 0 {
+            AdapterReadiness::ApplyReady
+        } else {
+            AdapterReadiness::DoctorOnly
+        },
         existing_roots,
         sessions_found,
         path_references_found,
@@ -181,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn kilo_reports_tasks_and_path_refs_without_apply() {
+    fn kilo_reports_tasks_and_path_refs_with_apply_ready_rewrite() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let old = home.join("Workspace/old");
@@ -205,11 +215,11 @@ mod tests {
         let report = plan(&ctx, &old, &new, &needles).unwrap();
 
         assert_eq!(report.harness, AgentKind::KiloCode);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert_eq!(report.path_references_found, 2);
         assert_eq!(report.state_roots, vec![root]);
-        assert!(report.operations.iter().all(|op| !op.apply_ready));
+        assert!(report.operations.iter().any(|op| op.apply_ready));
         assert!(report
             .operations
             .iter()

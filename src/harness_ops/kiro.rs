@@ -28,25 +28,21 @@ pub(super) fn plan(
     let discovery = discover(context, needles)?;
     let mut edits = Vec::new();
 
-    if discovery.ide_workspace_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Kiro,
-            "rewrite_ide_workspace_session_refs",
-            "Kiro IDE workspace-sessions JSON",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.ide_workspace_refs,
-        ));
-    }
-    if discovery.acp_session_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Kiro,
-            "rewrite_acp_session_refs",
-            "~/.kiro/sessions/cli JSON/JSONL",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.acp_session_refs,
-        ));
+    for root in &discovery.roots {
+        let scan = scan_text_refs(root, needles)?;
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Kiro,
+                    "rewrite_kiro_path_refs",
+                    root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true),
+            );
+        }
     }
 
     let mut notes = vec![
@@ -83,7 +79,7 @@ pub(super) fn plan(
     let path_references_found = discovery.ide_workspace_refs + discovery.acp_session_refs;
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Kiro,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         discovery.roots,
         sessions_found,
         path_references_found,

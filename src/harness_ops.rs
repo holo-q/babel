@@ -533,7 +533,7 @@ pub struct HarnessMigrationReport {
 }
 
 impl HarnessMigrationReport {
-    pub(super) fn from_edits(
+    pub fn from_edits(
         harness: AgentKind,
         readiness: AdapterReadiness,
         state_roots: Vec<PathBuf>,
@@ -684,9 +684,9 @@ pub fn plan_migration_with_context(
     )?);
     harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(qwen::plan(context, &path_needles)?);
+    harnesses.push(qwen::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(gemini::plan(context, &path_needles)?);
+    harnesses.push(gemini::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(crush::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(cursor::plan(context));
     harnesses.push(cline::plan(context, &old_abs, &new_abs, &path_needles)?);
@@ -694,7 +694,7 @@ pub fn plan_migration_with_context(
     harnesses.push(amp::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(kiro::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(github_copilot::plan(context, &path_needles, &mut risks)?);
-    harnesses.push(roo::plan(context, &path_needles)?);
+    harnesses.push(roo::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(kilo::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(aider::plan_for_source(&old_abs));
     harnesses.push(antigravity::plan(
@@ -761,12 +761,22 @@ fn plan_claude(
         Ok::<_, anyhow::Error>(count + count_jsonl_files(&candidate.path)?)
     })?;
     let history_refs = count_history_refs(&history_path, old_path)?;
-    let session_refs = session_keyed_roots.iter().try_fold(0, |count, root| {
-        Ok::<_, anyhow::Error>(count + scan_text_refs(root, needles)?.path_references_found)
-    })?;
-    let user_wide_refs = user_wide_files.iter().try_fold(0, |count, file| {
-        Ok::<_, anyhow::Error>(count + scan_text_refs(file, needles)?.path_references_found)
-    })?;
+    let session_root_scans = session_keyed_roots
+        .iter()
+        .map(|root| Ok((root.clone(), scan_text_refs(root, needles)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let user_wide_scans = user_wide_files
+        .iter()
+        .map(|file| Ok((file.clone(), scan_text_refs(file, needles)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let session_refs = session_root_scans
+        .iter()
+        .map(|(_, scan)| scan.path_references_found)
+        .sum::<usize>();
+    let user_wide_refs = user_wide_scans
+        .iter()
+        .map(|(_, scan)| scan.path_references_found)
+        .sum::<usize>();
     let mut edits = Vec::new();
     let mut notes = Vec::new();
 
@@ -778,13 +788,17 @@ fn plan_claude(
         else {
             continue;
         };
-        edits.push(MigrationEdit::rename_path(
-            AgentKind::Claude,
-            "rename_project_dir",
-            source.path.clone(),
-            dest.path.clone(),
-            format!("preserve {} Claude transcript file(s)", sessions_found),
-        ));
+        edits.push(
+            MigrationEdit::rename_path(
+                AgentKind::Claude,
+                "rename_project_dir",
+                source.path.clone(),
+                dest.path.clone(),
+                format!("preserve {} Claude transcript file(s)", sessions_found),
+            )
+            .with_apply_ready(true)
+            .with_recovery(RecoveryClass::SessionDependencyDir),
+        );
     }
 
     if existing_sources.is_empty() {
@@ -799,37 +813,53 @@ fn plan_claude(
     }
 
     if history_refs > 0 {
-        edits.push(MigrationEdit::rewrite_jsonl_field(
-            AgentKind::Claude,
-            "rewrite_history_paths",
-            history_path.clone(),
-            "$.project",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            history_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_jsonl_field(
+                AgentKind::Claude,
+                "rewrite_history_paths",
+                history_path.clone(),
+                "$.project",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                history_refs,
+            )
+            .with_apply_ready(true)
+            .with_recovery(RecoveryClass::SessionDependencyFile),
+        );
     }
 
-    if session_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Claude,
-            "rewrite_session_keyed_refs",
-            "~/.claude/{todos,usage-data,plugins/data,tasks}",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            session_refs,
-        ));
+    for (root, scan) in &session_root_scans {
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Claude,
+                    "rewrite_session_keyed_refs",
+                    root.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true)
+                .with_recovery(RecoveryClass::SessionDependencyDir),
+            );
+        }
     }
 
-    if user_wide_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Claude,
-            "rewrite_user_wide_refs",
-            "~/.claude.json and Claude plugin/settings files",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            user_wide_refs,
-        ));
+    for (file, scan) in &user_wide_scans {
+        if scan.path_references_found > 0 {
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Claude,
+                    "rewrite_user_wide_refs",
+                    file.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    scan.path_references_found,
+                )
+                .with_apply_ready(true)
+                .with_recovery(RecoveryClass::SessionDependencyFile),
+            );
+        }
     }
 
     for dest in dest_candidates
@@ -868,7 +898,7 @@ fn plan_claude(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Claude,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         state_roots,
         sessions_found,
         history_refs + session_refs + user_wide_refs,
@@ -1162,7 +1192,7 @@ mod tests {
         assert!(claude
             .operations
             .iter()
-            .any(|op| op.action == "rename_project_dir" && !op.apply_ready));
+            .any(|op| op.action == "rename_project_dir" && op.apply_ready));
         assert!(claude.edits.iter().any(|edit| {
             edit.action == "rename_project_dir"
                 && matches!(&edit.kind, MigrationEditKind::RenamePath { .. })
@@ -1170,7 +1200,7 @@ mod tests {
         assert!(claude
             .operations
             .iter()
-            .any(|op| op.action == "rewrite_history_paths" && !op.apply_ready));
+            .any(|op| op.action == "rewrite_history_paths" && op.apply_ready));
         assert!(claude.edits.iter().any(|edit| {
             edit.action == "rewrite_history_paths"
                 && matches!(&edit.kind, MigrationEditKind::RewriteJsonlField { .. })
@@ -1275,8 +1305,8 @@ mod tests {
             .unwrap();
         assert_eq!(codex.sessions_found, 1);
         assert_eq!(codex.path_references_found, 5);
-        assert!(matches!(codex.readiness, AdapterReadiness::DoctorOnly));
-        assert!(codex.operations.iter().all(|op| !op.apply_ready));
+        assert!(matches!(codex.readiness, AdapterReadiness::ApplyReady));
+        assert!(codex.operations.iter().any(|op| op.apply_ready));
         assert!(codex
             .operations
             .iter()

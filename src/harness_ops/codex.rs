@@ -58,68 +58,107 @@ pub(super) fn plan(
 
     let mut edits = Vec::new();
     if !discovery.matched_sessions.is_empty() {
-        edits.push(MigrationEdit::rewrite_jsonl_field(
-            AgentKind::Codex,
-            "rewrite_session_meta_cwd",
-            context.codex_sessions(),
-            "$.payload.cwd where $.type == \"session_meta\"",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.matched_sessions.len(),
-        ));
+        edits.push(
+            MigrationEdit::rewrite_jsonl_field(
+                AgentKind::Codex,
+                "rewrite_session_meta_cwd",
+                context.codex_sessions(),
+                "$.payload.cwd where $.type == \"session_meta\"",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.matched_sessions.len(),
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.config_toml_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_toml_table_key(
-            AgentKind::Codex,
-            "rewrite_project_config_keys",
-            context.codex_base().join("config.toml"),
-            "projects",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.config_toml_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_toml_table_key(
+                AgentKind::Codex,
+                "rewrite_project_config_keys",
+                context.codex_base().join("config.toml"),
+                "projects",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.config_toml_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
-    if discovery.config_json_ref_files > 0 || discovery.internal_storage_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Codex,
-            "rewrite_project_config_refs",
-            context.codex_base().display().to_string(),
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.config_json_ref_files + discovery.internal_storage_ref_files,
-        ));
+    if discovery.config_json_ref_files > 0 {
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Codex,
+                "rewrite_project_config_refs",
+                context
+                    .codex_base()
+                    .join("config.json")
+                    .display()
+                    .to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.config_json_ref_files,
+            )
+            .with_apply_ready(true),
+        );
+    }
+    if discovery.internal_storage_ref_files > 0 {
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Codex,
+                "rewrite_internal_storage_refs",
+                context
+                    .codex_base()
+                    .join("internal_storage.json")
+                    .display()
+                    .to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.internal_storage_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_path_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Codex,
-            "rewrite_session_path_refs",
-            context.codex_sessions().display().to_string(),
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.session_path_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Codex,
+                "rewrite_session_path_refs",
+                context.codex_sessions().display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.session_path_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.history_ref_entries > 0 {
-        edits.push(MigrationEdit::rewrite_jsonl_field(
-            AgentKind::Codex,
-            "rewrite_history_path_refs",
-            context.codex_base().join("history.jsonl"),
-            "line containing source path",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.history_ref_entries,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_jsonl_field(
+                AgentKind::Codex,
+                "rewrite_history_path_refs",
+                context.codex_base().join("history.jsonl"),
+                "line containing source path",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.history_ref_entries,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_index_ref_entries > 0 {
-        edits.push(MigrationEdit::rewrite_jsonl_field(
-            AgentKind::Codex,
-            "rewrite_session_index_path_refs",
-            context.codex_base().join("session_index.jsonl"),
-            "line containing source path",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.session_index_ref_entries,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_jsonl_field(
+                AgentKind::Codex,
+                "rewrite_session_index_path_refs",
+                context.codex_base().join("session_index.jsonl"),
+                "line containing source path",
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.session_index_ref_entries,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.shell_snapshot_files > 0 {
         edits.push(MigrationEdit::preserve_session_keyed_files(
@@ -180,7 +219,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Codex,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         state_roots,
         discovery.matched_sessions.len(),
         path_references_found,

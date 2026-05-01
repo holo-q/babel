@@ -94,37 +94,46 @@ pub(super) fn plan(
         let source_root = discovery.sessions_dir.join(&path_key.old_key);
         let dest_root = discovery.sessions_dir.join(&path_key.new_key);
         if source_root.exists() {
-            edits.push(MigrationEdit::rename_path(
-                AgentKind::Kimi,
-                "rename_workdir_session_root",
-                source_root,
-                dest_root,
-                format!(
-                    "preserve Kimi session-id directories under workdir key {}",
-                    path_key.old_key
-                ),
-            ));
+            edits.push(
+                MigrationEdit::rename_path(
+                    AgentKind::Kimi,
+                    "rename_workdir_session_root",
+                    source_root,
+                    dest_root,
+                    format!(
+                        "preserve Kimi session-id directories under workdir key {}",
+                        path_key.old_key
+                    ),
+                )
+                .with_apply_ready(true),
+            );
         }
     }
     if discovery.config_path_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Kimi,
-            "rewrite_workdir_registry",
-            discovery.config_path.display().to_string(),
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.config_path_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Kimi,
+                "rewrite_workdir_registry",
+                discovery.config_path.display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.config_path_refs,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_path_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Kimi,
-            "rewrite_session_path_refs",
-            discovery.sessions_dir.display().to_string(),
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.session_path_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Kimi,
+                "rewrite_session_path_refs",
+                discovery.sessions_dir.display().to_string(),
+                old_path.display().to_string(),
+                new_path.display().to_string(),
+                discovery.session_path_refs,
+            )
+            .with_apply_ready(true),
+        );
     }
     if !discovery.matched_sessions.is_empty() {
         edits.push(MigrationEdit::preserve_session_keyed_files(
@@ -187,7 +196,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Kimi,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         state_roots,
         discovery.matched_sessions.len(),
         discovery.path_references_found,
@@ -469,17 +478,17 @@ mod tests {
         let report = plan(&ctx, &old, &new, &[old.display().to_string()]).unwrap();
 
         assert_eq!(report.harness, AgentKind::Kimi);
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert!(report.path_references_found >= 2);
         assert!(report
             .edits
             .iter()
-            .any(|edit| edit.action == "rename_workdir_session_root" && !edit.apply_ready));
+            .any(|edit| edit.action == "rename_workdir_session_root" && edit.apply_ready));
         assert!(report
             .edits
             .iter()
-            .any(|edit| edit.action == "rewrite_workdir_registry" && !edit.apply_ready));
+            .any(|edit| edit.action == "rewrite_workdir_registry" && edit.apply_ready));
         assert!(report
             .notes
             .iter()

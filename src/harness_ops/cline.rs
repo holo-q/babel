@@ -7,8 +7,8 @@ use anyhow::Result;
 use crate::agent_kind::AgentKind;
 
 use super::{
-    text_file_contains_any, AdapterReadiness, HarnessMigrationReport, HarnessOpsContext,
-    MigrationEdit, MAX_SCAN_FILES,
+    scan_text_refs, text_file_contains_any, AdapterReadiness, HarnessMigrationReport,
+    HarnessOpsContext, MigrationEdit, MAX_SCAN_FILES,
 };
 
 const CLINE_EXTENSION_ID: &str = "saoudrizwan.claude-dev";
@@ -54,46 +54,41 @@ pub(super) fn plan(
     let mut edits = Vec::new();
     for task_history in &discovery.task_history_files {
         if file_contains_any(task_history, needles)? {
-            edits.push(MigrationEdit::rewrite_text_refs(
-                AgentKind::Cline,
-                "rewrite_task_history_workspace_refs",
-                task_history.display().to_string(),
-                old_path.display().to_string(),
-                new_path.display().to_string(),
-                1,
-            ));
+            edits.push(
+                MigrationEdit::rewrite_text_refs(
+                    AgentKind::Cline,
+                    "rewrite_task_history_workspace_refs",
+                    task_history.display().to_string(),
+                    old_path.display().to_string(),
+                    new_path.display().to_string(),
+                    1,
+                )
+                .with_apply_ready(true),
+            );
         }
     }
 
-    if discovery.task_metadata_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Cline,
-            "rewrite_task_metadata_workspace_refs",
-            "Cline tasks/*/task_metadata.json",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.task_metadata_ref_files,
-        ));
-    }
-    if discovery.transcript_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Cline,
-            "rewrite_task_transcript_path_refs",
-            "Cline tasks/*/{ui_messages.json,api_conversation_history.json,claude_messages.json}",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.transcript_ref_files,
-        ));
-    }
-    if discovery.other_task_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Cline,
-            "rewrite_task_companion_path_refs",
-            "Cline tasks/*/history_item.json and companion task files",
-            old_path.display().to_string(),
-            new_path.display().to_string(),
-            discovery.other_task_ref_files,
-        ));
+    if discovery.task_metadata_ref_files
+        + discovery.transcript_ref_files
+        + discovery.other_task_ref_files
+        > 0
+    {
+        for tasks_root in &discovery.tasks_roots {
+            let scan = scan_text_refs(tasks_root, needles)?;
+            if scan.path_references_found > 0 {
+                edits.push(
+                    MigrationEdit::rewrite_text_refs(
+                        AgentKind::Cline,
+                        "rewrite_cline_task_refs",
+                        tasks_root.display().to_string(),
+                        old_path.display().to_string(),
+                        new_path.display().to_string(),
+                        scan.path_references_found,
+                    )
+                    .with_apply_ready(true),
+                );
+            }
+        }
     }
     for tasks_root in &discovery.tasks_roots {
         let matched_under_root = discovery
@@ -154,7 +149,11 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Cline,
-        AdapterReadiness::DoctorOnly,
+        if path_references_found > 0 {
+            AdapterReadiness::ApplyReady
+        } else {
+            AdapterReadiness::DoctorOnly
+        },
         state_roots,
         discovery.matched_task_dirs.len(),
         path_references_found,
@@ -468,10 +467,10 @@ mod tests {
         fs::create_dir_all(home.join(".config/Code/User/workspaceStorage")).unwrap();
 
         let report = plan(&ctx, &old, &new, &[old.display().to_string()]).unwrap();
-        assert!(matches!(report.readiness, AdapterReadiness::DoctorOnly));
+        assert!(matches!(report.readiness, AdapterReadiness::ApplyReady));
         assert_eq!(report.sessions_found, 1);
         assert_eq!(report.path_references_found, 3);
-        assert!(report.operations.iter().all(|op| !op.apply_ready));
+        assert!(report.operations.iter().any(|op| op.apply_ready));
         assert!(report
             .operations
             .iter()

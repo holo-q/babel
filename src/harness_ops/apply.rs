@@ -638,7 +638,7 @@ fn jsonl_targets(path: &Path) -> Result<Vec<PathBuf>> {
 
 fn text_targets(path: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    if path.is_file() {
+    if path.is_file() && is_probably_text_migration_file(path) {
         files.push(path.to_path_buf());
         return Ok(files);
     }
@@ -653,12 +653,47 @@ fn text_targets(path: &Path) -> Result<Vec<PathBuf>> {
             let metadata = fs::symlink_metadata(&path)?;
             if metadata.is_dir() {
                 stack.push(path);
-            } else if metadata.is_file() {
+            } else if metadata.is_file() && is_probably_text_migration_file(&path) {
                 files.push(path);
             }
         }
     }
     Ok(files)
+}
+
+fn is_probably_text_migration_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(
+            "json"
+                | "jsonl"
+                | "toml"
+                | "yaml"
+                | "yml"
+                | "md"
+                | "txt"
+                | "log"
+                | "history"
+                | "tsx"
+                | "ts"
+                | "jsx"
+                | "js"
+                | "py"
+                | "rs"
+                | "sh"
+                | "fish"
+                | "zsh"
+                | "bash"
+        )
+    ) || path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "config" | "history" | "settings" | "state" | "taskHistory"
+            )
+        })
 }
 
 fn rewrite_jsonl_file(

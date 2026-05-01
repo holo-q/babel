@@ -1,14 +1,19 @@
 //! Project migration command.
 //!
-//! Mutation is intentionally disabled here. `babel mv --doctor` is the current
-//! supported surface: it inspects native harness storage and reports the
-//! migration graph without moving files.
+//! Project moves are executed through the universal migration planner plus the
+//! transaction executor. Harness adapters only describe typed storage edits; the
+//! executor owns backup, verification, and rollback.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use claude_babel::agent_kind::AgentKind;
 use claude_babel::core::BabelCore;
+use claude_babel::harness_ops::{
+    apply_migration_plan, plan_migration, AdapterReadiness, HarnessMigrationReport,
+    MigrationApplyOptions, MigrationEdit, RecoveryClass, RiskSeverity,
+};
 
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let path_str = path.to_string_lossy();
@@ -31,23 +36,95 @@ pub fn resolve_destination(source: &Path, dest: &Path) -> PathBuf {
 }
 
 pub async fn cmd_mv(
-    _core: &mut BabelCore,
+    core: &mut BabelCore,
     source: PathBuf,
     dest: PathBuf,
-    _dry_run: bool,
-    _history_only: bool,
-    _anxious: bool,
-    _force: bool,
-    _json: bool,
+    dry_run: bool,
+    history_only: bool,
+    anxious: bool,
+    force: bool,
+    json: bool,
 ) -> Result<()> {
     let source = expand_tilde(&source);
     let dest = resolve_destination(&source, &expand_tilde(&dest));
-    bail!(
-        "babel mv apply is not available yet.\n\
-         Run `babel mv --doctor {} {}` to inspect the migration plan. No files or harness state were changed.",
-        source.display(),
-        dest.display()
-    )
+
+    if anxious {
+        bail!("babel mv --anxious is not implemented for the universal migration executor yet");
+    }
+
+    let panes = core.panes().await?;
+    let live_panes = super::doctor::live_panes_from_panes(&source, panes);
+    let mut plan = plan_migration(&source, &dest, live_panes)?;
+
+    if plan.has_blockers() && !force {
+        let blockers = plan
+            .risks
+            .iter()
+            .filter(|risk| matches!(risk.severity, RiskSeverity::Blocker))
+            .map(|risk| risk.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "babel mv blocked by migration risks:\n{}\nRun `babel mv --doctor {} {}` for the full report.",
+            blockers,
+            source.display(),
+            dest.display()
+        );
+    }
+
+    if !history_only {
+        plan.harnesses.push(HarnessMigrationReport::from_edits(
+            AgentKind::Other,
+            AdapterReadiness::ApplyReady,
+            vec![source.clone()],
+            0,
+            0,
+            vec![MigrationEdit::rename_path(
+                AgentKind::Other,
+                "move_project_directory",
+                source.clone(),
+                dest.clone(),
+                "move source project directory",
+            )
+            .with_apply_ready(true)
+            .with_recovery(RecoveryClass::OwnedDir)],
+            Vec::new(),
+        ));
+    }
+
+    let report = apply_migration_plan(
+        &plan,
+        &MigrationApplyOptions {
+            dry_run,
+            force: false,
+            transaction_root: None,
+        },
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "babel mv --dry: {} executor-owned edit(s) are apply-ready",
+            report.edits_apply_ready
+        );
+    } else {
+        println!(
+            "babel mv: applied {} edit(s), verified {}",
+            report.applied.len(),
+            report.verified.len()
+        );
+        if let Some(path) = report.manifest_path {
+            println!("manifest: {}", path.display());
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!("preserved/skipped: {}", report.skipped.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

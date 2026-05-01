@@ -33,6 +33,8 @@ struct GeminiSession {
 
 pub(super) fn plan(
     context: &HarnessOpsContext,
+    old_path: &Path,
+    new_path: &Path,
     needles: &[String],
 ) -> Result<HarnessMigrationReport> {
     let base = gemini_base(context);
@@ -64,8 +66,29 @@ pub(super) fn plan(
     state_roots.dedup();
 
     let mut edits = Vec::new();
-    let source = needles.first().cloned().unwrap_or_default();
-    let destination_gap = "<destination path unavailable to gemini adapter>";
+    let source = old_path.display().to_string();
+    let destination = new_path.display().to_string();
+    let old_hash = sha256_hex(source.as_bytes());
+    let new_hash = sha256_hex(destination.as_bytes());
+
+    for root in [tmp.join(&old_hash), history.join(&old_hash)] {
+        if root.exists() {
+            let dest_root = root
+                .parent()
+                .map(|parent| parent.join(&new_hash))
+                .unwrap_or_else(|| root.with_file_name(&new_hash));
+            edits.push(
+                MigrationEdit::rename_path(
+                    AgentKind::Gemini,
+                    "rename_project_hash_root",
+                    root,
+                    dest_root,
+                    "preserve Gemini hash-keyed project state",
+                )
+                .with_apply_ready(true),
+            );
+        }
+    }
 
     if !discovery.matched_sessions.is_empty() {
         let mut roots = discovery
@@ -93,44 +116,56 @@ pub(super) fn plan(
     }
 
     if discovery.project_registry_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Gemini,
-            "rewrite_project_registry_refs",
-            projects_json.display().to_string(),
-            source.clone(),
-            destination_gap,
-            discovery.project_registry_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Gemini,
+                "rewrite_project_registry_refs",
+                projects_json.display().to_string(),
+                source.clone(),
+                destination.clone(),
+                discovery.project_registry_refs,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.settings_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Gemini,
-            "rewrite_settings_refs",
-            settings_json.display().to_string(),
-            source.clone(),
-            destination_gap,
-            discovery.settings_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Gemini,
+                "rewrite_settings_refs",
+                settings_json.display().to_string(),
+                source.clone(),
+                destination.clone(),
+                discovery.settings_refs,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.history_refs > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Gemini,
-            "rewrite_history_refs",
-            history.display().to_string(),
-            source.clone(),
-            destination_gap,
-            discovery.history_refs,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Gemini,
+                "rewrite_history_refs",
+                history.display().to_string(),
+                source.clone(),
+                destination.clone(),
+                discovery.history_refs,
+            )
+            .with_apply_ready(true),
+        );
     }
     if discovery.session_ref_files > 0 {
-        edits.push(MigrationEdit::rewrite_text_refs(
-            AgentKind::Gemini,
-            "rewrite_session_path_refs",
-            tmp.display().to_string(),
-            source,
-            destination_gap,
-            discovery.session_ref_files,
-        ));
+        edits.push(
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Gemini,
+                "rewrite_session_path_refs",
+                tmp.display().to_string(),
+                source,
+                destination,
+                discovery.session_ref_files,
+            )
+            .with_apply_ready(true),
+        );
     }
 
     let mut notes = vec![
@@ -187,7 +222,7 @@ pub(super) fn plan(
 
     Ok(HarnessMigrationReport::from_edits(
         AgentKind::Gemini,
-        AdapterReadiness::DoctorOnly,
+        AdapterReadiness::ApplyReady,
         state_roots,
         discovery.matched_sessions.len(),
         path_references_found,
@@ -732,7 +767,8 @@ mod tests {
         .unwrap();
 
         let context = HarnessOpsContext::from_home(home.to_path_buf());
-        let report = plan(&context, &[source_str]).unwrap();
+        let dest = home.join("moved/project");
+        let report = plan(&context, &source, &dest, &[source_str]).unwrap();
 
         assert_eq!(report.sessions_found, 2);
         assert!(report.path_references_found >= 2);

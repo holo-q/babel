@@ -395,7 +395,7 @@ pub async fn cmd_migration_doctor(
     Ok(())
 }
 
-fn live_panes_from_panes(source: &Path, panes: Vec<AgentPane>) -> Vec<LivePaneImpact> {
+pub(super) fn live_panes_from_panes(source: &Path, panes: Vec<AgentPane>) -> Vec<LivePaneImpact> {
     let source = source
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(source));
