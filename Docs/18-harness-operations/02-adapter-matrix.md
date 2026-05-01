@@ -30,6 +30,7 @@ Storage facts:
 - `~/.codex/session_index.jsonl`
 - `~/.codex/shell_snapshots`
 - `~/.codex/state_*.sqlite`
+- configured SQLite home from `CODEX_SQLITE_HOME` or `config.toml` `sqlite_home`
 
 Required move operations:
 
@@ -124,4 +125,3 @@ Storage facts:
 - project-local `.aider*` files
 
 Move usually preserves state by moving the project directory itself.
-

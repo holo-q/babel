@@ -15,8 +15,9 @@ Current Codex native resume is split:
 
 - rollout JSONL under `~/.codex/sessions` carries transcript items, turn
   context, collaboration mode, plan deltas, and path-bearing metadata
-- `~/.codex/state_*.sqlite` carries the thread index used for list/resume,
-  including `threads.cwd`
+- `state_*.sqlite` carries the thread index used for list/resume, including
+  `threads.cwd`; its root is `config.toml` `sqlite_home` when set, then
+  `CODEX_SQLITE_HOME`, otherwise `~/.codex`
 - `thread_goals` is keyed by `thread_id`; it does not need a project-path rewrite
   for a directory move
 
@@ -28,6 +29,8 @@ Relevant upstream files:
 - `codex-rs/rollout/src/state_db.rs`
 - `codex-rs/rollout/src/session_index.rs`
 - `codex-rs/rollout/src/metadata.rs`
+- `codex-rs/config/src/config_toml.rs`
+- `codex-rs/state/src/lib.rs`
 - `codex-rs/state/migrations/0001_threads.sql`
 - `codex-rs/state/migrations/0027_threads_cwd_sort_indexes.sql`
 - `codex-rs/state/migrations/0029_thread_goals.sql`
@@ -38,7 +41,9 @@ Relevant upstream files:
 ## Operation: Codex Move
 
 Codex move support must preserve rollout files and rewrite both
-`session_meta.payload.cwd` and `state_*.sqlite:threads.cwd`.
+`session_meta.payload.cwd` and `state_*.sqlite:threads.cwd`. The SQLite scan
+must follow the configured SQLite root, not just `~/.codex`, because first-party
+source allows the thread index to be split from the transcript/config home.
 
 `session_index.jsonl` is append-only id/name metadata and does not carry cwd.
 It is not a project move rewrite target.
@@ -53,4 +58,3 @@ the rollout JSONL is the correct layer.
 `thread_goals` is a separate SQLite table keyed by `thread_id`. It may matter
 for goal UX, but it is not path-keyed. Because thread ids remain unchanged, the
 table moves with the Codex state DB without a cwd rewrite.
-

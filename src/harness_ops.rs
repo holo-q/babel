@@ -6,6 +6,7 @@
 //! any future cache must be rebuildable from these adapters.
 
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -44,17 +45,22 @@ const LARGE_FILE_SAMPLE_BYTES: usize = 512 * 1024;
 #[derive(Debug, Clone)]
 pub struct HarnessOpsContext {
     pub home: PathBuf,
+    codex_sqlite_home_env: Option<PathBuf>,
 }
 
 impl HarnessOpsContext {
     pub fn from_home(home: PathBuf) -> Self {
-        Self { home }
+        Self {
+            home,
+            codex_sqlite_home_env: None,
+        }
     }
 
     pub fn system() -> Result<Self> {
         Ok(Self {
             home: dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?,
+            codex_sqlite_home_env: env::var_os("CODEX_SQLITE_HOME").map(PathBuf::from),
         })
     }
 
@@ -76,6 +82,10 @@ impl HarnessOpsContext {
 
     pub(super) fn codex_shell_snapshots(&self) -> PathBuf {
         self.home.join(".codex/shell_snapshots")
+    }
+
+    pub(super) fn codex_sqlite_home_env(&self) -> Option<PathBuf> {
+        self.codex_sqlite_home_env.clone()
     }
 
     pub(super) fn qwen_base(&self) -> PathBuf {
@@ -1349,13 +1359,15 @@ mod tests {
         write_file(
             &ctx.codex_base().join("config.toml"),
             &format!(
-                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-                old.display()
+                "sqlite_home = \"{}\"\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                ctx.codex_base().join("sqlite-home").display(),
+                old.display(),
             ),
         );
         {
-            fs::create_dir_all(ctx.codex_base()).unwrap();
-            let conn = rusqlite::Connection::open(ctx.codex_base().join("state_5.sqlite")).unwrap();
+            let state_db = ctx.codex_base().join("sqlite-home/state_5.sqlite");
+            fs::create_dir_all(state_db.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&state_db).unwrap();
             conn.execute(
                 "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT NOT NULL)",
                 [],
@@ -1405,7 +1417,9 @@ mod tests {
         assert!(codex
             .operations
             .iter()
-            .any(|op| op.action == "rewrite_thread_index_cwd" && op.apply_ready));
+            .any(|op| op.action == "rewrite_thread_index_cwd"
+                && op.target.ends_with(".codex/sqlite-home/state_5.sqlite")
+                && op.apply_ready));
         assert!(codex.edits.iter().any(|edit| {
             edit.action == "rewrite_thread_index_cwd"
                 && matches!(

@@ -25,3 +25,4 @@ authoritative; any generated index must be rebuildable.
 - [Adapter Matrix](18-harness-operations/02-adapter-matrix.md)
 - [Codex Upstream Verification](18-harness-operations/03-codex-upstream.md)
 - [Reference Ledger](18-harness-operations/04-reference-ledger.md)
+- [Codex IO Surface](18-harness-operations/05-codex-io-surface.md)

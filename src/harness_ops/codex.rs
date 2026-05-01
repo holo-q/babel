@@ -303,22 +303,58 @@ fn collect_state_db_thread_refs(
 }
 
 fn codex_state_dbs(context: &HarnessOpsContext) -> Result<Vec<PathBuf>> {
-    let base = context.codex_base();
-    if !base.exists() {
-        return Ok(Vec::new());
-    }
+    let mut roots = codex_sqlite_roots(context);
     let mut paths = Vec::new();
-    for entry in fs::read_dir(base)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    for root in roots.drain(..) {
+        if !root.exists() {
             continue;
-        };
-        if name.starts_with("state_") && name.ends_with(".sqlite") {
-            paths.push(path);
+        }
+        for entry in fs::read_dir(root)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("state_") && name.ends_with(".sqlite") {
+                paths.push(path);
+            }
         }
     }
     paths.sort();
+    paths.dedup();
     Ok(paths)
+}
+
+fn codex_sqlite_roots(context: &HarnessOpsContext) -> Vec<PathBuf> {
+    let codex_base = context.codex_base();
+    let mut roots = vec![codex_base.clone()];
+    if let Some(root) = codex_sqlite_home_from_config(&codex_base.join("config.toml"), &codex_base)
+    {
+        roots.push(root);
+    }
+    if let Some(root) = context.codex_sqlite_home_env() {
+        roots.push(normalize_codex_sqlite_home(root, &codex_base));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn codex_sqlite_home_from_config(config_path: &Path, codex_base: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(config_path).ok()?;
+    let value = text.parse::<toml::Value>().ok()?;
+    let sqlite_home = value.get("sqlite_home")?.as_str()?;
+    Some(normalize_codex_sqlite_home(
+        PathBuf::from(sqlite_home),
+        codex_base,
+    ))
+}
+
+fn normalize_codex_sqlite_home(path: PathBuf, codex_base: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        codex_base.join(path)
+    }
 }
 
 fn count_threads_cwd_refs(path: &Path, needles: &[String]) -> Result<usize> {
