@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -99,6 +99,7 @@ struct MigrationTransaction {
     dir: PathBuf,
     manifest_path: PathBuf,
     manifest: TransactionManifest,
+    print_progress: bool,
 }
 
 impl MigrationTransaction {
@@ -124,6 +125,7 @@ impl MigrationTransaction {
         let tx = Self {
             dir,
             manifest_path,
+            print_progress: options.print_progress,
             manifest: TransactionManifest {
                 id,
                 status: TransactionStatus::Planned,
@@ -140,6 +142,12 @@ impl MigrationTransaction {
         };
         tx.flush()?;
         Ok(tx)
+    }
+
+    fn progress(&self, message: impl AsRef<str>) {
+        if self.print_progress {
+            println!("    · {}", message.as_ref());
+        }
     }
 
     fn set_status(&mut self, status: TransactionStatus) -> Result<()> {
@@ -174,6 +182,15 @@ impl MigrationTransaction {
                 "{}-{}",
                 self.manifest.backups.len(),
                 backup_leaf(path)
+            ));
+            self.progress(format!(
+                "snapshot {} ({})",
+                path.display(),
+                human_bytes(
+                    fs::metadata(path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0)
+                )
             ));
             fs::copy(path, &backup).with_context(|| {
                 format!(
@@ -610,6 +627,14 @@ fn apply_rename_path(
         dest_exists = to.exists(),
         "mv.apply: rename transition"
     );
+    if !from.exists() && to.exists() {
+        report.skipped.push(format!(
+            "{label}: already applied; source missing and destination exists: {} -> {}",
+            from.display(),
+            to.display()
+        ));
+        return Ok(false);
+    }
     if !from.exists() {
         report.blockers.push(format!(
             "{label}: source does not exist: {}",
@@ -671,8 +696,19 @@ fn apply_jsonl_rewrite(
         return Ok(false);
     }
 
+    let total = files.len();
     let mut changed = 0;
-    for file in files {
+    for (index, file) in files.into_iter().enumerate() {
+        let size = file_size(&file)?;
+        if total > 1 || size >= 16 * 1024 * 1024 {
+            tx.progress(format!(
+                "jsonl {}/{} {} ({})",
+                index + 1,
+                total,
+                file.display(),
+                human_bytes(size)
+            ));
+        }
         changed += rewrite_jsonl_file(&file, selector, from, to, tx)
             .with_context(|| format!("failed to rewrite {}", file.display()))?;
     }
@@ -1158,20 +1194,30 @@ fn rewrite_jsonl_file(
 ) -> Result<usize> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
-    let mut updated_lines = Vec::new();
+    let tmp = atomic_temp_path(path)?;
+    let mut writer = BufWriter::new(
+        fs::File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?,
+    );
     let mut changed = 0;
 
     for line in reader.lines() {
         let line = line?;
         let (updated, did_change) = rewrite_jsonl_line(&line, selector, from, to)?;
         changed += usize::from(did_change);
-        updated_lines.push(updated);
+        writer.write_all(updated.as_bytes())?;
+        writer.write_all(b"\n")?;
     }
+    writer.flush()?;
+    writer
+        .get_ref()
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", tmp.display()))?;
+    drop(writer);
 
     if changed > 0 {
-        let mut content = updated_lines.join("\n");
-        content.push('\n');
-        write_file_atomic_tx(path, content.as_bytes(), tx)?;
+        promote_rewrite_temp_tx(path, &tmp, tx)?;
+    } else if tmp.exists() {
+        fs::remove_file(&tmp).with_context(|| format!("failed to remove {}", tmp.display()))?;
     }
     Ok(changed)
 }
@@ -1303,6 +1349,20 @@ fn write_file_atomic_tx(path: &Path, content: &[u8], tx: &mut MigrationTransacti
     tx.mark_file_after(snapshot)
 }
 
+fn promote_rewrite_temp_tx(path: &Path, tmp: &Path, tx: &mut MigrationTransaction) -> Result<()> {
+    let original = FileMetadataStamp::read(path)?;
+    let snapshot = tx.snapshot_file(path)?;
+    fs::rename(tmp, path).with_context(|| {
+        format!(
+            "failed to promote rewrite {} -> {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+    original.restore(path)?;
+    tx.mark_file_after(snapshot)
+}
+
 struct FileMetadataStamp {
     permissions: Option<fs::Permissions>,
     accessed: Option<FileTime>,
@@ -1350,17 +1410,9 @@ impl FileMetadataStamp {
 }
 
 fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    let parent = path_parent(path)?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let tmp = parent.join(format!(
-        ".{}.babel-mv-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("state"),
-        std::process::id()
-    ));
+    let tmp = atomic_temp_path(path)?;
     {
         let mut file = fs::File::create(&tmp)
             .with_context(|| format!("failed to create {}", tmp.display()))?;
@@ -1375,6 +1427,44 @@ fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn atomic_temp_path(path: &Path) -> Result<PathBuf> {
+    let parent = path_parent(path)?;
+    Ok(parent.join(format!(
+        ".{}.babel-mv-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state"),
+        std::process::id()
+    )))
+}
+
+fn path_parent(path: &Path) -> Result<&Path> {
+    path.parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))
+}
+
+fn file_size(path: &Path) -> Result<u64> {
+    Ok(fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
 }
 
 fn rollback_record(record: &BackupRecord) -> Result<()> {

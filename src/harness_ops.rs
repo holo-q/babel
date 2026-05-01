@@ -1012,6 +1012,11 @@ fn plan_claude(
         );
     }
 
+    let existing_destinations: Vec<_> = dest_candidates
+        .iter()
+        .filter(|candidate| candidate.path.exists())
+        .collect();
+
     if existing_sources.is_empty() {
         notes.push(format!(
             "Claude project directory not found; probed keys: {}",
@@ -1021,6 +1026,16 @@ fn plan_claude(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        if !existing_destinations.is_empty() {
+            notes.push(format!(
+                "Claude destination project key already exists; treating project rename as already applied: {}",
+                existing_destinations
+                    .iter()
+                    .map(|candidate| candidate.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
 
     if history_refs > 0 {
@@ -1073,19 +1088,25 @@ fn plan_claude(
         }
     }
 
-    for dest in dest_candidates
-        .iter()
-        .filter(|candidate| candidate.path.exists())
-    {
-        risks.push(MigrationRisk {
-            severity: RiskSeverity::Blocker,
-            harness: Some(AgentKind::Claude),
-            message: format!(
-                "Claude destination project folder already exists for {} key: {}",
-                dest.scheme,
-                dest.path.display()
-            ),
-        });
+    for source in &existing_sources {
+        let Some(dest) = dest_candidates
+            .iter()
+            .find(|candidate| candidate.scheme == source.scheme)
+            .or_else(|| dest_candidates.first())
+        else {
+            continue;
+        };
+        if dest.path.exists() {
+            risks.push(MigrationRisk {
+                severity: RiskSeverity::Blocker,
+                harness: Some(AgentKind::Claude),
+                message: format!(
+                    "Claude destination project folder already exists for {} key: {}",
+                    dest.scheme,
+                    dest.path.display()
+                ),
+            });
+        }
     }
 
     if source_candidates
@@ -1446,6 +1467,11 @@ mod tests {
         fs::create_dir_all(&old).unwrap();
 
         let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+        let old_project = ctx
+            .claude_base()
+            .join("projects")
+            .join(claude_encode_cc_port(&old));
+        fs::create_dir_all(old_project).unwrap();
         let new_project = ctx
             .claude_base()
             .join("projects")
@@ -1462,6 +1488,39 @@ mod tests {
             .risks
             .iter()
             .any(|risk| risk.message.contains("destination project folder")));
+    }
+
+    #[test]
+    fn doctor_treats_existing_claude_destination_as_already_applied_when_source_key_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let old = home.join("repositories/oomfi");
+        let new = home.join("repo-py/oomfi");
+        fs::create_dir_all(&old).unwrap();
+
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+        let new_project = ctx
+            .claude_base()
+            .join("projects")
+            .join(claude_encode_cc_port(&new));
+        write_file(&new_project.join("session-a.jsonl"), "{}\n");
+
+        let report = plan_migration_with_context(&ctx, &old, &new, Vec::new()).unwrap();
+        let claude = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Claude)
+            .unwrap();
+
+        assert!(!report.has_blockers());
+        assert!(!claude
+            .edits
+            .iter()
+            .any(|edit| edit.action == "rename_project_dir"));
+        assert!(claude
+            .notes
+            .iter()
+            .any(|note| note.contains("already applied")));
     }
 
     #[test]
@@ -2201,6 +2260,59 @@ mod tests {
         assert!(!apply.has_blockers());
         assert!(apply.manifest_path.is_none());
         assert_eq!(apply.skipped.len(), 1);
+    }
+
+    #[test]
+    fn generic_apply_treats_completed_rename_as_idempotent_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old-project-key");
+        let new = root.join("new-project-key");
+        fs::create_dir_all(&new).unwrap();
+
+        let edit = MigrationEdit::rename_path(
+            AgentKind::Claude,
+            "rename_project_dir",
+            old.clone(),
+            new.clone(),
+            "preserve Claude transcript files",
+        )
+        .with_apply_ready(true)
+        .with_recovery(RecoveryClass::SessionDependencyDir);
+        let report = MigrationDoctorReport {
+            old_path: old,
+            new_path: new,
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Claude,
+                AdapterReadiness::ApplyReady,
+                vec![root.to_path_buf()],
+                0,
+                0,
+                vec![edit],
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+                print_progress: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!apply.has_blockers());
+        assert!(apply.verified.is_empty());
+        assert!(apply
+            .skipped
+            .iter()
+            .any(|line| line.contains("already applied")));
     }
 
     #[test]
