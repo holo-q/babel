@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags};
@@ -24,7 +24,8 @@ struct CodexDiscovery {
     config_toml_ref_files: usize,
     config_json_ref_files: usize,
     internal_storage_ref_files: usize,
-    state_db_thread_refs: Vec<(PathBuf, usize)>,
+    state_db_thread_refs: Vec<CodexStateDbThreadRef>,
+    state_db_rollout_cwd_misses: usize,
     shell_snapshot_files: usize,
     shell_snapshot_ref_files: usize,
     files_scanned: usize,
@@ -35,9 +36,16 @@ struct CodexDiscovery {
 
 #[derive(Default)]
 struct CodexStateDbDiscovery {
-    refs: Vec<(PathBuf, usize)>,
+    refs: Vec<CodexStateDbThreadRef>,
     sessions: Vec<CodexSession>,
     dbs_seen: usize,
+    rollout_cwd_misses: usize,
+}
+
+struct CodexStateDbThreadRef {
+    path: PathBuf,
+    stored_cwd: String,
+    count: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +61,9 @@ pub(super) enum CodexDiscoveryMode {
 struct CodexSession {
     id: String,
     path: PathBuf,
+    selector: &'static str,
+    action: &'static str,
+    stored_cwd: String,
 }
 
 pub(super) fn plan(
@@ -78,28 +89,33 @@ pub(super) fn plan(
         discovery
             .state_db_thread_refs
             .iter()
-            .map(|(path, _)| path.clone()),
+            .map(|reference| reference.path.clone()),
     );
     state_roots.retain(|path| path.exists());
     state_roots.sort();
     state_roots.dedup();
 
     let mut edits = Vec::new();
-    if !discovery.matched_sessions.is_empty() {
+    let mut session_cwd_groups =
+        BTreeMap::<(&'static str, &'static str, String), (BTreeSet<PathBuf>, usize)>::new();
+    for session in &discovery.matched_sessions {
+        let entry = session_cwd_groups
+            .entry((session.action, session.selector, session.stored_cwd.clone()))
+            .or_default();
+        entry.0.insert(session.path.clone());
+        entry.1 += 1;
+    }
+    for ((action, selector, stored_cwd), (files, count)) in session_cwd_groups {
         edits.push(
             MigrationEdit::rewrite_jsonl_field_in_files(
                 AgentKind::Codex,
-                "rewrite_session_meta_cwd",
+                action,
                 context.codex_sessions(),
-                discovery
-                    .matched_sessions
-                    .iter()
-                    .map(|session| session.path.clone())
-                    .collect(),
-                "$.payload.cwd where $.type == \"session_meta\"",
-                old_path.display().to_string(),
+                files.into_iter().collect(),
+                selector,
+                stored_cwd,
                 new_path.display().to_string(),
-                discovery.matched_sessions.len(),
+                count,
             )
             .with_apply_ready(true),
         );
@@ -152,17 +168,17 @@ pub(super) fn plan(
             .with_apply_ready(true),
         );
     }
-    for (path, refs) in &discovery.state_db_thread_refs {
+    for reference in &discovery.state_db_thread_refs {
         edits.push(
             MigrationEdit::rewrite_sqlite_text_column(
                 AgentKind::Codex,
                 "rewrite_thread_index_cwd",
-                path.clone(),
+                reference.path.clone(),
                 "threads",
                 "cwd",
-                old_path.display().to_string(),
+                reference.stored_cwd.clone(),
                 new_path.display().to_string(),
-                *refs,
+                reference.count,
             )
             .with_apply_ready(true),
         );
@@ -219,8 +235,10 @@ pub(super) fn plan(
         ));
     }
 
-    let mut notes =
-        vec!["session identity field: session_meta.payload.cwd in rollout JSONL".to_string()];
+    let mut notes = vec![
+        "session identity fields: session_meta.payload.cwd and turn_context.payload.cwd"
+            .to_string(),
+    ];
     for root in [
         context.codex_sessions(),
         context.codex_archived_sessions(),
@@ -242,15 +260,21 @@ pub(super) fn plan(
             discovery.large_files_sampled
         ));
     }
-    if !discovery.matched_sessions.is_empty() {
-        let ids = discovery
-            .matched_sessions
+    if discovery.state_db_rollout_cwd_misses > 0 {
+        notes.push(format!(
+            "{} Codex thread row(s) matched cwd, but their rollout file had no matching cwd field",
+            discovery.state_db_rollout_cwd_misses
+        ));
+    }
+    let matched_session_ids = matched_session_ids(&discovery);
+    if !matched_session_ids.is_empty() {
+        let ids = matched_session_ids
             .iter()
             .take(3)
-            .map(|session| format!("{} ({})", session.id, session.path.display()))
+            .map(|(id, path)| format!("{} ({})", id, path.display()))
             .collect::<Vec<_>>()
             .join(", ");
-        let suffix = if discovery.matched_sessions.len() > 3 {
+        let suffix = if matched_session_ids.len() > 3 {
             ", ..."
         } else {
             ""
@@ -267,7 +291,7 @@ pub(super) fn plan(
         + discovery
             .state_db_thread_refs
             .iter()
-            .map(|(_, refs)| *refs)
+            .map(|reference| reference.count)
             .sum::<usize>()
         + discovery.shell_snapshot_ref_files;
 
@@ -275,7 +299,7 @@ pub(super) fn plan(
         AgentKind::Codex,
         AdapterReadiness::ApplyReady,
         state_roots,
-        discovery.matched_sessions.len(),
+        matched_session_ids.len(),
         path_references_found,
         edits,
         notes,
@@ -302,6 +326,7 @@ fn discover(
     let state_db = collect_state_db_thread_refs(context, old_path, &child_prefix)?;
     discovery.state_dbs_seen = state_db.dbs_seen;
     discovery.state_db_thread_refs = state_db.refs;
+    discovery.state_db_rollout_cwd_misses = state_db.rollout_cwd_misses;
     extend_unique_sessions(&mut discovery.matched_sessions, state_db.sessions);
 
     discovery.history_ref_entries =
@@ -341,6 +366,7 @@ fn discover(
         history_ref_entries = discovery.history_ref_entries,
         session_index_ref_entries = discovery.session_index_ref_entries,
         state_db_refs = discovery.state_db_thread_refs.len(),
+        state_db_rollout_cwd_misses = discovery.state_db_rollout_cwd_misses,
         state_dbs_seen = discovery.state_dbs_seen,
         shell_snapshot_files = discovery.shell_snapshot_files,
         truncated = discovery.truncated,
@@ -357,11 +383,10 @@ fn collect_state_db_thread_refs(
     let mut discovery = CodexStateDbDiscovery::default();
     for path in codex_state_dbs(context)? {
         discovery.dbs_seen += 1;
-        let (count, matches) = collect_threads_cwd_refs(&path, old_path, child_prefix)?;
-        if count > 0 {
-            discovery.refs.push((path, count));
-            discovery.sessions.extend(matches);
-        }
+        let refs = collect_threads_cwd_refs(&path, old_path, child_prefix)?;
+        discovery.refs.extend(refs.refs);
+        discovery.sessions.extend(refs.sessions);
+        discovery.rollout_cwd_misses += refs.rollout_cwd_misses;
     }
     Ok(discovery)
 }
@@ -425,7 +450,7 @@ fn collect_threads_cwd_refs(
     path: &Path,
     old_path: &Path,
     child_prefix: &str,
-) -> Result<(usize, Vec<CodexSession>)> {
+) -> Result<CodexStateDbDiscovery> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -436,7 +461,7 @@ fn collect_threads_cwd_refs(
         |row| row.get(0),
     )?;
     if !exists {
-        return Ok((0, Vec::new()));
+        return Ok(CodexStateDbDiscovery::default());
     }
 
     let has_rollout_path: bool = conn.query_row(
@@ -444,38 +469,73 @@ fn collect_threads_cwd_refs(
         [],
         |row| row.get(0),
     )?;
+    let mut discovery = CodexStateDbDiscovery::default();
     if !has_rollout_path {
         let mut statement = conn.prepare("SELECT cwd FROM threads")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let mut count = 0;
+        let mut refs = BTreeMap::<String, usize>::new();
         for row in rows {
-            if cwd_matches(Some(&row?), old_path, child_prefix) {
-                count += 1;
+            let cwd = row?;
+            if cwd_matches(Some(&cwd), old_path, child_prefix) {
+                *refs.entry(cwd).or_default() += 1;
             }
         }
-        return Ok((count, Vec::new()));
+        discovery.refs = refs
+            .into_iter()
+            .map(|(stored_cwd, count)| CodexStateDbThreadRef {
+                path: path.to_path_buf(),
+                stored_cwd,
+                count,
+            })
+            .collect();
+        return Ok(discovery);
     }
 
-    let mut statement =
-        conn.prepare("SELECT id, rollout_path, cwd FROM threads WHERE cwd = ?1 OR cwd LIKE ?2")?;
-    let child_like = format!("{child_prefix}%");
-    let rows = statement.query_map([old_path.display().to_string(), child_like], |row| {
+    let mut statement = conn.prepare("SELECT id, rollout_path, cwd FROM threads")?;
+    let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
         ))
     })?;
-    let mut sessions = Vec::new();
+    let mut refs = BTreeMap::<String, usize>::new();
     for row in rows {
         let (id, rollout_path, cwd) = row?;
-        debug_assert!(cwd_matches(Some(&cwd), old_path, child_prefix));
-        sessions.push(CodexSession {
-            id,
-            path: PathBuf::from(rollout_path),
-        });
+        if !cwd_matches(Some(&cwd), old_path, child_prefix) {
+            continue;
+        }
+        *refs.entry(cwd.clone()).or_default() += 1;
+        let rollout_path = PathBuf::from(rollout_path);
+        let matches = read_session_cwd_matches(&rollout_path, old_path, child_prefix)
+            .unwrap_or_else(|error| {
+                tracing::debug!(
+                    db = %path.display(),
+                    rollout_path = %rollout_path.display(),
+                    error = %error,
+                    "mv.plan.codex: thread index rollout cwd probe failed"
+                );
+                Vec::new()
+            });
+        if matches.is_empty() {
+            discovery.rollout_cwd_misses += 1;
+        }
+        for mut session in matches {
+            if session.id == session_id_from_path(&rollout_path) {
+                session.id = id.clone();
+            }
+            discovery.sessions.push(session);
+        }
     }
-    Ok((sessions.len(), sessions))
+    discovery.refs = refs
+        .into_iter()
+        .map(|(stored_cwd, count)| CodexStateDbThreadRef {
+            path: path.to_path_buf(),
+            stored_cwd,
+            count,
+        })
+        .collect();
+    Ok(discovery)
 }
 
 fn collect_sessions_from_root(
@@ -537,9 +597,9 @@ fn collect_sessions_from_root(
             }
         }
 
-        if let Some(session) = read_session_identity(&path, old_path, child_prefix)? {
-            discovery.matched_sessions.push(session);
-        }
+        discovery
+            .matched_sessions
+            .extend(read_session_cwd_matches(&path, old_path, child_prefix)?);
     }
     tracing::debug!(
         root = %root.display(),
@@ -554,84 +614,86 @@ fn collect_sessions_from_root(
 fn extend_unique_sessions(target: &mut Vec<CodexSession>, sessions: Vec<CodexSession>) {
     let mut seen = target
         .iter()
-        .map(|session| session.path.clone())
+        .map(|session| {
+            (
+                session.path.clone(),
+                session.selector,
+                session.stored_cwd.clone(),
+            )
+        })
         .collect::<BTreeSet<_>>();
     for session in sessions {
-        if seen.insert(session.path.clone()) {
+        if seen.insert((
+            session.path.clone(),
+            session.selector,
+            session.stored_cwd.clone(),
+        )) {
             target.push(session);
         }
     }
 }
 
-fn read_session_identity(
+fn matched_session_ids(discovery: &CodexDiscovery) -> BTreeMap<String, PathBuf> {
+    discovery
+        .matched_sessions
+        .iter()
+        .map(|session| (session.id.clone(), session.path.clone()))
+        .collect()
+}
+
+fn read_session_cwd_matches(
     path: &Path,
     old_path: &Path,
     child_prefix: &str,
-) -> Result<Option<CodexSession>> {
+) -> Result<Vec<CodexSession>> {
     let file = fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
-    if reader.read_line(&mut first_line)? == 0 {
-        return Ok(None);
-    }
-
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim()) else {
-        return Ok(None);
-    };
-
-    if value.get("type").and_then(|value| value.as_str()) == Some("session_meta") {
+    let reader = BufReader::new(file);
+    let mut matches = Vec::new();
+    for line in reader.lines().take(150) {
+        let line = line?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let Some(kind) = value.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some((selector, action)) = codex_cwd_selector(kind) else {
+            continue;
+        };
         let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
         let cwd = payload.get("cwd").and_then(|value| value.as_str());
         if !cwd_matches(cwd, old_path, child_prefix) {
-            return Ok(None);
+            continue;
         }
         let id = payload
             .get("id")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| session_id_from_path(path));
-        return Ok(Some(CodexSession {
+        matches.push(CodexSession {
             id,
             path: path.to_path_buf(),
-        }));
+            selector,
+            action,
+            stored_cwd: cwd.unwrap_or_default().to_string(),
+        });
     }
 
-    // Pre-rollout Codex did not put cwd in a dedicated session_meta record.
-    // cdxresume recovers it from the initial environment context, so Babel uses
-    // the same witness before claiming a legacy file belongs to this project.
-    if legacy_file_mentions_cwd(path, old_path, child_prefix)? {
-        let id = value
-            .get("id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| session_id_from_path(path));
-        return Ok(Some(CodexSession {
-            id,
-            path: path.to_path_buf(),
-        }));
-    }
-
-    Ok(None)
+    Ok(matches)
 }
 
-fn legacy_file_mentions_cwd(path: &Path, old_path: &Path, child_prefix: &str) -> Result<bool> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    for line in reader.lines().take(150) {
-        let line = line?;
-        let Some(start) = line.find("<cwd>") else {
-            continue;
-        };
-        let rest = &line[start + "<cwd>".len()..];
-        let Some(end) = rest.find("</cwd>") else {
-            continue;
-        };
-        let cwd = &rest[..end];
-        if cwd == old_path.to_string_lossy() || cwd.starts_with(child_prefix) {
-            return Ok(true);
-        }
+fn codex_cwd_selector(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "session_meta" => Some((
+            "$.payload.cwd where $.type == \"session_meta\"",
+            "rewrite_session_meta_cwd",
+        )),
+        "turn_context" => Some((
+            "$.payload.cwd where $.type == \"turn_context\"",
+            "rewrite_turn_context_cwd",
+        )),
+        _ => None,
     }
-    Ok(false)
 }
 
 fn collect_shell_snapshots(
@@ -716,7 +778,27 @@ fn cwd_matches(cwd: Option<&str>, old_path: &Path, child_prefix: &str) -> bool {
         return false;
     };
     let old = old_path.to_string_lossy();
-    cwd == old.as_ref() || cwd.starts_with(child_prefix)
+    if cwd == old.as_ref() || cwd.starts_with(child_prefix) {
+        return true;
+    }
+
+    let normalized_cwd = normalize_lexical_path(Path::new(cwd));
+    let normalized_old = normalize_lexical_path(old_path);
+    normalized_cwd == normalized_old || normalized_cwd.starts_with(&normalized_old)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn session_id_from_path(path: &Path) -> String {

@@ -1152,6 +1152,16 @@ fn jsonl_line_matches(line: &str, selector: &str, needle: &str) -> Result<bool> 
                 None
             }
         }
+        "$.payload.cwd where $.type == \"turn_context\"" => {
+            if value.get("type").and_then(|kind| kind.as_str()) == Some("turn_context") {
+                value
+                    .get("payload")
+                    .and_then(|payload| payload.get("cwd"))
+                    .and_then(|slot| slot.as_str())
+            } else {
+                None
+            }
+        }
         other => bail!("unsupported JSONL selector: {other}"),
     };
     Ok(text.is_some_and(|text| text == needle || text.starts_with(&format!("{needle}/"))))
@@ -1173,6 +1183,13 @@ fn rewrite_jsonl_line(line: &str, selector: &str, from: &str, to: &str) -> Resul
         "$.project" => replace_json_string_field(&mut value, &["project"], from, to),
         "$.payload.cwd where $.type == \"session_meta\"" => {
             if value.get("type").and_then(|kind| kind.as_str()) == Some("session_meta") {
+                replace_json_string_field(&mut value, &["payload", "cwd"], from, to)
+            } else {
+                false
+            }
+        }
+        "$.payload.cwd where $.type == \"turn_context\"" => {
+            if value.get("type").and_then(|kind| kind.as_str()) == Some("turn_context") {
                 replace_json_string_field(&mut value, &["payload", "cwd"], from, to)
             } else {
                 false

@@ -1699,6 +1699,109 @@ mod tests {
     }
 
     #[test]
+    fn codex_apply_repairs_alias_cwd_surfaces_without_original_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let old = home.join("repo-tool/pomet");
+        let old_alias = home.join("repo/../repo-tool/pomet");
+        let new = home.join("repo/pomet");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+        let matched_rollout = ctx
+            .codex_sessions()
+            .join("2026/05/01/rollout-2026-05-01T13-09-14-codex-session.jsonl");
+        write_file(
+            &matched_rollout,
+            &format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                old_alias.display(),
+                new.display(),
+            ),
+        );
+        write_file(
+            &ctx.codex_base().join("config.toml"),
+            &format!(
+                "sqlite_home = \"{}\"\n",
+                ctx.codex_base().join("sqlite-home").display(),
+            ),
+        );
+        let state_db = ctx.codex_base().join("sqlite-home/state_5.sqlite");
+        {
+            fs::create_dir_all(state_db.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&state_db).unwrap();
+            conn.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, rollout_path, cwd) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "codex-session",
+                    matched_rollout.to_string_lossy(),
+                    old.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let report = plan_migration_with_context_and_scope(
+            &ctx,
+            &old,
+            &new,
+            Vec::new(),
+            MigrationPlanScope::Apply,
+        )
+        .unwrap();
+        let codex = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Codex)
+            .unwrap();
+
+        assert!(codex.edits.iter().any(|edit| {
+            edit.action == "rewrite_session_meta_cwd"
+                && matches!(
+                    &edit.kind,
+                    MigrationEditKind::RewriteJsonlField { from, files, .. }
+                    if from == &old_alias.display().to_string()
+                        && files == &vec![matched_rollout.clone()]
+                )
+        }));
+        assert!(!codex
+            .edits
+            .iter()
+            .any(|edit| edit.action == "rewrite_turn_context_cwd"));
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(home.join("transactions")),
+            },
+        )
+        .unwrap();
+
+        assert!(!apply.has_blockers());
+        let rollout = fs::read_to_string(&matched_rollout).unwrap();
+        assert!(rollout.contains(&format!("\"cwd\":\"{}\"", new.display())));
+        assert!(!rollout.contains(&old_alias.display().to_string()));
+
+        let conn = rusqlite::Connection::open(&state_db).unwrap();
+        let cwd: String = conn
+            .query_row(
+                "SELECT cwd FROM threads WHERE id = 'codex-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cwd, new.display().to_string());
+    }
+
+    #[test]
     fn generic_apply_rewrites_only_prescanned_text_files() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
