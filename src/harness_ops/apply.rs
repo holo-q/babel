@@ -107,6 +107,14 @@ impl MigrationTransaction {
             .unwrap_or_else(default_transaction_root);
         let dir = root.join(&id);
         let backups = dir.join("backups");
+        tracing::debug!(
+            migration_id = %id,
+            transaction_dir = %dir.display(),
+            backup_dir = %backups.display(),
+            old_path = %plan.old_path.display(),
+            new_path = %plan.new_path.display(),
+            "mv.apply: starting transaction"
+        );
         fs::create_dir_all(&backups)
             .with_context(|| format!("failed to create {}", backups.display()))?;
         let manifest_path = dir.join("manifest.json");
@@ -132,6 +140,11 @@ impl MigrationTransaction {
     }
 
     fn set_status(&mut self, status: TransactionStatus) -> Result<()> {
+        tracing::debug!(
+            migration_id = %self.manifest.id,
+            status = ?status,
+            "mv.apply: transaction status transition"
+        );
         self.manifest.status = status;
         self.flush()
     }
@@ -179,6 +192,17 @@ impl MigrationTransaction {
             before_checksum,
             after_checksum: None,
         });
+        let record = self.manifest.backups.last().expect("backup just pushed");
+        tracing::debug!(
+            target = %path.display(),
+            existed,
+            backup = record
+                .backup
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            "mv.apply: snapshotted file dependency"
+        );
         self.flush()?;
         Ok(self.manifest.backups.len() - 1)
     }
@@ -195,6 +219,12 @@ impl MigrationTransaction {
     }
 
     fn record_rename(&mut self, from: &Path, to: &Path) -> Result<usize> {
+        tracing::debug!(
+            from = %from.display(),
+            to = %to.display(),
+            existed = from.exists(),
+            "mv.apply: recorded directory move"
+        );
         self.manifest.backups.push(BackupRecord {
             kind: BackupKind::Rename {
                 from: from.to_path_buf(),
@@ -218,6 +248,11 @@ impl MigrationTransaction {
     }
 
     fn rollback(&mut self) -> Result<()> {
+        tracing::debug!(
+            migration_id = %self.manifest.id,
+            backups = self.manifest.backups.len(),
+            "mv.apply: rollback starting"
+        );
         let mut failures = Vec::new();
         for record in self.manifest.backups.clone().into_iter().rev() {
             if let Err(error) = rollback_record(&record) {
@@ -234,6 +269,7 @@ impl MigrationTransaction {
         self.flush()?;
 
         if failures.is_empty() {
+            tracing::debug!(migration_id = %self.manifest.id, "mv.apply: rollback complete");
             Ok(())
         } else {
             bail!("rollback incomplete: {}", failures.join("; "))
@@ -250,6 +286,15 @@ pub fn apply_migration_plan(
     plan: &MigrationDoctorReport,
     options: &MigrationApplyOptions,
 ) -> Result<MigrationApplyReport> {
+    tracing::debug!(
+        old_path = %plan.old_path.display(),
+        new_path = %plan.new_path.display(),
+        dry_run = options.dry_run,
+        force = options.force,
+        harnesses = plan.harnesses.len(),
+        risks = plan.risks.len(),
+        "mv.apply: plan execution requested"
+    );
     if plan.has_blockers() && !options.force {
         bail!("migration plan has blocker risk(s); rerun doctor or pass force from a higher-level command");
     }
@@ -260,6 +305,7 @@ pub fn apply_migration_plan(
         .flat_map(|harness| harness.edits.iter())
         .collect::<Vec<_>>();
     let mut report = MigrationApplyReport::new(options, edits.len());
+    tracing::debug!(edits = edits.len(), "mv.apply: classifying migration edits");
 
     for edit in &edits {
         match edit.capability {
@@ -289,11 +335,22 @@ pub fn apply_migration_plan(
             }
         }
     }
+    tracing::debug!(
+        edits_seen = report.edits_seen,
+        edits_apply_ready = report.edits_apply_ready,
+        skipped = report.skipped.len(),
+        blockers = report.blockers.len(),
+        "mv.apply: edit classification complete"
+    );
 
     if report.has_blockers() && !options.force {
         bail!("{}", report.blockers.join("\n"));
     }
     if options.dry_run {
+        tracing::debug!(
+            edits_apply_ready = report.edits_apply_ready,
+            "mv.apply: dry run complete; no mutation performed"
+        );
         report.applied.push(format!(
             "would apply {} executor-owned edit(s)",
             report.edits_apply_ready
@@ -301,6 +358,7 @@ pub fn apply_migration_plan(
         return Ok(report);
     }
     if report.edits_apply_ready == 0 {
+        tracing::debug!("mv.apply: no executor-owned edits to apply");
         return Ok(report);
     }
 
@@ -313,7 +371,20 @@ pub fn apply_migration_plan(
             if edit.capability == ApplyCapability::ApplyReady
                 && recovery_is_executor_owned(edit.recovery)
             {
+                tracing::debug!(
+                    harness = %edit.harness.slug(),
+                    action = %edit.action,
+                    kind = edit_kind_label(&edit.kind),
+                    target = %edit.target(),
+                    recovery = ?edit.recovery,
+                    "mv.apply: applying edit"
+                );
                 apply_edit(edit, &mut tx, &mut report)?;
+                tracing::debug!(
+                    harness = %edit.harness.slug(),
+                    action = %edit.action,
+                    "mv.apply: edit applied"
+                );
             }
         }
 
@@ -322,16 +393,29 @@ pub fn apply_migration_plan(
             if edit.capability == ApplyCapability::ApplyReady
                 && recovery_is_executor_owned(edit.recovery)
             {
+                tracing::debug!(
+                    harness = %edit.harness.slug(),
+                    action = %edit.action,
+                    kind = edit_kind_label(&edit.kind),
+                    target = %edit.target(),
+                    "mv.apply: verifying edit"
+                );
                 verify_edit(edit)?;
                 report
                     .verified
                     .push(format!("{}:{}", edit.harness.slug(), edit.action));
+                tracing::debug!(
+                    harness = %edit.harness.slug(),
+                    action = %edit.action,
+                    "mv.apply: edit verified"
+                );
             }
         }
         Ok(())
     })();
 
     if let Err(error) = apply_result {
+        tracing::debug!(error = %error, "mv.apply: apply failed; beginning rollback");
         tx.set_status(TransactionStatus::Failed)?;
         let rollback_result = tx.rollback();
         report.rolled_back = rollback_result.is_ok();
@@ -343,6 +427,16 @@ pub fn apply_migration_plan(
 
     tx.event("apply verified")?;
     tx.set_status(TransactionStatus::Complete)?;
+    tracing::debug!(
+        applied = report.applied.len(),
+        verified = report.verified.len(),
+        manifest = report
+            .manifest_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string()),
+        "mv.apply: transaction complete"
+    );
     Ok(report)
 }
 
@@ -354,6 +448,18 @@ fn recovery_is_executor_owned(recovery: RecoveryClass) -> bool {
             | RecoveryClass::SessionDependencyFile
             | RecoveryClass::SessionDependencyDir
     )
+}
+
+fn edit_kind_label(kind: &MigrationEditKind) -> &'static str {
+    match kind {
+        MigrationEditKind::RenamePath { .. } => "rename_path",
+        MigrationEditKind::RewriteJsonlField { .. } => "rewrite_jsonl_field",
+        MigrationEditKind::RewriteTomlTableKey { .. } => "rewrite_toml_table_key",
+        MigrationEditKind::RewriteTextRefs { .. } => "rewrite_text_refs",
+        MigrationEditKind::RewriteSqliteTextColumn { .. } => "rewrite_sqlite_text_column",
+        MigrationEditKind::PreserveSessionKeyedFiles { .. } => "preserve_session_keyed_files",
+        MigrationEditKind::PreserveProjectLocalHistory { .. } => "preserve_project_local_history",
+    }
 }
 
 fn apply_edit(
@@ -453,6 +559,14 @@ fn apply_rename_path(
     report: &mut MigrationApplyReport,
     label: String,
 ) -> Result<()> {
+    tracing::debug!(
+        label = %label,
+        from = %from.display(),
+        to = %to.display(),
+        source_exists = from.exists(),
+        dest_exists = to.exists(),
+        "mv.apply: rename transition"
+    );
     if !from.exists() {
         report.blockers.push(format!(
             "{label}: source does not exist: {}",
@@ -491,7 +605,19 @@ fn apply_jsonl_rewrite(
     report: &mut MigrationApplyReport,
     label: String,
 ) -> Result<()> {
+    tracing::debug!(
+        label = %label,
+        target = %path.display(),
+        selector,
+        "mv.apply: expanding JSONL rewrite targets"
+    );
     let files = jsonl_targets(path)?;
+    tracing::debug!(
+        label = %label,
+        target = %path.display(),
+        files = files.len(),
+        "mv.apply: JSONL rewrite targets resolved"
+    );
     if files.is_empty() {
         report.blockers.push(format!(
             "{label}: no JSONL targets under {}",
@@ -509,6 +635,7 @@ fn apply_jsonl_rewrite(
     report
         .applied
         .push(format!("{label}: rewrote {changed} JSONL record(s)"));
+    tracing::debug!(label = %label, changed, "mv.apply: JSONL rewrite complete");
     Ok(())
 }
 
@@ -521,6 +648,14 @@ fn apply_toml_table_key_rewrite(
     report: &mut MigrationApplyReport,
     label: String,
 ) -> Result<()> {
+    tracing::debug!(
+        label = %label,
+        path = %path.display(),
+        table,
+        from_key,
+        to_key,
+        "mv.apply: TOML key rewrite starting"
+    );
     if !path.exists() {
         report
             .blockers
@@ -544,6 +679,7 @@ fn apply_toml_table_key_rewrite(
         "{label}: rewrote TOML table key in {}",
         path.display()
     ));
+    tracing::debug!(label = %label, path = %path.display(), "mv.apply: TOML key rewrite complete");
     Ok(())
 }
 
@@ -556,6 +692,14 @@ fn apply_text_ref_rewrite(
     report: &mut MigrationApplyReport,
     label: String,
 ) -> Result<()> {
+    tracing::debug!(
+        label = %label,
+        target,
+        exact_files = exact_files.len(),
+        source_needle_len = from.len(),
+        dest_needle_len = to.len(),
+        "mv.apply: text rewrite starting"
+    );
     if from.is_empty() {
         report
             .blockers
@@ -565,6 +709,11 @@ fn apply_text_ref_rewrite(
 
     let files = if exact_files.is_empty() {
         let path = PathBuf::from(target);
+        tracing::debug!(
+            label = %label,
+            target = %path.display(),
+            "mv.apply: expanding broad text rewrite target"
+        );
         if !path.exists() {
             report.blockers.push(format!(
                 "{label}: text rewrite target is not a concrete path: {target}"
@@ -573,6 +722,17 @@ fn apply_text_ref_rewrite(
         }
         text_targets(&path)?
     } else {
+        tracing::debug!(
+            label = %label,
+            exact_files = exact_files.len(),
+            sample = %exact_files
+                .iter()
+                .take(3)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "mv.apply: using pre-scanned text rewrite files"
+        );
         let mut files = Vec::new();
         for file in exact_files {
             if !file.exists() {
@@ -600,6 +760,11 @@ fn apply_text_ref_rewrite(
     report
         .applied
         .push(format!("{label}: rewrote {changed} text file(s)"));
+    tracing::debug!(
+        label = %label,
+        changed,
+        "mv.apply: text rewrite complete"
+    );
     Ok(())
 }
 
@@ -613,6 +778,13 @@ fn apply_sqlite_text_column_rewrite(
     report: &mut MigrationApplyReport,
     label: String,
 ) -> Result<()> {
+    tracing::debug!(
+        label = %label,
+        path = %path.display(),
+        table,
+        column,
+        "mv.apply: SQLite text column rewrite starting"
+    );
     if !path.exists() {
         report.blockers.push(format!(
             "{label}: SQLite database missing: {}",
@@ -648,10 +820,22 @@ fn apply_sqlite_text_column_rewrite(
         "{label}: rewrote {changed} SQLite row(s) in {}",
         path.display()
     ));
+    tracing::debug!(
+        label = %label,
+        path = %path.display(),
+        changed,
+        "mv.apply: SQLite text column rewrite complete"
+    );
     Ok(())
 }
 
 fn verify_edit(edit: &MigrationEdit) -> Result<()> {
+    tracing::debug!(
+        harness = %edit.harness.slug(),
+        action = %edit.action,
+        kind = edit_kind_label(&edit.kind),
+        "mv.apply: verification dispatch"
+    );
     match &edit.verification {
         VerificationSpec::PathMoved { from, to } => {
             if from.exists() || !to.exists() {
@@ -700,8 +884,21 @@ fn verify_edit(edit: &MigrationEdit) -> Result<()> {
             from,
             ..
         } => {
+            tracing::debug!(
+                harness = %edit.harness.slug(),
+                action = %edit.action,
+                target,
+                exact_files = files.len(),
+                "mv.apply: text reference verification starting"
+            );
             let targets = if files.is_empty() {
                 let path = PathBuf::from(target);
+                tracing::debug!(
+                    harness = %edit.harness.slug(),
+                    action = %edit.action,
+                    target = %path.display(),
+                    "mv.apply: expanding broad text verification target"
+                );
                 text_targets(&path)?
             } else {
                 files.clone()
@@ -714,6 +911,12 @@ fn verify_edit(edit: &MigrationEdit) -> Result<()> {
             if old_refs > 0 {
                 bail!("text reference verification failed for {target}: old refs remain");
             }
+            tracing::debug!(
+                harness = %edit.harness.slug(),
+                action = %edit.action,
+                old_refs,
+                "mv.apply: text reference verification complete"
+            );
         }
         VerificationSpec::SqliteTextColumnRewritten {
             path,
@@ -783,6 +986,7 @@ fn count_sqlite_text_column_refs(
 
 fn jsonl_targets(path: &Path) -> Result<Vec<PathBuf>> {
     if path.is_file() {
+        tracing::debug!(target = %path.display(), "mv.apply: JSONL target is a file");
         return Ok(vec![path.to_path_buf()]);
     }
     text_targets(path).map(|files| {
@@ -796,15 +1000,26 @@ fn jsonl_targets(path: &Path) -> Result<Vec<PathBuf>> {
 fn text_targets(path: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if path.is_file() && is_probably_text_migration_file(path) {
+        tracing::debug!(target = %path.display(), "mv.apply: text target is a file");
         files.push(path.to_path_buf());
         return Ok(files);
     }
     if !path.is_dir() {
+        tracing::debug!(
+            target = %path.display(),
+            "mv.apply: text target is neither file nor directory"
+        );
         return Ok(files);
     }
 
+    tracing::debug!(
+        target = %path.display(),
+        "mv.apply: text target tree scan starting"
+    );
     let mut stack = vec![path.to_path_buf()];
+    let mut dirs_scanned = 0usize;
     while let Some(path) = stack.pop() {
+        dirs_scanned += 1;
         for entry in fs::read_dir(&path)? {
             let path = entry?.path();
             let metadata = fs::symlink_metadata(&path)?;
@@ -815,6 +1030,12 @@ fn text_targets(path: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
+    tracing::debug!(
+        target = %path.display(),
+        dirs_scanned,
+        files = files.len(),
+        "mv.apply: text target tree scan complete"
+    );
     Ok(files)
 }
 

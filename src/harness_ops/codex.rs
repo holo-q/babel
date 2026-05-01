@@ -263,6 +263,11 @@ fn discover(
     old_path: &Path,
     needles: &[String],
 ) -> Result<CodexDiscovery> {
+    tracing::debug!(
+        old_path = %old_path.display(),
+        needles = needles.len(),
+        "mv.plan.codex: discovery starting"
+    );
     let mut discovery = CodexDiscovery {
         session_roots: vec![context.codex_sessions(), context.codex_archived_sessions()],
         ..Default::default()
@@ -287,6 +292,17 @@ fn discover(
     discovery.state_db_thread_refs = collect_state_db_thread_refs(context, needles)?;
 
     collect_shell_snapshots(context, needles, &mut discovery)?;
+    tracing::debug!(
+        files_scanned = discovery.files_scanned,
+        matched_sessions = discovery.matched_sessions.len(),
+        session_path_ref_files = discovery.session_path_ref_files,
+        history_ref_entries = discovery.history_ref_entries,
+        session_index_ref_entries = discovery.session_index_ref_entries,
+        state_db_refs = discovery.state_db_thread_refs.len(),
+        shell_snapshot_files = discovery.shell_snapshot_files,
+        truncated = discovery.truncated,
+        "mv.plan.codex: discovery complete"
+    );
     Ok(discovery)
 }
 
@@ -393,9 +409,19 @@ fn collect_sessions_from_root(
     discovery: &mut CodexDiscovery,
 ) -> Result<()> {
     if !root.exists() {
+        tracing::debug!(
+            root = %root.display(),
+            "mv.plan.codex: session root missing"
+        );
         return Ok(());
     }
 
+    let before_scanned = discovery.files_scanned;
+    let before_matches = discovery.session_path_ref_files;
+    tracing::debug!(
+        root = %root.display(),
+        "mv.plan.codex: session root scan starting"
+    );
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
         if discovery.files_scanned >= MAX_SCAN_FILES {
@@ -417,6 +443,15 @@ fn collect_sessions_from_root(
         }
 
         discovery.files_scanned += 1;
+        if discovery.files_scanned % 500 == 0 {
+            tracing::debug!(
+                root = %root.display(),
+                files_scanned = discovery.files_scanned,
+                session_path_ref_files = discovery.session_path_ref_files,
+                matched_sessions = discovery.matched_sessions.len(),
+                "mv.plan.codex: session root scan progress"
+            );
+        }
         if text_file_contains_any(&path, metadata.len(), needles)? {
             discovery.session_path_ref_files += 1;
             discovery.matched_session_path_ref_files.push(path.clone());
@@ -429,6 +464,13 @@ fn collect_sessions_from_root(
             discovery.matched_sessions.push(session);
         }
     }
+    tracing::debug!(
+        root = %root.display(),
+        files_scanned = discovery.files_scanned - before_scanned,
+        path_ref_files = discovery.session_path_ref_files - before_matches,
+        truncated = discovery.truncated,
+        "mv.plan.codex: session root scan complete"
+    );
     Ok(())
 }
 

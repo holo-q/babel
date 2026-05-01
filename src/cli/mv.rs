@@ -47,14 +47,40 @@ pub async fn cmd_mv(
 ) -> Result<()> {
     let source = expand_tilde(&source);
     let dest = resolve_destination(&source, &expand_tilde(&dest));
+    tracing::debug!(
+        source = %source.display(),
+        dest = %dest.display(),
+        dry_run,
+        history_only,
+        force,
+        json,
+        "mv: command resolved paths"
+    );
 
     if anxious {
         bail!("babel mv --anxious is not implemented for the universal migration executor yet");
     }
 
+    tracing::debug!("mv: collecting live panes for conflict scan");
     let panes = core.panes().await?;
+    tracing::debug!(pane_count = panes.len(), "mv: live pane scan complete");
     let live_panes = super::doctor::live_panes_from_panes(&source, panes);
+    tracing::debug!(
+        live_pane_impacts = live_panes.len(),
+        "mv: planning apply-ready migration"
+    );
     let mut plan = plan_migration_apply_ready(&source, &dest, live_panes)?;
+    tracing::debug!(
+        harnesses = plan.harnesses.len(),
+        risks = plan.risks.len(),
+        blockers = plan
+            .risks
+            .iter()
+            .filter(|risk| matches!(risk.severity, RiskSeverity::Blocker))
+            .count(),
+        operations = plan.operations().len(),
+        "mv: migration plan complete"
+    );
 
     if plan.has_blockers() && !force {
         let blockers = plan
@@ -73,6 +99,7 @@ pub async fn cmd_mv(
     }
 
     if !history_only {
+        tracing::debug!("mv: appending project directory move operation");
         plan.harnesses.push(HarnessMigrationReport::from_edits(
             AgentKind::Other,
             AdapterReadiness::ApplyReady,
@@ -90,8 +117,11 @@ pub async fn cmd_mv(
             .with_recovery(RecoveryClass::OwnedDir)],
             Vec::new(),
         ));
+    } else {
+        tracing::debug!("mv: history-only mode skips project directory move operation");
     }
 
+    tracing::debug!("mv: applying migration plan");
     let report = apply_migration_plan(
         &plan,
         &MigrationApplyOptions {
@@ -100,6 +130,22 @@ pub async fn cmd_mv(
             transaction_root: None,
         },
     )?;
+    tracing::debug!(
+        dry_run = report.dry_run,
+        edits_seen = report.edits_seen,
+        edits_apply_ready = report.edits_apply_ready,
+        applied = report.applied.len(),
+        skipped = report.skipped.len(),
+        blockers = report.blockers.len(),
+        verified = report.verified.len(),
+        rolled_back = report.rolled_back,
+        manifest = report
+            .manifest_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string()),
+        "mv: migration apply complete"
+    );
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

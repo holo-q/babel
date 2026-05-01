@@ -767,7 +767,7 @@ pub fn plan_migration_with_context(
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum MigrationPlanScope {
     Doctor,
     Apply,
@@ -780,6 +780,13 @@ fn plan_migration_with_context_and_scope(
     live_panes: Vec<LivePaneImpact>,
     scope: MigrationPlanScope,
 ) -> Result<MigrationDoctorReport> {
+    tracing::debug!(
+        old_path = %old_path.display(),
+        new_path = %new_path.display(),
+        live_panes = live_panes.len(),
+        scope = ?scope,
+        "mv.plan: starting migration planning"
+    );
     let old_abs = absolute_path(old_path);
     let new_abs = absolute_path(new_path);
     let path_needles = path_needles(old_path, &old_abs);
@@ -814,6 +821,7 @@ fn plan_migration_with_context_and_scope(
     }
 
     let mut harnesses = Vec::new();
+    tracing::debug!("mv.plan: planning Claude storage");
     harnesses.push(claude::plan(
         context,
         &old_abs,
@@ -821,10 +829,13 @@ fn plan_migration_with_context_and_scope(
         &path_needles,
         &mut risks,
     )?);
+    tracing::debug!("mv.plan: planning Codex storage");
     harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
+    tracing::debug!("mv.plan: planning Aider storage");
     harnesses.push(aider::plan_for_source(&old_abs));
 
     if matches!(scope, MigrationPlanScope::Doctor) {
+        tracing::debug!("mv.plan: planning full doctor-only harness roster");
         harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
         harnesses.push(qwen::plan(context, &old_abs, &new_abs, &path_needles)?);
         harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
@@ -875,6 +886,19 @@ fn plan_migration_with_context_and_scope(
         .to_string(),
     });
 
+    tracing::debug!(
+        harnesses = harnesses.len(),
+        risks = risks.len(),
+        operations = harnesses
+            .iter()
+            .map(|harness| harness.operations.len())
+            .sum::<usize>(),
+        edits = harnesses
+            .iter()
+            .map(|harness| harness.edits.len())
+            .sum::<usize>(),
+        "mv.plan: migration planning complete"
+    );
     Ok(MigrationDoctorReport {
         old_path: old_abs,
         new_path: new_abs,
