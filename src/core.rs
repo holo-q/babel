@@ -33,6 +33,7 @@
 //! Local mode initializes the same state, uses it, and exits.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info, instrument, warn};
@@ -70,7 +71,7 @@ impl BabelCore {
     /// - rebuild_fingerprint_index() for scrollback matching
     #[instrument(level = "debug")]
     pub async fn connect() -> Self {
-        Self::connect_with_local_refresh(false, true).await
+        Self::connect_with_local_refresh(false, true, true, true, None).await
     }
 
     /// Connect without expensive local scrollback parsing.
@@ -81,14 +82,28 @@ impl BabelCore {
     /// when it is not, local mode only gathers pane/cwd structure.
     #[instrument(level = "debug")]
     pub async fn connect_lightweight() -> Self {
-        Self::connect_with_local_refresh(true, false).await
+        Self::connect_with_local_refresh(true, true, false, true, None).await
+    }
+
+    /// Build a local lightweight core even when babeld is running.
+    ///
+    /// Harness migrations are filesystem transactions, not daemon actions. They
+    /// may inspect live pane cwd structure for risk reporting, but must not block
+    /// on, mutate through, or inherit stale state from the daemon.
+    #[instrument(level = "debug")]
+    pub async fn local_lightweight() -> Self {
+        Self::connect_with_local_refresh(true, false, false, false, Some(Duration::from_secs(2)))
+            .await
     }
 
     async fn connect_with_local_refresh(
         skip_activity_fetch: bool,
+        rebuild_summary_index: bool,
         rebuild_fingerprint_index: bool,
+        prefer_daemon: bool,
+        refresh_timeout: Option<Duration>,
     ) -> Self {
-        if is_daemon_running().await {
+        if prefer_daemon && is_daemon_running().await {
             debug!("connected to babeld");
             Self {
                 mode: CoreMode::Connected,
@@ -97,13 +112,27 @@ impl BabelCore {
             debug!("daemon not available, initializing local state");
             let mut state = BabelState::new();
 
-            if let Err(e) = state.refresh_panes(skip_activity_fetch).await {
+            let refresh_result = if let Some(duration) = refresh_timeout {
+                match tokio::time::timeout(duration, state.refresh_panes(skip_activity_fetch)).await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("local pane refresh timed out after {:?}", duration);
+                        Ok(Vec::new())
+                    }
+                }
+            } else {
+                state.refresh_panes(skip_activity_fetch).await
+            };
+            if let Err(e) = refresh_result {
                 trace_error!("pane refresh failed", error = %e);
                 warn!("failed to refresh panes: {}", e);
             }
-            if let Err(e) = state.rebuild_summary_index() {
-                trace_error!("summary index rebuild failed", error = %e);
-                warn!("failed to build summary index: {}", e);
+            if rebuild_summary_index {
+                if let Err(e) = state.rebuild_summary_index() {
+                    trace_error!("summary index rebuild failed", error = %e);
+                    warn!("failed to build summary index: {}", e);
+                }
             }
             if rebuild_fingerprint_index {
                 if let Err(e) = state.rebuild_fingerprint_index() {

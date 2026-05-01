@@ -706,7 +706,28 @@ pub fn plan_migration(
     live_panes: Vec<LivePaneImpact>,
 ) -> Result<MigrationDoctorReport> {
     let context = HarnessOpsContext::system()?;
-    plan_migration_with_context(&context, old_path, new_path, live_panes)
+    plan_migration_with_context_and_scope(
+        &context,
+        old_path,
+        new_path,
+        live_panes,
+        MigrationPlanScope::Doctor,
+    )
+}
+
+pub fn plan_migration_apply_ready(
+    old_path: &Path,
+    new_path: &Path,
+    live_panes: Vec<LivePaneImpact>,
+) -> Result<MigrationDoctorReport> {
+    let context = HarnessOpsContext::system()?;
+    plan_migration_with_context_and_scope(
+        &context,
+        old_path,
+        new_path,
+        live_panes,
+        MigrationPlanScope::Apply,
+    )
 }
 
 pub fn plan_migration_with_context(
@@ -714,6 +735,28 @@ pub fn plan_migration_with_context(
     old_path: &Path,
     new_path: &Path,
     live_panes: Vec<LivePaneImpact>,
+) -> Result<MigrationDoctorReport> {
+    plan_migration_with_context_and_scope(
+        context,
+        old_path,
+        new_path,
+        live_panes,
+        MigrationPlanScope::Doctor,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum MigrationPlanScope {
+    Doctor,
+    Apply,
+}
+
+fn plan_migration_with_context_and_scope(
+    context: &HarnessOpsContext,
+    old_path: &Path,
+    new_path: &Path,
+    live_panes: Vec<LivePaneImpact>,
+    scope: MigrationPlanScope,
 ) -> Result<MigrationDoctorReport> {
     let old_abs = absolute_path(old_path);
     let new_abs = absolute_path(new_path);
@@ -757,48 +800,57 @@ pub fn plan_migration_with_context(
         &mut risks,
     )?);
     harnesses.push(codex::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(qwen::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(gemini::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(crush::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(cursor::plan(context));
-    harnesses.push(cline::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(opencode::plan(context));
-    harnesses.push(amp::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(kiro::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(github_copilot::plan(context, &path_needles, &mut risks)?);
-    harnesses.push(roo::plan(context, &old_abs, &new_abs, &path_needles)?);
-    harnesses.push(kilo::plan(context, &old_abs, &new_abs, &path_needles)?);
     harnesses.push(aider::plan_for_source(&old_abs));
-    harnesses.push(antigravity::plan(
-        context,
-        &old_abs,
-        &new_abs,
-        &path_needles,
-    )?);
 
-    for kind in AgentKind::ALL {
-        if harnesses.iter().any(|report| report.harness == *kind) {
-            continue;
+    if matches!(scope, MigrationPlanScope::Doctor) {
+        harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(qwen::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(gemini::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(crush::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(cursor::plan(context));
+        harnesses.push(cline::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(opencode::plan(context));
+        harnesses.push(amp::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(kiro::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(github_copilot::plan(context, &path_needles, &mut risks)?);
+        harnesses.push(roo::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(kilo::plan(context, &old_abs, &new_abs, &path_needles)?);
+        harnesses.push(antigravity::plan(
+            context,
+            &old_abs,
+            &new_abs,
+            &path_needles,
+        )?);
+
+        for kind in AgentKind::ALL {
+            if harnesses.iter().any(|report| report.harness == *kind) {
+                continue;
+            }
+            harnesses.push(HarnessMigrationReport::from_edits(
+                *kind,
+                AdapterReadiness::Unsupported,
+                Vec::new(),
+                0,
+                0,
+                Vec::new(),
+                vec!["no path-move adapter available".to_string()],
+            ));
         }
-        harnesses.push(HarnessMigrationReport::from_edits(
-            *kind,
-            AdapterReadiness::Unsupported,
-            Vec::new(),
-            0,
-            0,
-            Vec::new(),
-            vec!["no path-move adapter available".to_string()],
-        ));
     }
 
     risks.push(MigrationRisk {
         severity: RiskSeverity::Info,
         harness: None,
-        message:
-            "no cross-harness full-text index is used; all counts come from native storage scans"
-                .to_string(),
+        message: match scope {
+            MigrationPlanScope::Doctor => {
+                "no cross-harness full-text index is used; all counts come from native storage scans"
+            }
+            MigrationPlanScope::Apply => {
+                "apply mode scans executor-ready adapters and blocker gates only; run mv --doctor for the full harness report"
+            }
+        }
+        .to_string(),
     });
 
     Ok(MigrationDoctorReport {

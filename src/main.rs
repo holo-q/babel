@@ -74,18 +74,22 @@ async fn main() -> Result<()> {
         _ => false,
     };
 
-    // Connect to daemon or use ephemeral mode. Migration doctor uses a lighter
-    // local connection so a missing daemon does not preface the report with
-    // scrollback/activity parser diagnostics.
-    let mut core = if is_migration_doctor {
-        BabelCore::connect_lightweight().await
+    let is_migration = matches!(cli.command, Commands::Mv { .. });
+
+    // Connect to daemon or use ephemeral mode. Migration commands are always
+    // local lightweight transactions: the daemon can be stale, busy, or blocked
+    // on pane parsing, while mv only needs current pane/cwd structure for risk
+    // reporting before it mutates native harness storage.
+    let mut core = if is_migration {
+        BabelCore::local_lightweight().await
     } else {
         BabelCore::connect().await
     };
 
     // Print mode indicator to stderr for commands that use BabelCore
     // Skip for daemon/tui/monitor/mcp/hook which have their own connection handling
-    let show_mode = !is_migration_doctor
+    let show_mode = !is_migration
+        && !is_migration_doctor
         && !matches!(
             cli.command,
             Commands::Daemon { .. }

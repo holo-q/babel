@@ -11,7 +11,7 @@ use anyhow::{bail, Result};
 use claude_babel::agent_kind::AgentKind;
 use claude_babel::core::BabelCore;
 use claude_babel::harness_ops::{
-    apply_migration_plan, plan_migration, AdapterReadiness, HarnessMigrationReport,
+    apply_migration_plan, plan_migration_apply_ready, AdapterReadiness, HarnessMigrationReport,
     MigrationApplyOptions, MigrationEdit, RecoveryClass, RiskSeverity,
 };
 
@@ -54,7 +54,7 @@ pub async fn cmd_mv(
 
     let panes = core.panes().await?;
     let live_panes = super::doctor::live_panes_from_panes(&source, panes);
-    let mut plan = plan_migration(&source, &dest, live_panes)?;
+    let mut plan = plan_migration_apply_ready(&source, &dest, live_panes)?;
 
     if plan.has_blockers() && !force {
         let blockers = plan
