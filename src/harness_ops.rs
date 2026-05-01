@@ -1620,6 +1620,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_project_config_key_requires_actual_toml_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let old = home.join("project");
+        let new = home.join("project-renamed");
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+        write_file(
+            &ctx.codex_base().join("config.toml"),
+            &format!("# stale comment mentioning {}\n", old.display()),
+        );
+
+        let report = plan_migration_with_context_and_scope(
+            &ctx,
+            &old,
+            &new,
+            Vec::new(),
+            MigrationPlanScope::Apply,
+        )
+        .unwrap();
+        let codex = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == AgentKind::Codex)
+            .unwrap();
+
+        assert!(!codex
+            .edits
+            .iter()
+            .any(|edit| edit.action == "rewrite_project_config_keys"));
+    }
+
+    #[test]
     fn codex_indexed_planning_uses_thread_index_without_rollout_tree_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -2055,6 +2087,77 @@ mod tests {
             filetime::FileTime::from_last_modification_time(&metadata),
             original_time
         );
+    }
+
+    #[test]
+    fn generic_apply_verifies_only_mutated_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        let text = root.join("history.jsonl");
+        let toml = root.join("config.toml");
+        write_file(&text, &format!("cwd={}\n", old.display()));
+        write_file(&toml, "# no project table here\n");
+
+        let edits = vec![
+            MigrationEdit::rewrite_text_refs(
+                AgentKind::Codex,
+                "rewrite_history_path_refs",
+                text.display().to_string(),
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
+            MigrationEdit::rewrite_toml_table_key(
+                AgentKind::Codex,
+                "rewrite_project_config_keys",
+                toml.clone(),
+                "projects",
+                old.display().to_string(),
+                new.display().to_string(),
+                1,
+            )
+            .with_apply_ready(true),
+        ];
+        let report = MigrationDoctorReport {
+            old_path: old,
+            new_path: new.clone(),
+            indexing_policy: "test".to_string(),
+            live_panes: Vec::new(),
+            harnesses: vec![HarnessMigrationReport::from_edits(
+                AgentKind::Codex,
+                AdapterReadiness::ApplyReady,
+                vec![root.to_path_buf()],
+                0,
+                2,
+                edits,
+                Vec::new(),
+            )],
+            risks: Vec::new(),
+        };
+
+        let apply = apply_migration_plan(
+            &report,
+            &MigrationApplyOptions {
+                dry_run: false,
+                force: false,
+                transaction_root: Some(root.join("transactions")),
+                print_progress: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!apply.has_blockers());
+        assert_eq!(apply.verified, vec!["codex:rewrite_history_path_refs"]);
+        assert!(apply
+            .skipped
+            .iter()
+            .any(|line| line.contains("no TOML table key matched")));
+        assert!(fs::read_to_string(&text)
+            .unwrap()
+            .contains(&new.display().to_string()));
     }
 
     #[test]

@@ -21,7 +21,7 @@ struct CodexDiscovery {
     matched_session_path_ref_files: Vec<PathBuf>,
     history_ref_entries: usize,
     session_index_ref_entries: usize,
-    config_toml_ref_files: usize,
+    config_toml_project_keys: usize,
     config_json_ref_files: usize,
     internal_storage_ref_files: usize,
     state_db_thread_refs: Vec<CodexStateDbThreadRef>,
@@ -120,7 +120,7 @@ pub(super) fn plan(
             .with_apply_ready(true),
         );
     }
-    if discovery.config_toml_ref_files > 0 {
+    if discovery.config_toml_project_keys > 0 {
         edits.push(
             MigrationEdit::rewrite_toml_table_key(
                 AgentKind::Codex,
@@ -129,7 +129,7 @@ pub(super) fn plan(
                 "projects",
                 old_path.display().to_string(),
                 new_path.display().to_string(),
-                discovery.config_toml_ref_files,
+                discovery.config_toml_project_keys,
             )
             .with_apply_ready(true),
         );
@@ -285,7 +285,7 @@ pub(super) fn plan(
     let path_references_found = discovery.session_path_ref_files
         + discovery.history_ref_entries
         + discovery.session_index_ref_entries
-        + discovery.config_toml_ref_files
+        + discovery.config_toml_project_keys
         + discovery.config_json_ref_files
         + discovery.internal_storage_ref_files
         + discovery
@@ -333,8 +333,8 @@ fn discover(
         count_jsonl_line_refs(&context.codex_base().join("history.jsonl"), needles)?;
     discovery.session_index_ref_entries =
         count_jsonl_line_refs(&context.codex_base().join("session_index.jsonl"), needles)?;
-    discovery.config_toml_ref_files =
-        text_file_ref_count(&context.codex_base().join("config.toml"), needles)?;
+    discovery.config_toml_project_keys =
+        count_toml_project_key(&context.codex_base().join("config.toml"), old_path)?;
     discovery.config_json_ref_files =
         text_file_ref_count(&context.codex_base().join("config.json"), needles)?;
     discovery.internal_storage_ref_files =
@@ -771,6 +771,15 @@ fn text_file_ref_count(path: &Path, needles: &[String]) -> Result<usize> {
         metadata.len(),
         needles,
     )?))
+}
+
+fn count_toml_project_key(path: &Path, old_path: &Path) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let content = fs::read_to_string(path)?;
+    let header = format!("[projects.\"{}\"]", old_path.display());
+    Ok(usize::from(content.contains(&header)))
 }
 
 fn cwd_matches(cwd: Option<&str>, old_path: &Path, child_prefix: &str) -> bool {
