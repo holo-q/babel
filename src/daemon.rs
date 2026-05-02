@@ -102,6 +102,7 @@ use crate::paint::{
     resolve_color, workspace_css_class, workspace_is_urgent, PaintEvent, WorkspacePaintEvent,
 };
 use crate::service::activity::{reduce_activity, ActivityObservation};
+use crate::service::refresh::diff_agent_panes;
 use crate::utility::agent_discovery::{
     detect_agent_signals, get_activity_with_scrollback_on_socket, get_pane_activity_with_scrollback,
 };
@@ -957,9 +958,10 @@ impl BabelState {
             new_windows.insert(addr, agent_pane);
         }
 
-        // Detect and emit events for window changes
-        let old_addrs: std::collections::HashSet<_> = self.panes.keys().cloned().collect();
-        let new_addrs: std::collections::HashSet<_> = new_windows.keys().cloned().collect();
+        // Compute structural pane changes before applying effects. This is the
+        // Wave 3 refresh seam: discovery produced `new_windows`; the pure
+        // refresh service says what changed; the daemon below performs effects.
+        let pane_diff = diff_agent_panes(&self.panes, &new_windows);
 
         // Track workspaces that need re-summarization
         let mut changed_workspaces: std::collections::HashSet<i32> =
@@ -969,10 +971,7 @@ impl BabelState {
         // Stage paint emissions: assign self.panes first so emit_pane_paint
         // can read the freshly-added pane, then emit the per-window paint
         // and per-workspace aggregate. The diagnostic BabelEvent fires here too.
-        let added_addrs: Vec<PaneAddr> = new_addrs.difference(&old_addrs).cloned().collect();
-        let removed_addrs: Vec<PaneAddr> = old_addrs.difference(&new_addrs).cloned().collect();
-
-        for addr in &added_addrs {
+        for addr in &pane_diff.added {
             if let Some(w) = new_windows.get(addr) {
                 self.event_publisher.publish(BabelEvent::WindowAdded {
                     addr: addr.clone(),
@@ -988,7 +987,7 @@ impl BabelState {
         }
 
         // Windows removed - clean up cached fingerprints and states
-        for addr in &removed_addrs {
+        for addr in &pane_diff.removed {
             // Get workspace from old windows before removal
             if let Some(w) = self.panes.get(addr) {
                 if let Some(ws) = w.workspace {
@@ -1012,19 +1011,10 @@ impl BabelState {
         }
 
         // Check for focus changes
-        let old_focused = self
-            .panes
-            .values()
-            .find(|w| w.is_focused)
-            .map(|w| w.addr.clone());
-        let new_focused = new_windows
-            .values()
-            .find(|w| w.is_focused)
-            .map(|w| w.addr.clone());
         let mut read_changed_addrs: HashSet<PaneAddr> = HashSet::new();
-        if old_focused != new_focused {
+        if let Some(focus) = &pane_diff.focus {
             // Emit PaneUnfocused for the pane that lost focus
-            if let Some(ref addr) = old_focused {
+            if let Some(ref addr) = focus.old {
                 if let Some(w) = self.panes.get(addr) {
                     self.event_publisher.publish(BabelEvent::PaneUnfocused {
                         addr: addr.clone(),
@@ -1033,7 +1023,7 @@ impl BabelState {
                 }
             }
             // Emit PaneFocused for the pane that gained focus
-            if let Some(ref addr) = new_focused {
+            if let Some(ref addr) = focus.new {
                 if let Some(w) = new_windows.get(addr) {
                     self.event_publisher.publish(BabelEvent::PaneFocused {
                         addr: addr.clone(),
@@ -1062,45 +1052,40 @@ impl BabelState {
         // below knows which workspaces need aggregate recomputation.
         let mut paint_workspaces: HashSet<i32> = HashSet::new();
         let mut moved_addrs: Vec<PaneAddr> = Vec::new();
-        for addr in old_addrs.intersection(&new_addrs) {
-            let old_ws = self.panes.get(addr).and_then(|w| w.workspace);
-            let new_ws = new_windows.get(addr).and_then(|w| w.workspace);
-
-            if old_ws != new_ws {
-                self.event_publisher
-                    .publish(BabelEvent::WindowWorkspaceChanged {
-                        addr: addr.clone(),
-                        old_workspace: old_ws,
-                        new_workspace: new_ws,
-                    });
-                // Track both workspaces for re-summarization
-                if let Some(ws) = old_ws {
-                    changed_workspaces.insert(ws);
-                    paint_workspaces.insert(ws);
-                }
-                if let Some(ws) = new_ws {
-                    changed_workspaces.insert(ws);
-                    paint_workspaces.insert(ws);
-                }
-                moved_addrs.push(addr.clone());
-                trace!(
-                    "Window {} moved: workspace {:?} -> {:?}",
-                    addr.short(),
-                    old_ws,
-                    new_ws
-                );
+        for workspace_move in &pane_diff.moved {
+            self.event_publisher
+                .publish(BabelEvent::WindowWorkspaceChanged {
+                    addr: workspace_move.addr.clone(),
+                    old_workspace: workspace_move.old_workspace,
+                    new_workspace: workspace_move.new_workspace,
+                });
+            // Track both workspaces for re-summarization
+            if let Some(ws) = workspace_move.old_workspace {
+                changed_workspaces.insert(ws);
+                paint_workspaces.insert(ws);
             }
+            if let Some(ws) = workspace_move.new_workspace {
+                changed_workspaces.insert(ws);
+                paint_workspaces.insert(ws);
+            }
+            moved_addrs.push(workspace_move.addr.clone());
+            trace!(
+                "Window {} moved: workspace {:?} -> {:?}",
+                workspace_move.addr.short(),
+                workspace_move.old_workspace,
+                workspace_move.new_workspace
+            );
         }
 
         // Workspaces touched by add/remove also need paint recomputation.
-        for addr in &added_addrs {
+        for addr in &pane_diff.added {
             if let Some(w) = new_windows.get(addr) {
                 if let Some(ws) = w.workspace {
                     paint_workspaces.insert(ws);
                 }
             }
         }
-        for addr in &removed_addrs {
+        for addr in &pane_diff.removed {
             if let Some(w) = self.panes.get(addr) {
                 if let Some(ws) = w.workspace {
                     paint_workspaces.insert(ws);
@@ -1296,7 +1281,7 @@ impl BabelState {
         // 5. Workspaces whose pane composition or state mix changed get a
         //    Workspace aggregate paint event.
 
-        for addr in &added_addrs {
+        for addr in &pane_diff.added {
             self.emit_pane_paint(addr);
         }
         for addr in &moved_addrs {
