@@ -61,7 +61,7 @@ signal-hook = "0.3"                                                   # SIGHUP h
 # VTR tracing - structured semantic traces with depth visualization
 # Provides semantic macros: state!, decision!, boundary!, effect!, checkpoint!
 # VtrLayer captures events to ring buffer for parallel operation debugging
-vtr = { path = "../../repo-os2/vtr" }
+vtr = { path = "../../../holoq/repo-os2/vtr" }
 once_cell = "1"                   # Lazy static initialization for VTR buffer
 
 # Scrollback parsing - ActivityState detection for Claude sessions
