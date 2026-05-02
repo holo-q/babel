@@ -3,6 +3,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 use filetime::{set_file_times, FileTime};
@@ -57,6 +58,20 @@ impl MigrationApplyReport {
     pub fn has_blockers(&self) -> bool {
         !self.blockers.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationManifestEntry {
+    pub id: String,
+    pub status: String,
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub edits_total: usize,
+    pub backups: usize,
+    pub events: usize,
+    pub manifest_path: PathBuf,
+    pub transaction_dir: PathBuf,
+    pub modified_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1631,6 +1646,138 @@ fn default_transaction_root() -> PathBuf {
         .join("babel/migrations")
 }
 
+pub fn migration_manifest_root() -> PathBuf {
+    default_transaction_root()
+}
+
+pub fn recent_migration_manifests(limit: usize) -> Result<Vec<MigrationManifestEntry>> {
+    let root = default_transaction_root();
+    let mut manifests = Vec::new();
+    if !root.exists() {
+        return Ok(manifests);
+    }
+
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let manifest_path = if path.is_dir() {
+            path.join("manifest.json")
+        } else {
+            path
+        };
+        if manifest_path.file_name().and_then(|name| name.to_str()) != Some("manifest.json") {
+            continue;
+        }
+        if manifest_path.is_file() {
+            manifests.push(load_migration_manifest(&manifest_path)?);
+        }
+    }
+
+    manifests.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    manifests.truncate(limit);
+    Ok(manifests)
+}
+
+pub fn migration_manifests_by_ref(refs: &[String]) -> Result<Vec<MigrationManifestEntry>> {
+    refs.iter()
+        .map(|reference| {
+            let path = resolve_manifest_ref(reference)?;
+            load_migration_manifest(&path)
+        })
+        .collect()
+}
+
+fn resolve_manifest_ref(reference: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(reference);
+    if path.is_file() {
+        return Ok(path);
+    }
+    if path.is_dir() {
+        let manifest = path.join("manifest.json");
+        if manifest.is_file() {
+            return Ok(manifest);
+        }
+    }
+
+    let root = default_transaction_root();
+    let exact = root.join(reference).join("manifest.json");
+    if exact.is_file() {
+        return Ok(exact);
+    }
+
+    let mut matches = Vec::new();
+    if root.exists() {
+        for entry in
+            fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+        {
+            let entry = entry?;
+            let dir = entry.path();
+            let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with(reference) {
+                let manifest = dir.join("manifest.json");
+                if manifest.is_file() {
+                    matches.push(manifest);
+                }
+            }
+        }
+    }
+
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => bail!(
+            "no migration manifest matching '{}' under {}",
+            reference,
+            root.display()
+        ),
+        _ => bail!("migration manifest ref '{}' is ambiguous", reference),
+    }
+}
+
+fn load_migration_manifest(path: &Path) -> Result<MigrationManifestEntry> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let manifest: TransactionManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let modified_at = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(format_system_time)
+        .unwrap_or_else(|_| "unknown".to_string());
+    Ok(MigrationManifestEntry {
+        id: manifest.id,
+        status: status_label(&manifest.status).to_string(),
+        old_path: manifest.old_path,
+        new_path: manifest.new_path,
+        edits_total: manifest.edits_total,
+        backups: manifest.backups.len(),
+        events: manifest.events.len(),
+        manifest_path: path.to_path_buf(),
+        transaction_dir: path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        modified_at,
+    })
+}
+
+fn status_label(status: &TransactionStatus) -> &'static str {
+    match status {
+        TransactionStatus::Planned => "planned",
+        TransactionStatus::Applying => "applying",
+        TransactionStatus::Verifying => "verifying",
+        TransactionStatus::Complete => "complete",
+        TransactionStatus::Failed => "failed",
+        TransactionStatus::RolledBack => "rolled_back",
+    }
+}
+
+fn format_system_time(time: SystemTime) -> String {
+    let time: chrono::DateTime<chrono::Utc> = time.into();
+    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 fn migration_id(old_path: &Path, new_path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     old_path.hash(&mut hasher);
@@ -1675,4 +1822,50 @@ fn file_checksum(path: &Path) -> Result<String> {
         }
     }
     Ok(format!("fnv64:{hash:016x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_manifest_entry_from_transaction_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tx_dir = tmp.path().join("20260501T010203Z-deadbeef");
+        fs::create_dir_all(&tx_dir).unwrap();
+        let manifest_path = tx_dir.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&TransactionManifest {
+                id: "20260501T010203Z-deadbeef".to_string(),
+                status: TransactionStatus::Complete,
+                old_path: PathBuf::from("/old/project"),
+                new_path: PathBuf::from("/new/project"),
+                edits_total: 3,
+                backups: vec![BackupRecord {
+                    kind: BackupKind::File,
+                    target: PathBuf::from("/state.json"),
+                    backup: Some(PathBuf::from("/backup/state.json")),
+                    existed: true,
+                    before_checksum: Some("before".to_string()),
+                    after_checksum: Some("after".to_string()),
+                }],
+                events: vec!["apply verified".to_string()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let entry = load_migration_manifest(&manifest_path).unwrap();
+
+        assert_eq!(entry.id, "20260501T010203Z-deadbeef");
+        assert_eq!(entry.status, "complete");
+        assert_eq!(entry.old_path, PathBuf::from("/old/project"));
+        assert_eq!(entry.new_path, PathBuf::from("/new/project"));
+        assert_eq!(entry.edits_total, 3);
+        assert_eq!(entry.backups, 1);
+        assert_eq!(entry.events, 1);
+        assert_eq!(entry.manifest_path, manifest_path);
+        assert_eq!(entry.transaction_dir, tx_dir);
+    }
 }

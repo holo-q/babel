@@ -153,6 +153,7 @@ const QUERY_COMMANDS: &[&str] = &[
     "resume",
     "continue",
     "tail",
+    "mv-log",
 ];
 
 /// Mutation commands (state-changing) - rendered underlined in help
@@ -692,6 +693,21 @@ pub enum Commands {
         /// Force move even if active Claude terminals exist (they will break)
         #[arg(long)]
         force: bool,
+    },
+
+    /// Show recent babel mv transaction manifests
+    ///
+    /// Lists recent migration transaction manifests written by `babel mv`.
+    /// Pass manifest ids, id prefixes, transaction directories, or manifest
+    /// paths to inspect specific migrations.
+    #[command(name = "mv-log")]
+    MvLog {
+        /// Manifest id/prefix, transaction dir, or manifest.json path
+        refs: Vec<String>,
+
+        /// Number of recent manifests to show when no refs are provided
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
     },
 
     /// Fire a prompt to an agent in a detached background session

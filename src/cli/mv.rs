@@ -11,8 +11,10 @@ use anyhow::{bail, Result};
 use claude_babel::agent_kind::AgentKind;
 use claude_babel::core::BabelCore;
 use claude_babel::harness_ops::{
-    apply_migration_plan, plan_migration_apply_ready, AdapterReadiness, HarnessMigrationReport,
-    MigrationApplyOptions, MigrationEdit, RecoveryClass, RiskSeverity,
+    apply_migration_plan, migration_manifest_root, migration_manifests_by_ref,
+    plan_migration_apply_ready, recent_migration_manifests, AdapterReadiness,
+    HarnessMigrationReport, MigrationApplyOptions, MigrationEdit, MigrationManifestEntry,
+    RecoveryClass, RiskSeverity,
 };
 
 pub fn expand_tilde(path: &Path) -> PathBuf {
@@ -195,6 +197,43 @@ pub async fn cmd_mv(
         println!("preserved/skipped: {}", report.skipped.len());
     }
     Ok(())
+}
+
+pub fn cmd_mv_log(refs: Vec<String>, limit: usize, json: bool) -> Result<()> {
+    let manifests = if refs.is_empty() {
+        recent_migration_manifests(limit)?
+    } else {
+        migration_manifests_by_ref(&refs)?
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&manifests)?);
+        return Ok(());
+    }
+
+    if manifests.is_empty() {
+        println!(
+            "no babel mv manifests found under {}",
+            migration_manifest_root().display()
+        );
+        return Ok(());
+    }
+
+    for manifest in manifests {
+        print_manifest(&manifest);
+    }
+    Ok(())
+}
+
+fn print_manifest(manifest: &MigrationManifestEntry) {
+    println!(
+        "{}  {}  edits:{} backups:{} events:{}",
+        manifest.id, manifest.status, manifest.edits_total, manifest.backups, manifest.events
+    );
+    println!("  from: {}", manifest.old_path.display());
+    println!("  to:   {}", manifest.new_path.display());
+    println!("  file: {}", manifest.manifest_path.display());
+    println!("  modified: {}", manifest.modified_at);
 }
 
 #[cfg(test)]

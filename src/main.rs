@@ -69,6 +69,10 @@ async fn main() -> Result<()> {
         tracing::debug!("debug logging enabled via --debug flag");
     }
 
+    if let Commands::MvLog { refs, limit } = &cli.command {
+        return cli::mv::cmd_mv_log(refs.clone(), *limit, cli.json);
+    }
+
     let is_migration_doctor = match &cli.command {
         Commands::Mv { doctor, .. } => cli.doctor || *doctor,
         _ => false,
@@ -251,6 +255,8 @@ async fn main() -> Result<()> {
                 .await
             }
         }
+
+        Commands::MvLog { refs, limit } => cli::mv::cmd_mv_log(refs, limit, cli.json),
 
         Commands::Fingerprint {
             input,

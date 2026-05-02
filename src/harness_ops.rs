@@ -37,6 +37,10 @@ mod qwen;
 mod roo;
 
 pub use apply::{apply_migration_plan, MigrationApplyOptions, MigrationApplyReport};
+pub use apply::{
+    migration_manifest_root, migration_manifests_by_ref, recent_migration_manifests,
+    MigrationManifestEntry,
+};
 
 const MAX_SCAN_FILES: usize = 5_000;
 const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
