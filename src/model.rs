@@ -88,6 +88,77 @@ impl fmt::Display for ParsePaneAddrError {
 
 impl std::error::Error for ParsePaneAddrError {}
 
+/// A live-pane operation target carried in IPC DTOs.
+///
+/// `Addr` is the canonical, unambiguous form that names both the kitty socket
+/// and the pane id. `Id` is a legacy shim for CLI input edges where the
+/// socket has not yet been resolved; the daemon honors it by scanning every
+/// known kitty socket. New callers should always produce `Addr`.
+///
+/// Wire form (externally tagged, snake_case):
+/// ```json
+/// { "addr": { "socket": "unix:...", "id": 42 } }
+/// { "id": 42 }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSelector {
+    /// Canonical socket-qualified address.
+    Addr(PaneAddr),
+    /// Legacy bare pane id; daemon resolves by scanning all sockets.
+    Id(u64),
+}
+
+impl PaneSelector {
+    /// The pane id regardless of selector form.
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Addr(a) => a.id,
+            Self::Id(id) => *id,
+        }
+    }
+
+    /// Canonical address if known, else `None`.
+    pub fn addr(&self) -> Option<&PaneAddr> {
+        match self {
+            Self::Addr(a) => Some(a),
+            Self::Id(_) => None,
+        }
+    }
+
+    /// True when the selector is the canonical address form.
+    pub fn is_addr(&self) -> bool {
+        matches!(self, Self::Addr(_))
+    }
+}
+
+impl From<PaneAddr> for PaneSelector {
+    fn from(addr: PaneAddr) -> Self {
+        Self::Addr(addr)
+    }
+}
+
+impl From<&PaneAddr> for PaneSelector {
+    fn from(addr: &PaneAddr) -> Self {
+        Self::Addr(addr.clone())
+    }
+}
+
+impl From<u64> for PaneSelector {
+    fn from(id: u64) -> Self {
+        Self::Id(id)
+    }
+}
+
+impl fmt::Display for PaneSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Addr(addr) => fmt::Display::fmt(addr, f),
+            Self::Id(id) => write!(f, "{}", id),
+        }
+    }
+}
+
 /// Harness-native session id.
 ///
 /// This preserves the provider's own stable id without assuming it is globally
@@ -233,6 +304,47 @@ mod tests {
             serde_json::to_value(SessionId::new("sess-1")).unwrap(),
             json!("sess-1")
         );
+    }
+
+    #[test]
+    fn pane_selector_addr_roundtrips_json() {
+        let addr = PaneAddr::new("unix:/run/user/1000/kitty.sock-12345", 42);
+        let selector = PaneSelector::from(addr.clone());
+
+        let json = serde_json::to_value(&selector).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "addr": {
+                    "socket": "unix:/run/user/1000/kitty.sock-12345",
+                    "id": 42
+                }
+            })
+        );
+        let back: PaneSelector = serde_json::from_value(json).unwrap();
+        assert_eq!(back, selector);
+        assert_eq!(back.id(), 42);
+        assert_eq!(back.addr(), Some(&addr));
+        assert!(back.is_addr());
+    }
+
+    #[test]
+    fn pane_selector_id_roundtrips_json() {
+        let selector = PaneSelector::from(42u64);
+
+        let json = serde_json::to_value(&selector).unwrap();
+        assert_eq!(json, json!({ "id": 42 }));
+        let back: PaneSelector = serde_json::from_value(json).unwrap();
+        assert_eq!(back, selector);
+        assert_eq!(back.id(), 42);
+        assert_eq!(back.addr(), None);
+        assert!(!back.is_addr());
+    }
+
+    #[test]
+    fn pane_selector_id_and_addr_with_same_id_are_distinct() {
+        let addr = PaneAddr::new("unix:/run/user/1000/kitty.sock-9", 7);
+        assert_ne!(PaneSelector::from(addr), PaneSelector::from(7u64));
     }
 
     #[test]

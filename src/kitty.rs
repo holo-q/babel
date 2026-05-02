@@ -38,7 +38,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::instrument;
 
-pub use crate::model::PaneAddr;
+pub use crate::model::{PaneAddr, PaneSelector};
 
 // VTR semantic tracing - boundary markers for kitty IPC crossings
 // - boundary!: External domain crossings (IPC, subprocess calls)

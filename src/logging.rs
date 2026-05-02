@@ -6,11 +6,11 @@
 //! ## Format
 //!
 //! ```text
-//! Pane(k42)::Focused
-//! Pane(k42)::StateChanged { Idle → Thinking }
-//! Pane(k42)::Pulse { 0.75, token_output }
-//! Window(k42)::Added { ws:3, "claude - project" }
-//! Session::Matched { k42 ↔ "uuid-short", high }
+//! Pane(k42@12345)::Focused
+//! Pane(k42@12345)::StateChanged { Idle → Thinking }
+//! Pane(k42@12345)::Pulse { 0.75, token_output }
+//! Window(k42@12345)::Added { ws:3, "agent - project" }
+//! Session::Matched { k42@12345 ↔ "uuid-short", high }
 //! SFX::Failed { complete, "socket error" }
 //! ```
 //!
@@ -27,23 +27,23 @@ pub fn format_event(event: &BabelEvent) -> String {
     match event {
         // ─── Pane Events ────────────────────────────────────────────────────────
         BabelEvent::PaneFocused {
-            kitty_id,
+            addr,
             session_id,
         } => match session_id {
-            Some(sid) => format!("Pane(k{})::Focused {{ {} }}", kitty_id, short_uuid(sid)),
-            None => format!("Pane(k{})::Focused", kitty_id),
+            Some(sid) => format!("Pane({})::Focused {{ {} }}", pane_label(addr), short_uuid(sid)),
+            None => format!("Pane({})::Focused", pane_label(addr)),
         },
 
         BabelEvent::PaneUnfocused {
-            kitty_id,
+            addr,
             session_id,
         } => match session_id {
-            Some(sid) => format!("Pane(k{})::Unfocused {{ {} }}", kitty_id, short_uuid(sid)),
-            None => format!("Pane(k{})::Unfocused", kitty_id),
+            Some(sid) => format!("Pane({})::Unfocused {{ {} }}", pane_label(addr), short_uuid(sid)),
+            None => format!("Pane({})::Unfocused", pane_label(addr)),
         },
 
         BabelEvent::SessionStateChanged {
-            kitty_id,
+            addr,
             workspace,
             old_state,
             new_state,
@@ -54,12 +54,12 @@ pub fn format_event(event: &BabelEvent) -> String {
             let ask = if *asking_question { " ?" } else { "" };
             format!(
                 "Pane(k{})::State {{ {:?} → {:?}{}{} }}",
-                kitty_id, old_state, new_state, ws, ask
+                addr.short(), old_state, new_state, ws, ask
             )
         }
 
         BabelEvent::ActivityPulse {
-            kitty_id,
+            addr,
             workspace,
             intensity,
             trigger,
@@ -68,7 +68,7 @@ pub fn format_event(event: &BabelEvent) -> String {
             let ws = workspace.map_or(String::new(), |w| format!(" ws:{}", w));
             format!(
                 "Pane(k{})::Pulse {{ {:.2}, {}{} }}",
-                kitty_id,
+                addr.short(),
                 intensity,
                 format_trigger(trigger),
                 ws
@@ -77,7 +77,7 @@ pub fn format_event(event: &BabelEvent) -> String {
 
         // ─── Window Events ──────────────────────────────────────────────────────
         BabelEvent::WindowAdded {
-            kitty_id,
+            addr,
             title,
             workspace,
             agent_kind,
@@ -92,27 +92,27 @@ pub fn format_event(event: &BabelEvent) -> String {
             };
             format!(
                 "Window(k{})::Added {{ {}{}{} }}",
-                kitty_id, agent_tag, ws, short_title
+                addr.short(), agent_tag, ws, short_title
             )
         }
 
-        BabelEvent::WindowRemoved { kitty_id } => {
-            format!("Window(k{})::Removed", kitty_id)
+        BabelEvent::WindowRemoved { addr } => {
+            format!("Window(k{})::Removed", addr.short())
         }
 
         BabelEvent::WindowWorkspaceChanged {
-            kitty_id,
+            addr,
             old_workspace,
             new_workspace,
         } => {
             let old = old_workspace.map_or("?".to_string(), |w| w.to_string());
             let new = new_workspace.map_or("?".to_string(), |w| w.to_string());
-            format!("Window(k{})::Moved {{ {} → {} }}", kitty_id, old, new)
+            format!("Window(k{})::Moved {{ {} → {} }}", addr.short(), old, new)
         }
 
         // ─── Terminal Events ────────────────────────────────────────────────────
         BabelEvent::TerminalOpened {
-            kitty_id,
+            addr,
             title,
             workspace,
             ..
@@ -121,28 +121,28 @@ pub fn format_event(event: &BabelEvent) -> String {
             let short_title = truncate_title(title, 30);
             format!(
                 "Terminal(k{})::Opened {{ {}{} }}",
-                kitty_id, ws, short_title
+                addr.short(), ws, short_title
             )
         }
 
-        BabelEvent::TerminalClosed { kitty_id } => {
-            format!("Terminal(k{})::Closed", kitty_id)
+        BabelEvent::TerminalClosed { addr } => {
+            format!("Terminal(k{})::Closed", addr.short())
         }
 
-        BabelEvent::TerminalBecameAgent { kitty_id, title } => {
+        BabelEvent::TerminalBecameAgent { addr, title } => {
             let short_title = truncate_title(title, 30);
-            format!("Terminal(k{})::BecameAgent {{ {} }}", kitty_id, short_title)
+            format!("Terminal(k{})::BecameAgent {{ {} }}", addr.short(), short_title)
         }
 
         // ─── Session Events ─────────────────────────────────────────────────────
         BabelEvent::SessionMatched {
-            kitty_id,
+            addr,
             session_id,
             confidence,
         } => {
             format!(
                 "Session::Matched {{ k{} ↔ {}, {} }}",
-                kitty_id,
+                addr.short(),
                 short_uuid(session_id),
                 confidence
             )
@@ -345,6 +345,15 @@ fn format_trigger(trigger: &PulseTrigger) -> &'static str {
     }
 }
 
+/// Socket-aware label for live pane logs.
+///
+/// Keeping the leading `k` preserves the old visual rhythm while the suffix
+/// carries the missing socket identity (`42@12345`). Hook-only events still
+/// log bare optional kitty ids because the hook protocol may not know a socket.
+fn pane_label(addr: &crate::PaneAddr) -> String {
+    format!("k{}", addr.short())
+}
+
 /// Shorten a UUID to first 8 chars for readability
 fn short_uuid(uuid: &str) -> &str {
     if uuid.len() > 8 {
@@ -436,22 +445,27 @@ pub fn format_disconnected(target: &str, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaneAddr;
     use scrollparse::claude::ActivityState;
+
+    fn test_addr() -> PaneAddr {
+        PaneAddr::new("unix:/run/user/1000/kitty.sock-12345", 42)
+    }
 
     #[test]
     fn test_pane_focused() {
         let event = BabelEvent::PaneFocused {
-            kitty_id: 42,
+            addr: test_addr(),
             session_id: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Pane(k42)::Focused { a1b2c3d4 }");
+        assert_eq!(formatted, "Pane(k42@12345)::Focused { a1b2c3d4 }");
     }
 
     #[test]
     fn test_state_changed() {
         let event = BabelEvent::SessionStateChanged {
-            kitty_id: 42,
+            addr: test_addr(),
             session_id: None,
             workspace: Some(3),
             old_state: ActivityState::Idle,
@@ -460,46 +474,46 @@ mod tests {
             agent_kind: crate::AgentKind::Claude,
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Pane(k42)::State { Idle → Thinking ws:3 ? }");
+        assert_eq!(formatted, "Pane(k42@12345)::State { Idle → Thinking ws:3 ? }");
     }
 
     #[test]
     fn test_activity_pulse() {
         let event = BabelEvent::ActivityPulse {
-            kitty_id: 42,
+            addr: test_addr(),
             session_id: None,
             workspace: Some(1),
             intensity: 0.75,
             trigger: PulseTrigger::TokenOutput,
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Pane(k42)::Pulse { 0.75, token ws:1 }");
+        assert_eq!(formatted, "Pane(k42@12345)::Pulse { 0.75, token ws:1 }");
     }
 
     #[test]
     fn test_window_added() {
         let event = BabelEvent::WindowAdded {
-            kitty_id: 42,
-            title: "claude - /home/user/project".to_string(),
+            addr: test_addr(),
+            title: "agent - /home/user/project".to_string(),
             workspace: Some(2),
             agent_kind: crate::AgentKind::Claude,
         };
         let formatted = format_event(&event);
         assert_eq!(
             formatted,
-            "Window(k42)::Added { ws:2 \"claude - /home/user/project\" }"
+            "Window(k42@12345)::Added { ws:2 \"agent - /home/user/project\" }"
         );
     }
 
     #[test]
     fn test_session_matched() {
         let event = BabelEvent::SessionMatched {
-            kitty_id: 42,
+            addr: test_addr(),
             session_id: "abcd1234-5678-90ab-cdef-1234567890ab".to_string(),
             confidence: "high".to_string(),
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Session::Matched { k42 ↔ abcd1234, high }");
+        assert_eq!(formatted, "Session::Matched { k42@12345 ↔ abcd1234, high }");
     }
 
     #[test]

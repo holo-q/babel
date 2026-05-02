@@ -41,7 +41,7 @@ use vtr::trace_error;
 
 use crate::babel_storage;
 use crate::daemon::{BabelState, TerminalInfo};
-use crate::kitty;
+use crate::kitty::{self, PaneAddr, PaneSelector};
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::{MigrateResult, SessionInfo};
 use crate::utility::ipc::{is_daemon_running, send_request, Request, Response};
@@ -294,8 +294,9 @@ impl BabelCore {
     /// Get a specific agent pane by ID, or focused pane if None.
     #[instrument(level = "debug", skip(self))]
     pub async fn pane(&self, pane_id: Option<u64>) -> Result<Option<AgentPane>> {
+        let target = pane_id.map(PaneSelector::from);
         match &self.mode {
-            CoreMode::Connected => match send_request(&Request::Status { pane_id }).await {
+            CoreMode::Connected => match send_request(&Request::Status { target }).await {
                 Ok(Response::Window { window }) => Ok(*window),
                 Ok(other) => bail!("unexpected response: {:?}", other),
                 Err(e) => {
@@ -315,6 +316,25 @@ impl BabelCore {
     #[instrument(level = "debug", skip(self))]
     pub async fn window(&self, pane_id: Option<u64>) -> Result<Option<AgentPane>> {
         self.pane(pane_id).await
+    }
+
+    /// Address-aware variant of `pane`. Resolves to the canonical PaneAddr.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn pane_addr(&self, addr: &PaneAddr) -> Result<Option<AgentPane>> {
+        match &self.mode {
+            CoreMode::Connected => {
+                let target = Some(PaneSelector::from(addr));
+                match send_request(&Request::Status { target }).await {
+                    Ok(Response::Window { window }) => Ok(*window),
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        trace_error!("IPC request failed", request = "Status", addr = %addr, error = %e);
+                        bail!("daemon connection failed: {}", e)
+                    }
+                }
+            }
+            CoreMode::Local(state) => Ok(state.panes.get(addr).cloned()),
+        }
     }
 
     /// Get session history
@@ -337,23 +357,50 @@ impl BabelCore {
         }
     }
 
-    /// Get scrollback text from a pane.
+    /// Get scrollback text from a pane (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn scrollback(&self, pane_id: u64, lines: Option<usize>) -> Result<String> {
+        self.scrollback_with(PaneSelector::from(pane_id), lines).await
+    }
+
+    /// Address-aware scrollback fetch for daemon-resolved targets.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn scrollback_addr(
+        &self,
+        addr: &PaneAddr,
+        lines: Option<usize>,
+    ) -> Result<String> {
+        self.scrollback_with(PaneSelector::from(addr), lines).await
+    }
+
+    async fn scrollback_with(
+        &self,
+        target: PaneSelector,
+        lines: Option<usize>,
+    ) -> Result<String> {
+        let pane_id = target.id();
         let text = match &self.mode {
-            CoreMode::Connected => match send_request(&Request::Scroll { pane_id }).await {
-                Ok(Response::Scrollback { text }) => text,
-                Ok(other) => bail!("unexpected response: {:?}", other),
-                Err(e) => {
-                    trace_error!("IPC request failed", request = "Scroll", pane_id = pane_id, error = %e);
-                    warn!("daemon request failed: {}", e);
-                    bail!("daemon connection failed: {}", e)
+            CoreMode::Connected => {
+                match send_request(&Request::Scroll {
+                    target: target.clone(),
+                })
+                .await
+                {
+                    Ok(Response::Scrollback { text }) => text,
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        trace_error!("IPC request failed", request = "Scroll", target = %target, error = %e);
+                        warn!("daemon request failed: {}", e);
+                        bail!("daemon connection failed: {}", e)
+                    }
                 }
+            }
+            CoreMode::Local(_) => match target.addr() {
+                Some(addr) => kitty::get_scrollback_on_socket(&addr.socket, addr.id).await?,
+                None => kitty::get_scrollback(pane_id).await?,
             },
-            CoreMode::Local(_) => kitty::get_scrollback(pane_id).await?,
         };
 
-        // Apply line limit if specified
         if let Some(n) = lines {
             let limited: Vec<&str> = text.lines().rev().take(n).collect();
             Ok(limited.into_iter().rev().collect::<Vec<_>>().join("\n"))
@@ -366,35 +413,64 @@ impl BabelCore {
     // Mutation Operations (state-changing)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Focus a pane.
+    /// Focus a pane (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn focus(&self, pane_id: u64) -> Result<()> {
+        self.focus_target(PaneSelector::from(pane_id)).await
+    }
+
+    /// Focus a pane by canonical address.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn focus_addr(&self, addr: &PaneAddr) -> Result<()> {
+        self.focus_target(PaneSelector::from(addr)).await
+    }
+
+    async fn focus_target(&self, target: PaneSelector) -> Result<()> {
         match &self.mode {
-            CoreMode::Connected => match send_request(&Request::Focus { pane_id }).await {
-                Ok(Response::Ok { .. }) => Ok(()),
-                Ok(Response::Error { message }) => {
-                    trace_error!("focus failed", pane_id = pane_id, error = %message);
-                    bail!("{}", message)
+            CoreMode::Connected => {
+                match send_request(&Request::Focus {
+                    target: target.clone(),
+                })
+                .await
+                {
+                    Ok(Response::Ok { .. }) => Ok(()),
+                    Ok(Response::Error { message }) => {
+                        trace_error!("focus failed", target = %target, error = %message);
+                        bail!("{}", message)
+                    }
+                    Ok(other) => bail!("unexpected response: {:?}", other),
+                    Err(e) => {
+                        trace_error!("IPC request failed", request = "Focus", target = %target, error = %e);
+                        bail!("daemon connection failed: {}", e)
+                    }
                 }
-                Ok(other) => bail!("unexpected response: {:?}", other),
-                Err(e) => {
-                    trace_error!("IPC request failed", request = "Focus", pane_id = pane_id, error = %e);
-                    bail!("daemon connection failed: {}", e)
-                }
+            }
+            CoreMode::Local(_) => match target.addr() {
+                Some(addr) => kitty::focus_pane_on_socket(&addr.socket, addr.id).await,
+                None => kitty::focus_pane(target.id()).await,
             },
-            CoreMode::Local(_) => kitty::focus_pane(pane_id).await,
         }
     }
 
-    /// Send text to a pane (with Enter/CR at end).
+    /// Send text to a pane (with Enter/CR at end). Legacy bare-id edge.
     ///
     /// The text is appended with a carriage return to submit it to the agent.
     #[instrument(level = "debug", skip(self, text))]
     pub async fn send(&self, pane_id: u64, text: &str) -> Result<()> {
+        self.send_target(PaneSelector::from(pane_id), text).await
+    }
+
+    /// Send text to a pane addressed canonically.
+    #[instrument(level = "debug", skip(self, text))]
+    pub async fn send_addr(&self, addr: &PaneAddr, text: &str) -> Result<()> {
+        self.send_target(PaneSelector::from(addr), text).await
+    }
+
+    async fn send_target(&self, target: PaneSelector, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::Send {
-                    pane_id,
+                    target,
                     text: text.to_string(),
                 })
                 .await
@@ -406,23 +482,37 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(_) => {
-                // Append CR to submit
                 let text_with_cr = format!("{}\r", text);
-                kitty::send_text(pane_id, &text_with_cr).await
+                match target.addr() {
+                    Some(addr) => {
+                        kitty::send_text_on_socket(&addr.socket, addr.id, &text_with_cr).await
+                    }
+                    None => kitty::send_text(target.id(), &text_with_cr).await,
+                }
             }
         }
     }
 
-    /// Type text to a pane (without Enter/CR at end).
+    /// Type text to a pane (without Enter/CR at end). Legacy bare-id edge.
     ///
     /// Types the text into the input area without submitting. Useful for
     /// composing prompts incrementally or staging input.
     #[instrument(level = "debug", skip(self, text))]
     pub async fn type_text(&self, pane_id: u64, text: &str) -> Result<()> {
+        self.type_text_target(PaneSelector::from(pane_id), text).await
+    }
+
+    /// Type text without submitting, addressed canonically.
+    #[instrument(level = "debug", skip(self, text))]
+    pub async fn type_text_addr(&self, addr: &PaneAddr, text: &str) -> Result<()> {
+        self.type_text_target(PaneSelector::from(addr), text).await
+    }
+
+    async fn type_text_target(&self, target: PaneSelector, text: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::Type {
-                    pane_id,
+                    target,
                     text: text.to_string(),
                 })
                 .await
@@ -433,10 +523,10 @@ impl BabelCore {
                     Err(e) => bail!("daemon connection failed: {}", e),
                 }
             }
-            CoreMode::Local(_) => {
-                // No CR - just type the text as-is
-                kitty::send_text(pane_id, text).await
-            }
+            CoreMode::Local(_) => match target.addr() {
+                Some(addr) => kitty::send_text_on_socket(&addr.socket, addr.id, text).await,
+                None => kitty::send_text(target.id(), text).await,
+            },
         }
     }
 
@@ -450,9 +540,30 @@ impl BabelCore {
     /// operations during broadcast.
     #[instrument(level = "debug", skip(self))]
     pub async fn has_pending_input(&self, pane_id: u64) -> Result<(bool, Option<String>)> {
+        self.has_pending_input_target(PaneSelector::from(pane_id))
+            .await
+    }
+
+    /// Address-aware variant of `has_pending_input`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn has_pending_input_addr(
+        &self,
+        addr: &PaneAddr,
+    ) -> Result<(bool, Option<String>)> {
+        self.has_pending_input_target(PaneSelector::from(addr)).await
+    }
+
+    async fn has_pending_input_target(
+        &self,
+        target: PaneSelector,
+    ) -> Result<(bool, Option<String>)> {
         match &self.mode {
             CoreMode::Connected => {
-                match send_request(&Request::HasPendingInput { pane_id }).await {
+                match send_request(&Request::HasPendingInput {
+                    target: target.clone(),
+                })
+                .await
+                {
                     Ok(Response::PendingInput {
                         has_pending,
                         pending_text,
@@ -464,21 +575,33 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(_) => {
-                // Get scrollback and detect pending input
-                let scrollback = kitty::get_scrollback(pane_id).await?;
+                let scrollback = match target.addr() {
+                    Some(addr) => kitty::get_scrollback_on_socket(&addr.socket, addr.id).await?,
+                    None => kitty::get_scrollback(target.id()).await?,
+                };
                 let (has_pending, pending_text) = detect_pending_input(&scrollback);
                 Ok((has_pending, pending_text))
             }
         }
     }
 
-    /// Set icon/tag for a pane.
+    /// Set icon/tag for a pane (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn set_icon(&self, pane_id: u64, icon: &str) -> Result<()> {
+        self.set_icon_target(PaneSelector::from(pane_id), icon).await
+    }
+
+    /// Set icon/tag for a pane addressed canonically.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn set_icon_addr(&self, addr: &PaneAddr, icon: &str) -> Result<()> {
+        self.set_icon_target(PaneSelector::from(addr), icon).await
+    }
+
+    async fn set_icon_target(&self, target: PaneSelector, icon: &str) -> Result<()> {
         match &self.mode {
             CoreMode::Connected => {
                 match send_request(&Request::Tag {
-                    pane_id,
+                    target,
                     icon: icon.to_string(),
                 })
                 .await
@@ -490,32 +613,54 @@ impl BabelCore {
                 }
             }
             CoreMode::Local(state) => {
-                // Get session ID from our state
-                if let Some(pane) = state.find_pane_by_id(pane_id) {
+                let pane = match target.addr() {
+                    Some(addr) => state.panes.get(addr).cloned(),
+                    None => state.find_pane_by_id(target.id()).cloned(),
+                };
+                if let Some(pane) = &pane {
                     if let Some(session_id) = &pane.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::set_icon(&db, session_id, icon)?;
                     }
                 }
-                // Also set kitty user var for visual feedback
-                kitty::set_user_var(pane_id, "babel_icon", icon).await?;
+                match target.addr() {
+                    Some(addr) => {
+                        kitty::set_user_var_on_socket(&addr.socket, addr.id, "babel_icon", icon)
+                            .await?
+                    }
+                    None => kitty::set_user_var(target.id(), "babel_icon", icon).await?,
+                }
                 Ok(())
             }
         }
     }
 
-    /// Mark session as read
+    /// Mark session as read (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn mark_read(&self, pane_id: u64) -> Result<()> {
+        self.mark_read_target(PaneSelector::from(pane_id)).await
+    }
+
+    /// Mark session as read for a canonical address.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn mark_read_addr(&self, addr: &PaneAddr) -> Result<()> {
+        self.mark_read_target(PaneSelector::from(addr)).await
+    }
+
+    async fn mark_read_target(&self, target: PaneSelector) -> Result<()> {
         match &self.mode {
-            CoreMode::Connected => match send_request(&Request::MarkRead { pane_id }).await {
+            CoreMode::Connected => match send_request(&Request::MarkRead { target }).await {
                 Ok(Response::Ok { .. }) => Ok(()),
                 Ok(Response::Error { message }) => bail!("{}", message),
                 Ok(other) => bail!("unexpected response: {:?}", other),
                 Err(e) => bail!("daemon connection failed: {}", e),
             },
             CoreMode::Local(state) => {
-                if let Some(pane) = state.find_pane_by_id(pane_id) {
+                let pane = match target.addr() {
+                    Some(addr) => state.panes.get(addr).cloned(),
+                    None => state.find_pane_by_id(target.id()).cloned(),
+                };
+                if let Some(pane) = pane {
                     if let Some(session_id) = &pane.session_id {
                         let db = babel_storage::init_db()?;
                         babel_storage::mark_read(&db, session_id)?;
@@ -538,8 +683,9 @@ impl BabelCore {
     /// When pane_id is None, solo mode is disabled and all panes are shown.
     #[instrument(level = "debug", skip(self))]
     pub async fn solo(&self, pane_id: Option<u64>) -> Result<()> {
+        let target = pane_id.map(PaneSelector::from);
         match &self.mode {
-            CoreMode::Connected => match send_request(&Request::Solo { pane_id }).await {
+            CoreMode::Connected => match send_request(&Request::Solo { target }).await {
                 Ok(Response::Ok { message }) => {
                     info!("{}", message);
                     Ok(())
@@ -548,7 +694,7 @@ impl BabelCore {
                 Ok(other) => bail!("unexpected response: {:?}", other),
                 Err(e) => bail!("daemon connection failed: {}", e),
             },
-            CoreMode::Local(state) => {
+            CoreMode::Local(_state) => {
                 // Local mode doesn't support solo - would need mutable state
                 bail!("Solo mode requires daemon to be running")
             }

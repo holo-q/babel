@@ -100,15 +100,6 @@ pub fn current_pane_info() -> anyhow::Result<(u64, String)> {
     Ok((id, socket))
 }
 
-/// Get full PaneAddr for the current pane
-///
-/// Combines KITTY_WINDOW_ID and KITTY_LISTEN_ON into a PaneAddr for
-/// precise addressing. Useful for operations that need socket-specific targeting.
-pub fn current_pane_addr() -> anyhow::Result<babel::kitty::PaneAddr> {
-    let (id, socket) = current_pane_info()?;
-    Ok(babel::kitty::PaneAddr::new(socket, id))
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLI Styling - Spaceship semantic command styling
 // ═══════════════════════════════════════════════════════════════════════════════

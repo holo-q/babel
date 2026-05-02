@@ -114,4 +114,4 @@ pub use agent_kind::{
     AgentKind, HarnessSpec, HarnessSupport, HookEventSpec, HookStateEffect, InstallStrategy,
     PulseEffect, ReadEffect,
 };
-pub use model::{AgentSessionKey, PaneAddr, SessionId};
+pub use model::{AgentSessionKey, PaneAddr, PaneSelector, SessionId};

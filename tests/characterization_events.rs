@@ -1,9 +1,15 @@
 use babel::{
     events::{BabelEvent, EventFilter, EventMessage, PulseTrigger},
-    ActivityState, AgentKind,
+    ActivityState, AgentKind, PaneAddr,
 };
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
+
+const SOCK: &str = "unix:/run/user/1000/kitty.sock-12345";
+
+fn addr(id: u64) -> PaneAddr {
+    PaneAddr::new(SOCK, id)
+}
 
 fn assert_event_json_roundtrip(event: BabelEvent, expected: Value) {
     let encoded = serde_json::to_value(&event).unwrap();
@@ -14,17 +20,17 @@ fn assert_event_json_roundtrip(event: BabelEvent, expected: Value) {
 }
 
 #[test]
-fn window_events_keep_legacy_kitty_id_wire_shape() {
+fn window_lifecycle_events_carry_pane_addr_on_the_wire() {
     assert_event_json_roundtrip(
         BabelEvent::WindowAdded {
-            kitty_id: 42,
+            addr: addr(42),
             title: "claude - /home/example/project".to_string(),
             workspace: Some(3),
             agent_kind: AgentKind::Codex,
         },
         json!({
             "event": "window_added",
-            "kitty_id": 42,
+            "addr": { "socket": SOCK, "id": 42 },
             "title": "claude - /home/example/project",
             "workspace": 3,
             "agent_kind": "codex"
@@ -32,19 +38,116 @@ fn window_events_keep_legacy_kitty_id_wire_shape() {
     );
 
     assert_event_json_roundtrip(
-        BabelEvent::WindowRemoved { kitty_id: 42 },
+        BabelEvent::WindowRemoved { addr: addr(42) },
         json!({
             "event": "window_removed",
-            "kitty_id": 42
+            "addr": { "socket": SOCK, "id": 42 }
         }),
     );
 }
 
 #[test]
-fn session_state_changed_keeps_kitty_and_session_identity_wire_shape() {
+fn focus_and_workspace_events_carry_pane_addr_on_the_wire() {
+    assert_event_json_roundtrip(
+        BabelEvent::PaneFocused {
+            addr: addr(13),
+            session_id: Some("sess-focused".to_string()),
+        },
+        json!({
+            "event": "pane_focused",
+            "addr": { "socket": SOCK, "id": 13 },
+            "session_id": "sess-focused"
+        }),
+    );
+
+    assert_event_json_roundtrip(
+        BabelEvent::PaneUnfocused {
+            addr: addr(13),
+            session_id: None,
+        },
+        json!({
+            "event": "pane_unfocused",
+            "addr": { "socket": SOCK, "id": 13 },
+            "session_id": null
+        }),
+    );
+
+    assert_event_json_roundtrip(
+        BabelEvent::WindowWorkspaceChanged {
+            addr: addr(21),
+            old_workspace: Some(1),
+            new_workspace: Some(4),
+        },
+        json!({
+            "event": "window_workspace_changed",
+            "addr": { "socket": SOCK, "id": 21 },
+            "old_workspace": 1,
+            "new_workspace": 4
+        }),
+    );
+}
+
+#[test]
+fn terminal_events_carry_pane_addr_on_the_wire() {
+    assert_event_json_roundtrip(
+        BabelEvent::TerminalOpened {
+            addr: addr(101),
+            title: "~/project: fish".to_string(),
+            cwd: std::path::PathBuf::from("/home/example/project"),
+            workspace: Some(2),
+        },
+        json!({
+            "event": "terminal_opened",
+            "addr": { "socket": SOCK, "id": 101 },
+            "title": "~/project: fish",
+            "cwd": "/home/example/project",
+            "workspace": 2
+        }),
+    );
+
+    assert_event_json_roundtrip(
+        BabelEvent::TerminalClosed { addr: addr(101) },
+        json!({
+            "event": "terminal_closed",
+            "addr": { "socket": SOCK, "id": 101 }
+        }),
+    );
+
+    assert_event_json_roundtrip(
+        BabelEvent::TerminalBecameAgent {
+            addr: addr(101),
+            title: "✳ thinking".to_string(),
+        },
+        json!({
+            "event": "terminal_became_agent",
+            "addr": { "socket": SOCK, "id": 101 },
+            "title": "✳ thinking"
+        }),
+    );
+}
+
+#[test]
+fn session_match_event_carries_pane_addr_and_session_id() {
+    assert_event_json_roundtrip(
+        BabelEvent::SessionMatched {
+            addr: addr(44),
+            session_id: "sess-match".to_string(),
+            confidence: "high".to_string(),
+        },
+        json!({
+            "event": "session_matched",
+            "addr": { "socket": SOCK, "id": 44 },
+            "session_id": "sess-match",
+            "confidence": "high"
+        }),
+    );
+}
+
+#[test]
+fn session_state_changed_carries_pane_addr_and_session_identity() {
     assert_event_json_roundtrip(
         BabelEvent::SessionStateChanged {
-            kitty_id: 77,
+            addr: addr(77),
             session_id: Some("session-abc".to_string()),
             workspace: Some(4),
             old_state: ActivityState::Idle,
@@ -54,7 +157,7 @@ fn session_state_changed_keeps_kitty_and_session_identity_wire_shape() {
         },
         json!({
             "event": "session_state_changed",
-            "kitty_id": 77,
+            "addr": { "socket": SOCK, "id": 77 },
             "session_id": "session-abc",
             "workspace": 4,
             "old_state": "idle",
@@ -66,10 +169,10 @@ fn session_state_changed_keeps_kitty_and_session_identity_wire_shape() {
 }
 
 #[test]
-fn activity_pulse_keeps_trigger_and_optional_session_wire_shape() {
+fn activity_pulse_carries_pane_addr_and_trigger() {
     assert_event_json_roundtrip(
         BabelEvent::ActivityPulse {
-            kitty_id: 88,
+            addr: addr(88),
             session_id: None,
             workspace: Some(2),
             intensity: 0.625,
@@ -77,7 +180,7 @@ fn activity_pulse_keeps_trigger_and_optional_session_wire_shape() {
         },
         json!({
             "event": "activity_pulse",
-            "kitty_id": 88,
+            "addr": { "socket": SOCK, "id": 88 },
             "session_id": null,
             "workspace": 2,
             "intensity": 0.625,
@@ -87,7 +190,43 @@ fn activity_pulse_keeps_trigger_and_optional_session_wire_shape() {
 }
 
 #[test]
+fn pane_addr_disambiguates_same_id_across_sockets_in_state_changed() {
+    // Two different kitty instances can both run pane id 7. Encoded BabelEvents
+    // for those panes must therefore differ on the wire — that's the whole
+    // reason live-pane events carry the address rather than just the raw id.
+    let one = BabelEvent::SessionStateChanged {
+        addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-111", 7),
+        session_id: Some("a".to_string()),
+        workspace: None,
+        old_state: ActivityState::Idle,
+        new_state: ActivityState::Thinking,
+        asking_question: false,
+        agent_kind: AgentKind::Claude,
+    };
+    let two = BabelEvent::SessionStateChanged {
+        addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-222", 7),
+        session_id: Some("b".to_string()),
+        workspace: None,
+        old_state: ActivityState::Idle,
+        new_state: ActivityState::Thinking,
+        asking_question: false,
+        agent_kind: AgentKind::Claude,
+    };
+
+    let one_json = serde_json::to_value(&one).unwrap();
+    let two_json = serde_json::to_value(&two).unwrap();
+
+    assert_eq!(one_json["addr"]["id"], 7);
+    assert_eq!(two_json["addr"]["id"], 7);
+    assert_ne!(one_json["addr"]["socket"], two_json["addr"]["socket"]);
+    assert_ne!(one_json, two_json);
+}
+
+#[test]
 fn hook_session_events_keep_session_id_and_optional_kitty_id_wire_shape() {
+    // Hook payloads do not currently carry a socket alongside their kitty id,
+    // so these events stay session-keyed with a kitty_id hint until the hook
+    // ingestion path can attach a full PaneAddr.
     assert_event_json_roundtrip(
         BabelEvent::SessionStarted {
             session_id: "sess-start".to_string(),
@@ -154,7 +293,7 @@ fn event_message_flattens_event_payload_at_top_level() {
     let message = EventMessage {
         timestamp: Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 45).unwrap(),
         seq: 17,
-        event: BabelEvent::WindowRemoved { kitty_id: 9001 },
+        event: BabelEvent::WindowRemoved { addr: addr(9001) },
     };
 
     assert_eq!(
@@ -163,7 +302,7 @@ fn event_message_flattens_event_payload_at_top_level() {
             "timestamp": "2026-05-01T12:30:45Z",
             "seq": 17,
             "event": "window_removed",
-            "kitty_id": 9001
+            "addr": { "socket": SOCK, "id": 9001 }
         })
     );
 }
@@ -172,7 +311,7 @@ fn event_message_flattens_event_payload_at_top_level() {
 fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
     let window_added: BabelEvent = serde_json::from_value(json!({
         "event": "window_added",
-        "kitty_id": 7,
+        "addr": { "socket": SOCK, "id": 7 },
         "title": "legacy claude pane",
         "workspace": null
     }))
@@ -180,11 +319,11 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
 
     match &window_added {
         BabelEvent::WindowAdded {
-            kitty_id,
+            addr,
             agent_kind,
             ..
         } => {
-            assert_eq!(*kitty_id, 7);
+            assert_eq!(addr.id, 7);
             assert_eq!(*agent_kind, AgentKind::Claude);
         }
         other => panic!("expected WindowAdded, got {other:?}"),
@@ -193,7 +332,7 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
         serde_json::to_value(window_added).unwrap(),
         json!({
             "event": "window_added",
-            "kitty_id": 7,
+            "addr": { "socket": SOCK, "id": 7 },
             "title": "legacy claude pane",
             "workspace": null,
             "agent_kind": "claude"
@@ -202,7 +341,7 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
 
     let state_changed: BabelEvent = serde_json::from_value(json!({
         "event": "session_state_changed",
-        "kitty_id": 8,
+        "addr": { "socket": SOCK, "id": 8 },
         "session_id": "legacy-session",
         "workspace": null,
         "old_state": "thinking",
@@ -213,12 +352,12 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
 
     match &state_changed {
         BabelEvent::SessionStateChanged {
-            kitty_id,
+            addr,
             session_id,
             agent_kind,
             ..
         } => {
-            assert_eq!(*kitty_id, 8);
+            assert_eq!(addr.id, 8);
             assert_eq!(session_id.as_deref(), Some("legacy-session"));
             assert_eq!(*agent_kind, AgentKind::Claude);
         }
@@ -228,7 +367,7 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
         serde_json::to_value(state_changed).unwrap(),
         json!({
             "event": "session_state_changed",
-            "kitty_id": 8,
+            "addr": { "socket": SOCK, "id": 8 },
             "session_id": "legacy-session",
             "workspace": null,
             "old_state": "thinking",
@@ -243,7 +382,7 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
 fn legacy_terminal_became_claude_alias_still_decodes() {
     let event: BabelEvent = serde_json::from_value(json!({
         "event": "terminal_became_claude",
-        "kitty_id": 11,
+        "addr": { "socket": SOCK, "id": 11 },
         "title": "claude"
     }))
     .unwrap();
@@ -252,7 +391,7 @@ fn legacy_terminal_became_claude_alias_still_decodes() {
         serde_json::to_value(event).unwrap(),
         json!({
             "event": "terminal_became_agent",
-            "kitty_id": 11,
+            "addr": { "socket": SOCK, "id": 11 },
             "title": "claude"
         })
     );
@@ -261,21 +400,21 @@ fn legacy_terminal_became_claude_alias_still_decodes() {
 #[test]
 fn event_filter_matches_empty_or_exact_snake_case_event_names() {
     let window_added = BabelEvent::WindowAdded {
-        kitty_id: 1,
+        addr: addr(1),
         title: "pane".to_string(),
         workspace: None,
         agent_kind: AgentKind::Claude,
     };
-    let window_removed = BabelEvent::WindowRemoved { kitty_id: 1 };
+    let window_removed = BabelEvent::WindowRemoved { addr: addr(1) };
     let pulse = BabelEvent::ActivityPulse {
-        kitty_id: 1,
+        addr: addr(1),
         session_id: Some("sess".to_string()),
         workspace: None,
         intensity: 1.0,
         trigger: PulseTrigger::TokenOutput,
     };
     let state_changed = BabelEvent::SessionStateChanged {
-        kitty_id: 1,
+        addr: addr(1),
         session_id: Some("sess".to_string()),
         workspace: None,
         old_state: ActivityState::Thinking,

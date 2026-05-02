@@ -83,15 +83,18 @@ use crate::fingerprint::{
     SessionFingerprint,
 };
 use crate::indicator::IndicatorEvent;
-use crate::kitty::PaneAddr;
+use crate::kitty::{PaneAddr, PaneSelector};
 use crate::kitty::{
     default_socket,
     discover_all_instances,
     focus_pane_any,
+    focus_pane_on_socket,
     get_scrollback, // used in fingerprint_match_addr
     get_scrollback_any,
+    get_scrollback_on_socket,
     reset_border_color_on_socket,
     send_text_any,
+    send_text_on_socket,
     set_border_color_on_socket,
 };
 use crate::paint::{
@@ -539,9 +542,17 @@ impl BabelState {
     // PaintEvent stream stays bit-identical to consumers regardless of which
     // internal pathway (poll, hook, workspace-change) triggered it.
 
-    /// Format kitty window ID as the indicator key panel widgets expect.
-    fn paint_pane_id(kitty_id: u64) -> String {
-        format!("k{}", kitty_id)
+    /// Format a pane address as the indicator key panel widgets expect.
+    ///
+    /// Address-derived rather than `k{id}`-only, because kitty pane ids are
+    /// unique only inside a single remote-control socket. Two live panes with
+    /// id 5 on different sockets would have collapsed onto the same paint
+    /// dot under the legacy format. The new shape mirrors `PaneAddr::short()`
+    /// (`<id>@<sock-pid>`) so traces, panel ids, and log prints all line up.
+    /// The id is opaque to consumers (richmon, richspace-babel) — they key
+    /// state by it but do not parse it, so widening the encoding is safe.
+    pub fn paint_pane_id(addr: &PaneAddr) -> String {
+        format!("k{}", addr.short())
     }
 
     /// Publish a single PaintEvent on the paint stream. No-op if no
@@ -579,7 +590,7 @@ impl BabelState {
                 });
         let ring_color = has_unread_ring.then(|| window.agent_kind.accent_color().to_string());
         let event = PaintEvent::Window(IndicatorEvent::Set {
-            id: Self::paint_pane_id(addr.id),
+            id: Self::paint_pane_id(addr),
             color: color.to_string(),
             workspace: window.workspace.unwrap_or(0) as u32,
             x_pos,
@@ -591,10 +602,12 @@ impl BabelState {
         self.publish_paint(event);
     }
 
-    /// Publish a Window Remove paint event for a closed pane.
-    fn emit_pane_remove_paint(&self, kitty_id: u64) {
+    /// Publish a Window Remove paint event for a closed pane. Takes the full
+    /// address so the paint id matches the one originally published — bare
+    /// kitty id alone is not enough to disambiguate across sockets.
+    fn emit_pane_remove_paint(&self, addr: &PaneAddr) {
         self.publish_paint(PaintEvent::Window(IndicatorEvent::Remove {
-            id: Self::paint_pane_id(kitty_id),
+            id: Self::paint_pane_id(addr),
         }));
     }
 
@@ -769,7 +782,7 @@ impl BabelState {
         for addr in new_terminal_addrs.difference(&old_terminal_addrs) {
             if let Some(t) = new_terminals.get(addr) {
                 self.event_publisher.publish(BabelEvent::TerminalOpened {
-                    kitty_id: addr.id,
+                    addr: addr.clone(),
                     title: t.title.clone(),
                     cwd: t.cwd.clone(),
                     workspace: t.workspace,
@@ -779,8 +792,9 @@ impl BabelState {
 
         // Emit TerminalClosed events for removed terminals
         for addr in old_terminal_addrs.difference(&new_terminal_addrs) {
-            self.event_publisher
-                .publish(BabelEvent::TerminalClosed { kitty_id: addr.id });
+            self.event_publisher.publish(BabelEvent::TerminalClosed {
+                addr: addr.clone(),
+            });
         }
 
         // Emit TerminalBecameAgent for terminals that just became agent sessions
@@ -789,7 +803,7 @@ impl BabelState {
                 if !old_term.is_agent && new_term.is_agent {
                     self.event_publisher
                         .publish(BabelEvent::TerminalBecameAgent {
-                            kitty_id: addr.id,
+                            addr: addr.clone(),
                             title: new_term.title.clone(),
                         });
                 }
@@ -904,7 +918,7 @@ impl BabelState {
         for addr in &added_addrs {
             if let Some(w) = new_windows.get(addr) {
                 self.event_publisher.publish(BabelEvent::WindowAdded {
-                    kitty_id: addr.id,
+                    addr: addr.clone(),
                     title: w.title.clone(),
                     workspace: w.workspace,
                     agent_kind: w.agent_kind,
@@ -931,10 +945,13 @@ impl BabelState {
             self.pane_ring.remove(addr);
             self.pane_unread.remove(addr);
 
-            self.event_publisher
-                .publish(BabelEvent::WindowRemoved { kitty_id: addr.id });
-            // Paint: tell clients to drop the dot.
-            self.emit_pane_remove_paint(addr.id);
+            self.event_publisher.publish(BabelEvent::WindowRemoved {
+                addr: addr.clone(),
+            });
+            // Paint: tell clients to drop the dot. Pass the full address so
+            // the Remove id matches the addr-derived Set id we published when
+            // the pane first appeared.
+            self.emit_pane_remove_paint(addr);
         }
 
         // Check for focus changes
@@ -953,7 +970,7 @@ impl BabelState {
             if let Some(ref addr) = old_focused {
                 if let Some(w) = self.panes.get(addr) {
                     self.event_publisher.publish(BabelEvent::PaneUnfocused {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         session_id: w.session_id.clone(),
                     });
                 }
@@ -962,7 +979,7 @@ impl BabelState {
             if let Some(ref addr) = new_focused {
                 if let Some(w) = new_windows.get(addr) {
                     self.event_publisher.publish(BabelEvent::PaneFocused {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         session_id: w.session_id.clone(),
                     });
                     // Mark as read when pane gains focus—the worker's voice is now heard
@@ -995,7 +1012,7 @@ impl BabelState {
             if old_ws != new_ws {
                 self.event_publisher
                     .publish(BabelEvent::WindowWorkspaceChanged {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         old_workspace: old_ws,
                         new_workspace: new_ws,
                     });
@@ -1062,7 +1079,7 @@ impl BabelState {
                         state!("pane_activity", format!("{:?}", old) => format!("{:?}", new_state), window = addr.short());
                         self.event_publisher
                             .publish(BabelEvent::SessionStateChanged {
-                                kitty_id: addr.id,
+                                addr: addr.clone(),
                                 session_id: window.session_id.clone(),
                                 workspace: window.workspace,
                                 old_state: old,
@@ -1078,7 +1095,7 @@ impl BabelState {
 
                         // Also emit ActivityPulse on state transitions
                         self.event_publisher.publish(BabelEvent::ActivityPulse {
-                            kitty_id: addr.id,
+                            addr: addr.clone(),
                             session_id: window.session_id.clone(),
                             workspace: window.workspace,
                             intensity: 0.8, // State transitions are significant
@@ -1174,7 +1191,7 @@ impl BabelState {
                         // Only emit if intensity is meaningful (avoid noise)
                         if intensity > 0.05 {
                             self.event_publisher.publish(BabelEvent::ActivityPulse {
-                                kitty_id: addr.id,
+                                addr: addr.clone(),
                                 session_id: window.session_id.clone(),
                                 workspace: window.workspace,
                                 intensity,
@@ -1340,7 +1357,7 @@ impl BabelState {
                 state!("pane_activity", format!("{:?}", old) => format!("{:?}", new_state), window = addr.short());
                 self.event_publisher
                     .publish(BabelEvent::SessionStateChanged {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         session_id: window.session_id.clone(),
                         workspace: window.workspace,
                         old_state: old,
@@ -1353,7 +1370,7 @@ impl BabelState {
 
                 // Also emit ActivityPulse on state transitions
                 self.event_publisher.publish(BabelEvent::ActivityPulse {
-                    kitty_id: addr.id,
+                    addr: addr.clone(),
                     session_id: window.session_id.clone(),
                     workspace: window.workspace,
                     intensity: 0.8, // State transitions are significant
@@ -1432,7 +1449,7 @@ impl BabelState {
                 // Only emit if intensity is meaningful
                 if intensity > 0.05 {
                     self.event_publisher.publish(BabelEvent::ActivityPulse {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         session_id: window.session_id.clone(),
                         workspace: window.workspace,
                         intensity,
@@ -1789,38 +1806,128 @@ impl BabelState {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // ID → PaneAddr Resolution Helpers
+    // Address-First Lookup + Legacy ID Resolution
     // ═══════════════════════════════════════════════════════════════════════════════
     //
-    // IPC requests use window_id: u64 for backwards compatibility.
-    // These helpers resolve IDs to windows by searching across all sockets.
+    // Canonical live identity is `PaneAddr { socket, id }`. Internal code that
+    // already has a `PaneAddr` should reach panes/state via `find_pane`/`find_pane_mut`,
+    // never by stripping to `addr.id` and re-resolving. The legacy `u64` family
+    // exists only for IPC/CLI edges that haven't been migrated yet, and it
+    // refuses to silently pick a winner when the same kitty id is live on more
+    // than one socket — multi-kitty collisions are real and the correctness
+    // cost of the wrong pane firing is much worse than a clean refusal.
 
-    /// Find a window by its kitty ID (searches across all sockets)
-    ///
-    /// Returns None if no window with that ID exists in any socket
-    pub fn find_pane_by_id(&self, id: u64) -> Option<&AgentPane> {
-        self.panes.values().find(|w| w.id() == id)
+    /// Address-first pane lookup. Use this whenever the caller already has a
+    /// `PaneAddr` in scope; do not detour through `addr.id`.
+    pub fn find_pane(&self, addr: &PaneAddr) -> Option<&AgentPane> {
+        self.panes.get(addr)
     }
 
-    /// Find a window by its kitty ID (mutable, searches across all sockets)
-    pub fn find_pane_by_id_mut(&mut self, id: u64) -> Option<&mut AgentPane> {
-        self.panes.values_mut().find(|w| w.id() == id)
+    /// Mutable address-first pane lookup.
+    pub fn find_pane_mut(&mut self, addr: &PaneAddr) -> Option<&mut AgentPane> {
+        self.panes.get_mut(addr)
     }
 
-    /// Find the PaneAddr for a given window ID
-    pub fn find_addr_by_id(&self, id: u64) -> Option<&PaneAddr> {
-        self.panes
-            .iter()
-            .find(|(_, w)| w.id() == id)
-            .map(|(addr, _)| addr)
+    /// Address-first activity-state lookup. Use this whenever the caller already
+    /// has a `PaneAddr` in scope.
+    pub fn pane_activity_state(
+        &self,
+        addr: &PaneAddr,
+    ) -> Option<scrollparse::claude::ActivityState> {
+        self.pane_states.get(addr).copied()
     }
 
-    /// Get activity state for a window by its kitty ID
-    pub fn get_activity_state(&self, id: u64) -> Option<scrollparse::claude::ActivityState> {
-        self.find_addr_by_id(id)
-            .and_then(|addr| self.pane_states.get(addr))
+    /// Resolve a bare kitty id to a single live `PaneAddr` with explicit
+    /// ambiguity awareness. The legacy IPC/CLI surface still hands us raw u64
+    /// pane ids; this is the one place that converts that to a canonical
+    /// address, and it tells the caller when the answer is not unique.
+    pub fn resolve_legacy_pane_id(&self, id: u64) -> PaneIdResolution {
+        let mut matches: Vec<PaneAddr> = self
+            .panes
+            .keys()
+            .filter(|addr| addr.id == id)
             .cloned()
+            .collect();
+        match matches.len() {
+            0 => PaneIdResolution::NotFound,
+            1 => PaneIdResolution::Found(matches.remove(0)),
+            _ => PaneIdResolution::Ambiguous(matches),
+        }
     }
+
+    /// Legacy edge shim: resolve a raw kitty id to a single pane.
+    ///
+    /// Returns `None` on either "not found" or "ambiguous" — refusing to act
+    /// on an ambiguous id is the whole point. Ambiguity is logged at warn
+    /// level with every candidate address so multi-kitty collisions surface
+    /// in the trace instead of corrupting state.
+    pub fn find_pane_by_id(&self, id: u64) -> Option<&AgentPane> {
+        match self.resolve_legacy_pane_id(id) {
+            PaneIdResolution::Found(addr) => self.panes.get(&addr),
+            PaneIdResolution::Ambiguous(candidates) => {
+                trace_legacy_id_ambiguous(id, &candidates);
+                None
+            }
+            PaneIdResolution::NotFound => None,
+        }
+    }
+
+    /// Legacy edge shim, mutable. See `find_pane_by_id` for ambiguity rules.
+    pub fn find_pane_by_id_mut(&mut self, id: u64) -> Option<&mut AgentPane> {
+        match self.resolve_legacy_pane_id(id) {
+            PaneIdResolution::Found(addr) => self.panes.get_mut(&addr),
+            PaneIdResolution::Ambiguous(candidates) => {
+                trace_legacy_id_ambiguous(id, &candidates);
+                None
+            }
+            PaneIdResolution::NotFound => None,
+        }
+    }
+
+    /// Legacy edge shim: resolve a raw kitty id to its `PaneAddr`. Returns
+    /// `None` on ambiguity for the same reason as `find_pane_by_id`.
+    pub fn find_addr_by_id(&self, id: u64) -> Option<PaneAddr> {
+        match self.resolve_legacy_pane_id(id) {
+            PaneIdResolution::Found(addr) => Some(addr),
+            PaneIdResolution::Ambiguous(candidates) => {
+                trace_legacy_id_ambiguous(id, &candidates);
+                None
+            }
+            PaneIdResolution::NotFound => None,
+        }
+    }
+
+    /// Get activity state for a window by its kitty ID. Legacy edge — prefer
+    /// `pane_activity_state(&PaneAddr)` whenever the address is in scope.
+    pub fn get_activity_state(&self, id: u64) -> Option<scrollparse::claude::ActivityState> {
+        let addr = self.find_addr_by_id(id)?;
+        self.pane_states.get(&addr).copied()
+    }
+}
+
+/// Outcome of resolving a raw kitty id back to canonical `PaneAddr` identity.
+///
+/// Multi-kitty collisions are real: a pane id is unique only inside a single
+/// kitty remote-control socket. When the legacy IPC/CLI surface hands us a
+/// bare u64, the answer is genuinely "found / ambiguous / not found", and the
+/// daemon refuses to silently pick a winner in the ambiguous case.
+#[derive(Debug, Clone)]
+pub enum PaneIdResolution {
+    Found(PaneAddr),
+    Ambiguous(Vec<PaneAddr>),
+    NotFound,
+}
+
+/// Emit a warn-level trace for a legacy u64 lookup that could not be made
+/// unambiguous. Centralized so every legacy shim refuses ambiguity the same
+/// way and the trace shape is consistent for grep/jq.
+fn trace_legacy_id_ambiguous(id: u64, candidates: &[PaneAddr]) {
+    let shorts: Vec<String> = candidates.iter().map(|a| a.short()).collect();
+    trace_error!(
+        "ambiguous legacy pane id across sockets — refusing to choose",
+        id,
+        candidates = shorts.join(",")
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2532,7 +2639,7 @@ async fn handle_client(
                 let ring_color =
                     has_unread_ring.then(|| window.agent_kind.accent_color().to_string());
                 replay_events.push(PaintEvent::Window(IndicatorEvent::Set {
-                    id: BabelState::paint_pane_id(addr.id),
+                    id: BabelState::paint_pane_id(addr),
                     color: color.to_string(),
                     workspace: window.workspace.unwrap_or(0) as u32,
                     x_pos,
@@ -2705,7 +2812,9 @@ mod handlers {
             .values()
             .map(|w| {
                 let mut win = w.clone();
-                win.activity_state = s.get_activity_state(w.id());
+                // Address-first: w.addr is in scope, no need to round-trip
+                // through w.id() (and risk a multi-socket collision).
+                win.activity_state = s.pane_activity_state(&w.addr);
                 // Populate hook_state from database if we have a session_id
                 if let Some(ref sid) = w.session_id {
                     win.hook_state = hook_states.get(sid).copied();
@@ -2778,7 +2887,9 @@ mod handlers {
             .values()
             .map(|w| {
                 let mut win = w.clone();
-                win.activity_state = s.get_activity_state(w.id());
+                // Address-first lookup; bare w.id() would silently pick a
+                // winner across sockets when the same id is live in two.
+                win.activity_state = s.pane_activity_state(&w.addr);
                 win
             })
             .collect();
@@ -2803,12 +2914,19 @@ mod handlers {
     }
 
     /// Get status of a specific pane or focused pane.
-    pub async fn status(state: &Arc<RwLock<BabelState>>, pane_id: Option<u64>) -> Response {
+    ///
+    /// `target` is the canonical IPC target carrying either a PaneAddr (no
+    /// scan needed) or a legacy bare id (scan all sockets). `None` selects
+    /// the focused pane.
+    pub async fn status(
+        state: &Arc<RwLock<BabelState>>,
+        target: Option<&PaneSelector>,
+    ) -> Response {
         let s = state.read().await;
-        let pane = if let Some(id) = pane_id {
-            s.find_pane_by_id(id).cloned()
-        } else {
-            s.panes.values().find(|w| w.is_focused).cloned()
+        let pane = match target {
+            Some(PaneSelector::Addr(addr)) => s.panes.get(addr).cloned(),
+            Some(PaneSelector::Id(id)) => s.find_pane_by_id(*id).cloned(),
+            None => s.panes.values().find(|w| w.is_focused).cloned(),
         };
         Response::Window {
             window: Box::new(pane),
@@ -2816,9 +2934,13 @@ mod handlers {
     }
 
     /// Enrich a pane with session info.
-    pub async fn enrich(state: &Arc<RwLock<BabelState>>, pane_id: u64) -> Response {
+    pub async fn enrich(state: &Arc<RwLock<BabelState>>, target: &PaneSelector) -> Response {
         let mut s = state.write().await;
-        if let Some(pane) = s.find_pane_by_id_mut(pane_id) {
+        let pane_opt = match target {
+            PaneSelector::Addr(addr) => s.panes.get_mut(addr),
+            PaneSelector::Id(id) => s.find_pane_by_id_mut(*id),
+        };
+        if let Some(pane) = pane_opt {
             if let Err(e) = enrich_pane(pane) {
                 return Response::Error {
                     message: format!("Failed to enrich: {}", e),
@@ -2834,63 +2956,94 @@ mod handlers {
         }
     }
 
-    /// Focus a pane (may be on a non-current socket).
-    pub async fn focus(pane_id: u64) -> Response {
-        match focus_pane_any(pane_id).await {
-            Ok(result) => {
-                let message = if result.is_non_current {
-                    format!(
-                        "⚠ Focused pane {} on non-current socket: {}",
-                        pane_id,
-                        result.addr.short()
-                    )
-                } else {
-                    format!("Focused pane {}", pane_id)
-                };
-                Response::Ok { message }
-            }
-            Err(e) => Response::Error {
-                message: format!("Focus failed: {}", e),
+    /// Focus a pane (canonical address: no scan; legacy id: scan all sockets).
+    pub async fn focus(target: &PaneSelector) -> Response {
+        match target {
+            PaneSelector::Addr(addr) => match focus_pane_on_socket(&addr.socket, addr.id).await {
+                Ok(()) => Response::Ok {
+                    message: format!("Focused pane {}", addr.short()),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Focus failed: {}", e),
+                },
+            },
+            PaneSelector::Id(id) => match focus_pane_any(*id).await {
+                Ok(result) => {
+                    let message = if result.is_non_current {
+                        format!(
+                            "⚠ Focused pane {} on non-current socket: {}",
+                            id,
+                            result.addr.short()
+                        )
+                    } else {
+                        format!("Focused pane {}", id)
+                    };
+                    Response::Ok { message }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Focus failed: {}", e),
+                },
             },
         }
     }
 
     /// Get scrollback from a pane.
-    pub async fn scroll(pane_id: u64) -> Response {
-        match get_scrollback_any(pane_id).await {
-            Ok(result) => {
-                if result.is_non_current {
-                    trace_error!("scrollback from non-current socket", pane_id, addr = %result.addr.short());
-                }
-                Response::Scrollback {
-                    text: result.result,
+    pub async fn scroll(target: &PaneSelector) -> Response {
+        match target {
+            PaneSelector::Addr(addr) => {
+                match get_scrollback_on_socket(&addr.socket, addr.id).await {
+                    Ok(text) => Response::Scrollback { text },
+                    Err(e) => Response::Error {
+                        message: format!("Scroll failed: {}", e),
+                    },
                 }
             }
-            Err(e) => Response::Error {
-                message: format!("Scroll failed: {}", e),
+            PaneSelector::Id(id) => match get_scrollback_any(*id).await {
+                Ok(result) => {
+                    if result.is_non_current {
+                        trace_error!("scrollback from non-current socket", pane_id = id, addr = %result.addr.short());
+                    }
+                    Response::Scrollback {
+                        text: result.result,
+                    }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Scroll failed: {}", e),
+                },
             },
         }
     }
 
     /// Send text to a pane (with Enter/CR).
-    pub async fn send(pane_id: u64, text: &str) -> Response {
-        // Append CR to submit the text
+    pub async fn send(target: &PaneSelector, text: &str) -> Response {
         let text_with_cr = format!("{}\r", text);
-        match send_text_any(pane_id, &text_with_cr).await {
-            Ok(result) => {
-                let message = if result.is_non_current {
-                    format!(
-                        "⚠ Sent to pane {} on non-current socket: {}",
-                        pane_id,
-                        result.addr.short()
-                    )
-                } else {
-                    format!("Sent to pane {}", pane_id)
-                };
-                Response::Ok { message }
+        match target {
+            PaneSelector::Addr(addr) => {
+                match send_text_on_socket(&addr.socket, addr.id, &text_with_cr).await {
+                    Ok(()) => Response::Ok {
+                        message: format!("Sent to pane {}", addr.short()),
+                    },
+                    Err(e) => Response::Error {
+                        message: format!("Send failed: {}", e),
+                    },
+                }
             }
-            Err(e) => Response::Error {
-                message: format!("Send failed: {}", e),
+            PaneSelector::Id(id) => match send_text_any(*id, &text_with_cr).await {
+                Ok(result) => {
+                    let message = if result.is_non_current {
+                        format!(
+                            "⚠ Sent to pane {} on non-current socket: {}",
+                            id,
+                            result.addr.short()
+                        )
+                    } else {
+                        format!("Sent to pane {}", id)
+                    };
+                    Response::Ok { message }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Send failed: {}", e),
+                },
             },
         }
     }
@@ -2899,23 +3052,34 @@ mod handlers {
     ///
     /// Unlike `send`, this doesn't append a carriage return, so the text
     /// is typed into the input area but not submitted.
-    pub async fn type_text(pane_id: u64, text: &str) -> Response {
-        // No CR - just type the text as-is
-        match send_text_any(pane_id, text).await {
-            Ok(result) => {
-                let message = if result.is_non_current {
-                    format!(
-                        "⚠ Typed to pane {} on non-current socket: {}",
-                        pane_id,
-                        result.addr.short()
-                    )
-                } else {
-                    format!("Typed to pane {}", pane_id)
-                };
-                Response::Ok { message }
+    pub async fn type_text(target: &PaneSelector, text: &str) -> Response {
+        match target {
+            PaneSelector::Addr(addr) => {
+                match send_text_on_socket(&addr.socket, addr.id, text).await {
+                    Ok(()) => Response::Ok {
+                        message: format!("Typed to pane {}", addr.short()),
+                    },
+                    Err(e) => Response::Error {
+                        message: format!("Type failed: {}", e),
+                    },
+                }
             }
-            Err(e) => Response::Error {
-                message: format!("Type failed: {}", e),
+            PaneSelector::Id(id) => match send_text_any(*id, text).await {
+                Ok(result) => {
+                    let message = if result.is_non_current {
+                        format!(
+                            "⚠ Typed to pane {} on non-current socket: {}",
+                            id,
+                            result.addr.short()
+                        )
+                    } else {
+                        format!("Typed to pane {}", id)
+                    };
+                    Response::Ok { message }
+                }
+                Err(e) => Response::Error {
+                    message: format!("Type failed: {}", e),
+                },
             },
         }
     }
@@ -2929,11 +3093,20 @@ mod handlers {
     /// - Detect multiline input
     /// - Handle plan mode selection UI
     /// - Support save/restore of pending input during broadcast
-    pub async fn has_pending_input(pane_id: u64) -> Response {
-        match get_scrollback_any(pane_id).await {
-            Ok(result) => {
-                let (has_pending, pending_text) =
-                    detect_pending_input_from_scrollback(&result.result);
+    pub async fn has_pending_input(target: &PaneSelector) -> Response {
+        let pane_id = target.id();
+        let scrollback = match target {
+            PaneSelector::Addr(addr) => get_scrollback_on_socket(&addr.socket, addr.id)
+                .await
+                .map_err(|e| e.to_string()),
+            PaneSelector::Id(id) => get_scrollback_any(*id)
+                .await
+                .map(|r| r.result)
+                .map_err(|e| e.to_string()),
+        };
+        match scrollback {
+            Ok(text) => {
+                let (has_pending, pending_text) = detect_pending_input_from_scrollback(&text);
                 Response::PendingInput {
                     window_id: pane_id,
                     has_pending,
@@ -2947,13 +3120,21 @@ mod handlers {
     }
 
     /// Tag a pane with an icon.
-    pub async fn tag(state: &Arc<RwLock<BabelState>>, pane_id: u64, icon: &str) -> Response {
+    pub async fn tag(
+        state: &Arc<RwLock<BabelState>>,
+        target: &PaneSelector,
+        icon: &str,
+    ) -> Response {
         let s = state.read().await;
-        if let Some(pane) = s.find_pane_by_id(pane_id) {
+        let pane = match target {
+            PaneSelector::Addr(addr) => s.panes.get(addr),
+            PaneSelector::Id(id) => s.find_pane_by_id(*id),
+        };
+        if let Some(pane) = pane {
             if let Some(session_id) = &pane.session_id {
                 match init_db().and_then(|conn| set_icon(&conn, session_id, icon)) {
                     Ok(()) => Response::Ok {
-                        message: format!("Tagged pane {} with {}", pane_id, icon),
+                        message: format!("Tagged pane {} with {}", pane.id(), icon),
                     },
                     Err(e) => Response::Error {
                         message: format!("Tag failed: {}", e),
@@ -2972,13 +3153,20 @@ mod handlers {
     }
 
     /// Mark a pane as read.
-    pub async fn mark_read_handler(state: &Arc<RwLock<BabelState>>, pane_id: u64) -> Response {
+    pub async fn mark_read_handler(
+        state: &Arc<RwLock<BabelState>>,
+        target: &PaneSelector,
+    ) -> Response {
         let s = state.read().await;
-        if let Some(pane) = s.find_pane_by_id(pane_id) {
+        let pane = match target {
+            PaneSelector::Addr(addr) => s.panes.get(addr),
+            PaneSelector::Id(id) => s.find_pane_by_id(*id),
+        };
+        if let Some(pane) = pane {
             if let Some(session_id) = &pane.session_id {
                 match init_db().and_then(|conn| mark_read(&conn, session_id)) {
                     Ok(()) => Response::Ok {
-                        message: format!("Marked pane {} as read", pane_id),
+                        message: format!("Marked pane {} as read", pane.id()),
                     },
                     Err(e) => Response::Error {
                         message: format!("Mark read failed: {}", e),
@@ -3421,7 +3609,7 @@ mod handlers {
                     s.pane_states.insert(addr.clone(), activity_state);
                     s.event_publisher
                         .publish(crate::events::BabelEvent::SessionStateChanged {
-                            kitty_id: addr.id,
+                            addr: addr.clone(),
                             session_id: Some(session.to_string()),
                             workspace,
                             old_state,
@@ -3461,7 +3649,7 @@ mod handlers {
             if pulse_intensity > 0.0 {
                 s.event_publisher
                     .publish(crate::events::BabelEvent::ActivityPulse {
-                        kitty_id: addr.id,
+                        addr: addr.clone(),
                         session_id: Some(session.to_string()),
                         workspace,
                         intensity: pulse_intensity,
@@ -3512,26 +3700,30 @@ async fn process_request(
         Request::ListPanes => handlers::list_panes().await,
         Request::ListSockets => handlers::list_sockets(state).await,
         Request::ListWithFingerprints => handlers::list_with_fingerprints(state).await,
-        Request::Status { pane_id } => handlers::status(state, pane_id).await,
+        Request::Status { target } => handlers::status(state, target.as_ref()).await,
         Request::History { limit } => handlers::history(limit),
         Request::Ping => handlers::ping(state).await,
         Request::Titles => handlers::titles(state).await,
 
         // ─── Pane Handlers ──────────────────────────────────────────────────────
-        Request::Enrich { pane_id } => handlers::enrich(state, pane_id).await,
-        Request::Focus { pane_id } => handlers::focus(pane_id).await,
-        Request::Scroll { pane_id } => handlers::scroll(pane_id).await,
-        Request::Send { pane_id, text } => {
-            let response = handlers::send(pane_id, &text).await;
+        Request::Enrich { target } => handlers::enrich(state, &target).await,
+        Request::Focus { target } => handlers::focus(&target).await,
+        Request::Scroll { target } => handlers::scroll(&target).await,
+        Request::Send { target, text } => {
+            let pane_id = target.id();
+            let response = handlers::send(&target, &text).await;
             // Trigger workspace re-summarization on user prompt
             // User just sent new instructions to the agent, context is changing
             if matches!(response, Response::Ok { .. }) {
                 let workspace = {
                     let s = state.read().await;
-                    s.panes
-                        .values()
-                        .find(|w| w.id() == pane_id)
-                        .and_then(|w| w.workspace)
+                    // Route through the legacy shim so a same-id collision
+                    // across sockets refuses cleanly instead of summarizing
+                    // the wrong workspace.
+                    match target.addr() {
+                        Some(addr) => s.panes.get(addr).and_then(|w| w.workspace),
+                        None => s.find_pane_by_id(pane_id).and_then(|w| w.workspace),
+                    }
                 };
                 if let Some(ws) = workspace {
                     summarize_workspace(ws, state, summarizer).await;
@@ -3539,12 +3731,12 @@ async fn process_request(
             }
             response
         }
-        Request::Type { pane_id, text } => handlers::type_text(pane_id, &text).await,
-        Request::HasPendingInput { pane_id } => handlers::has_pending_input(pane_id).await,
+        Request::Type { target, text } => handlers::type_text(&target, &text).await,
+        Request::HasPendingInput { target } => handlers::has_pending_input(&target).await,
 
         // ─── State Handlers ─────────────────────────────────────────────────────
-        Request::Tag { pane_id, icon } => handlers::tag(state, pane_id, &icon).await,
-        Request::MarkRead { pane_id } => handlers::mark_read_handler(state, pane_id).await,
+        Request::Tag { target, icon } => handlers::tag(state, &target, &icon).await,
+        Request::MarkRead { target } => handlers::mark_read_handler(state, &target).await,
         Request::Refresh => handlers::refresh(state).await,
         Request::GetTitle { target } => handlers::get_title(state, target).await,
         Request::TitleRefresh { workspace } => {
@@ -3585,8 +3777,8 @@ async fn process_request(
 
         // Solo mode (debugging feature - isolate single pane)
         // TODO: Implement solo mode handler when needed
-        Request::Solo { pane_id } => Response::Error {
-            message: format!("Solo mode not yet implemented (pane_id: {:?})", pane_id),
+        Request::Solo { target } => Response::Error {
+            message: format!("Solo mode not yet implemented (target: {:?})", target),
         },
 
         // Subscribe is handled specially in handle_client

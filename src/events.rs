@@ -24,9 +24,10 @@
 //!
 //! // Publish events
 //! publisher.publish(BabelEvent::WindowAdded {
-//!     kitty_id: 42,
+//!     addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-12345", 42),
 //!     title: "claude - workspace".to_string(),
 //!     workspace: Some(1),
+//!     agent_kind: AgentKind::Claude,
 //! });
 //!
 //! // Give subscribers to IPC handlers
@@ -55,6 +56,7 @@ use tokio::sync::broadcast;
 use vtr::{effect, state};
 
 use crate::agent_kind::AgentKind;
+use crate::model::PaneAddr;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Pulse Trigger Types
@@ -104,8 +106,10 @@ pub enum BabelEvent {
     /// Emitted when kitty polling detects a new pane matching a recognized
     /// agent process or provider-specific title marker.
     WindowAdded {
-        /// Kitty window ID
-        kitty_id: u64,
+        /// Canonical pane identity (socket + id). Kitty pane ids are unique only
+        /// inside one kitty remote-control socket, so the address — not the raw
+        /// id — is the identifier that may be compared, hashed, or routed on.
+        addr: PaneAddr,
         /// Window title (e.g. "claude - /home/user/project")
         title: String,
         /// XFCE workspace number (1-indexed), None if not on XFCE
@@ -122,8 +126,8 @@ pub enum BabelEvent {
     /// A worker departs—their whisper fades from the tower's chorus.
     /// Emitted when a previously tracked window no longer appears in kitty ls.
     WindowRemoved {
-        /// Kitty window ID that was closed
-        kitty_id: u64,
+        /// Canonical pane identity that was closed.
+        addr: PaneAddr,
     },
 
     /// Pane gained focus
@@ -132,8 +136,8 @@ pub enum BabelEvent {
     /// Emitted when an agent pane becomes the focused kitty pane.
     /// Includes session_id if the pane has been matched to a session.
     PaneFocused {
-        /// Kitty pane ID now focused
-        kitty_id: u64,
+        /// Canonical pane identity now focused.
+        addr: PaneAddr,
         /// Session ID if matched, None if still unmatched
         session_id: Option<String>,
     },
@@ -144,8 +148,8 @@ pub enum BabelEvent {
     /// Emitted when an agent pane loses focus (another pane gained it).
     /// Paired with PaneFocused for complete focus tracking.
     PaneUnfocused {
-        /// Kitty pane ID that lost focus
-        kitty_id: u64,
+        /// Canonical pane identity that lost focus.
+        addr: PaneAddr,
         /// Session ID if matched, None if still unmatched
         session_id: Option<String>,
     },
@@ -155,8 +159,8 @@ pub enum BabelEvent {
     /// Emitted when an agent pane's XFCE workspace changes.
     /// Used by richspace-babel to track per-workspace dot state.
     WindowWorkspaceChanged {
-        /// Kitty window ID that moved
-        kitty_id: u64,
+        /// Canonical pane identity that moved.
+        addr: PaneAddr,
         /// Previous workspace (None if was on unknown workspace)
         old_workspace: Option<i32>,
         /// New workspace (None if now on unknown workspace)
@@ -170,8 +174,8 @@ pub enum BabelEvent {
     /// whether it's running an agent. Useful for seeing the terminal flow and
     /// watching panes transition to agent sessions.
     TerminalOpened {
-        /// Kitty window ID
-        kitty_id: u64,
+        /// Canonical pane identity for the new terminal.
+        addr: PaneAddr,
         /// Window title (e.g. "~/project: fish")
         title: String,
         /// Working directory
@@ -185,8 +189,8 @@ pub enum BabelEvent {
     /// Emitted when a terminal is no longer present in kitty ls,
     /// regardless of whether it was an agent session.
     TerminalClosed {
-        /// Kitty window ID that was closed
-        kitty_id: u64,
+        /// Canonical pane identity that was closed.
+        addr: PaneAddr,
     },
 
     /// Terminal became an agent session
@@ -196,8 +200,8 @@ pub enum BabelEvent {
     /// between TerminalOpened and WindowAdded.
     #[serde(alias = "terminal_became_claude")]
     TerminalBecameAgent {
-        /// Kitty window ID
-        kitty_id: u64,
+        /// Canonical pane identity.
+        addr: PaneAddr,
         /// New title (likely "✳ ...")
         title: String,
     },
@@ -209,8 +213,8 @@ pub enum BabelEvent {
     /// Emitted when the daemon successfully matches a kitty window to a
     /// agent session by comparing scrollback content fingerprints.
     SessionMatched {
-        /// Kitty window ID that was matched
-        kitty_id: u64,
+        /// Canonical pane identity that was matched.
+        addr: PaneAddr,
         /// Matched session ID (UUID)
         session_id: String,
         /// Match confidence level: "none", "low", "medium", "high", "exact"
@@ -239,8 +243,8 @@ pub enum BabelEvent {
     /// State detection is based on scrollback pattern analysis and may
     /// have a slight delay (up to 500ms) from actual state changes.
     SessionStateChanged {
-        /// Kitty window ID
-        kitty_id: u64,
+        /// Canonical pane identity whose state shifted.
+        addr: PaneAddr,
         /// Session ID if matched
         session_id: Option<String>,
         /// XFCE workspace number
@@ -273,8 +277,8 @@ pub enum BabelEvent {
     /// - Activity indicators while an agent is thinking
     /// - Visual feedback that work is happening
     ActivityPulse {
-        /// Kitty window ID
-        kitty_id: u64,
+        /// Canonical pane identity emitting the pulse.
+        addr: PaneAddr,
         /// Session ID if matched
         session_id: Option<String>,
         /// XFCE workspace number
@@ -579,9 +583,10 @@ impl EventPublisher {
     ///
     /// ```rust,ignore
     /// let count = publisher.publish(BabelEvent::WindowAdded {
-    ///     kitty_id: 42,
+    ///     addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-12345", 42),
     ///     title: "claude".to_string(),
     ///     workspace: None,
+    ///     agent_kind: AgentKind::Claude,
     /// });
     /// println!("Event sent to {} subscribers", count);
     /// ```
@@ -596,13 +601,13 @@ impl EventPublisher {
         if let BabelEvent::SessionStateChanged {
             old_state,
             new_state,
-            kitty_id,
+            addr,
             session_id,
             ..
         } = &event
         {
             state!("session", format!("{:?}", old_state) => format!("{:?}", new_state),
-                kitty_id = *kitty_id,
+                pane = addr.short(),
                 session_id = session_id.clone().unwrap_or_default()
             );
         }
@@ -729,7 +734,7 @@ impl EventFilter {
 // Usage in daemon:
 // ```rust,ignore
 // publisher.publish(BabelEvent::SessionMatched {
-//     kitty_id: 42,
+//     addr: pane.addr.clone(),
 //     session_id: "uuid".to_string(),
 //     confidence: match_confidence.into(), // Auto-converts to String
 // });
@@ -743,10 +748,14 @@ impl EventFilter {
 mod tests {
     use super::*;
 
+    fn test_addr(id: u64) -> PaneAddr {
+        PaneAddr::new("unix:/run/user/1000/kitty.sock-12345", id)
+    }
+
     #[test]
     fn test_event_serialization() {
         let event = BabelEvent::WindowAdded {
-            kitty_id: 42,
+            addr: test_addr(42),
             title: "Test Window".to_string(),
             workspace: Some(1),
             agent_kind: AgentKind::Claude,
@@ -754,16 +763,44 @@ mod tests {
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("window_added"));
-        assert!(json.contains("42"));
+        assert!(json.contains("\"id\":42"));
+        assert!(json.contains("kitty.sock-12345"));
         assert!(json.contains("Test Window"));
 
         // Test round-trip
         let deserialized: BabelEvent = serde_json::from_str(&json).unwrap();
-        if let BabelEvent::WindowAdded { kitty_id, .. } = deserialized {
-            assert_eq!(kitty_id, 42);
+        if let BabelEvent::WindowAdded { addr, .. } = deserialized {
+            assert_eq!(addr.id, 42);
+            assert_eq!(addr.socket, "unix:/run/user/1000/kitty.sock-12345");
         } else {
             panic!("Deserialization produced wrong variant");
         }
+    }
+
+    #[test]
+    fn test_pane_addr_disambiguates_same_id_across_sockets() {
+        let one = BabelEvent::WindowAdded {
+            addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-111", 7),
+            title: "claude on host A".to_string(),
+            workspace: None,
+            agent_kind: AgentKind::Claude,
+        };
+        let two = BabelEvent::WindowAdded {
+            addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-222", 7),
+            title: "claude on host B".to_string(),
+            workspace: None,
+            agent_kind: AgentKind::Claude,
+        };
+
+        // Encoding the same numeric pane id from two different sockets must
+        // produce two distinct wire payloads — that's the entire point of
+        // making PaneAddr the identity on these events.
+        let one_json = serde_json::to_value(&one).unwrap();
+        let two_json = serde_json::to_value(&two).unwrap();
+        assert_ne!(one_json, two_json);
+        assert_eq!(one_json["addr"]["id"], 7);
+        assert_eq!(two_json["addr"]["id"], 7);
+        assert_ne!(one_json["addr"]["socket"], two_json["addr"]["socket"]);
     }
 
     #[test]
@@ -781,12 +818,12 @@ mod tests {
         let filter = EventFilter::new();
 
         let added = BabelEvent::WindowAdded {
-            kitty_id: 1,
+            addr: test_addr(1),
             title: "".to_string(),
             workspace: None,
             agent_kind: AgentKind::Claude,
         };
-        let removed = BabelEvent::WindowRemoved { kitty_id: 1 };
+        let removed = BabelEvent::WindowRemoved { addr: test_addr(1) };
         let shutdown = BabelEvent::DaemonShutdown;
 
         // Empty filter matches everything
@@ -803,14 +840,14 @@ mod tests {
         ]);
 
         let added = BabelEvent::WindowAdded {
-            kitty_id: 1,
+            addr: test_addr(1),
             title: "".to_string(),
             workspace: None,
             agent_kind: AgentKind::Claude,
         };
-        let removed = BabelEvent::WindowRemoved { kitty_id: 1 };
+        let removed = BabelEvent::WindowRemoved { addr: test_addr(1) };
         let focused = BabelEvent::PaneFocused {
-            kitty_id: 1,
+            addr: test_addr(1),
             session_id: None,
         };
         let shutdown = BabelEvent::DaemonShutdown;
@@ -855,7 +892,7 @@ mod tests {
 
         // Publish after subscribe
         let count = publisher.publish(BabelEvent::WindowAdded {
-            kitty_id: 999,
+            addr: test_addr(999),
             title: "Test".to_string(),
             workspace: Some(3),
             agent_kind: AgentKind::Claude,
@@ -867,8 +904,8 @@ mod tests {
         let msg = rx.recv().await.unwrap();
         assert_eq!(msg.seq, 0);
 
-        if let BabelEvent::WindowAdded { kitty_id, .. } = msg.event {
-            assert_eq!(kitty_id, 999);
+        if let BabelEvent::WindowAdded { addr, .. } = msg.event {
+            assert_eq!(addr.id, 999);
         } else {
             panic!("Wrong event type");
         }
@@ -915,18 +952,18 @@ mod tests {
         // Ensure all event types can serialize to JSON
         let events = vec![
             BabelEvent::WindowAdded {
-                kitty_id: 1,
+                addr: test_addr(1),
                 title: "test".to_string(),
                 workspace: None,
                 agent_kind: AgentKind::Claude,
             },
-            BabelEvent::WindowRemoved { kitty_id: 2 },
+            BabelEvent::WindowRemoved { addr: test_addr(2) },
             BabelEvent::PaneFocused {
-                kitty_id: 3,
+                addr: test_addr(3),
                 session_id: Some("uuid".to_string()),
             },
             BabelEvent::SessionMatched {
-                kitty_id: 4,
+                addr: test_addr(4),
                 session_id: "uuid2".to_string(),
                 confidence: "high".to_string(),
             },
@@ -935,7 +972,7 @@ mod tests {
                 project: "/home/user/proj".to_string(),
             },
             BabelEvent::SessionStateChanged {
-                kitty_id: 5,
+                addr: test_addr(5),
                 session_id: Some("uuid4".to_string()),
                 workspace: Some(1),
                 old_state: ActivityState::Idle,
@@ -944,7 +981,7 @@ mod tests {
                 agent_kind: AgentKind::Claude,
             },
             BabelEvent::ActivityPulse {
-                kitty_id: 6,
+                addr: test_addr(6),
                 session_id: Some("uuid5".to_string()),
                 workspace: Some(2),
                 intensity: 0.75,
@@ -962,7 +999,7 @@ mod tests {
     #[test]
     fn test_activity_pulse_serialization() {
         let event = BabelEvent::ActivityPulse {
-            kitty_id: 42,
+            addr: test_addr(42),
             session_id: Some("test-session".to_string()),
             workspace: Some(1),
             intensity: 0.85,
@@ -977,13 +1014,13 @@ mod tests {
         // Round-trip test
         let deserialized: BabelEvent = serde_json::from_str(&json).unwrap();
         if let BabelEvent::ActivityPulse {
-            kitty_id,
+            addr,
             intensity,
             trigger,
             ..
         } = deserialized
         {
-            assert_eq!(kitty_id, 42);
+            assert_eq!(addr.id, 42);
             assert!((intensity - 0.85).abs() < 0.001);
             assert_eq!(trigger, PulseTrigger::ToolStart);
         } else {
@@ -996,14 +1033,14 @@ mod tests {
         let filter = EventFilter::with_events(vec!["activity_pulse".to_string()]);
 
         let pulse = BabelEvent::ActivityPulse {
-            kitty_id: 1,
+            addr: test_addr(1),
             session_id: None,
             workspace: Some(1),
             intensity: 0.5,
             trigger: PulseTrigger::TokenOutput,
         };
         let window_added = BabelEvent::WindowAdded {
-            kitty_id: 1,
+            addr: test_addr(1),
             title: "".to_string(),
             workspace: None,
             agent_kind: AgentKind::Claude,
@@ -1020,7 +1057,7 @@ mod tests {
         use scrollparse::claude::ActivityState;
 
         let state_changed = BabelEvent::SessionStateChanged {
-            kitty_id: 1,
+            addr: test_addr(1),
             session_id: None,
             workspace: Some(0),
             old_state: ActivityState::Idle,
@@ -1029,7 +1066,7 @@ mod tests {
             agent_kind: AgentKind::Claude,
         };
         let window_added = BabelEvent::WindowAdded {
-            kitty_id: 1,
+            addr: test_addr(1),
             title: "".to_string(),
             workspace: None,
             agent_kind: AgentKind::Claude,

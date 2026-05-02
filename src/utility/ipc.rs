@@ -20,7 +20,7 @@ use tracing::instrument;
 
 use crate::daemon::{SocketStatus, TerminalInfo};
 use crate::events::EventMessage;
-use crate::kitty::{KittyPane, PaneAddr};
+use crate::kitty::{KittyPane, PaneAddr, PaneSelector};
 use crate::paint::PaintEvent;
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::SessionInfo;
@@ -62,64 +62,40 @@ pub enum Request {
     /// List all agent panes with fingerprint data (slow - extracts scrollback)
     ListWithFingerprints,
 
-    /// Get status of specific pane (or focused if None)
+    /// Get status of specific pane (or focused if `target` is None)
+    ///
+    /// `target` accepts the canonical `PaneSelector::Addr` form or the legacy
+    /// bare-id form for CLI input edges. New callers should use `Addr`.
     Status {
-        #[serde(default, alias = "window_id")]
-        pane_id: Option<u64>,
+        #[serde(default)]
+        target: Option<PaneSelector>,
     },
 
     /// Get full session info for a pane (triggers enrichment if needed)
-    Enrich {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-    },
+    Enrich { target: PaneSelector },
 
     /// Focus a pane
-    Focus {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-    },
+    Focus { target: PaneSelector },
 
     /// Get scrollback from pane
-    Scroll {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-    },
+    Scroll { target: PaneSelector },
 
     /// Send text to pane (with Enter/CR at end)
-    Send {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-        text: String,
-    },
+    Send { target: PaneSelector, text: String },
 
     /// Type text to pane (without Enter/CR at end)
     /// Useful for composing prompts incrementally
-    Type {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-        text: String,
-    },
+    Type { target: PaneSelector, text: String },
 
     /// Check if a pane has pending (unsent) input in the textbox
     /// Returns true if there's text typed but not yet submitted
-    HasPendingInput {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-    },
+    HasPendingInput { target: PaneSelector },
 
     /// Tag pane with icon
-    Tag {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-        icon: String,
-    },
+    Tag { target: PaneSelector, icon: String },
 
     /// Mark pane as read
-    MarkRead {
-        #[serde(alias = "window_id")]
-        pane_id: u64,
-    },
+    MarkRead { target: PaneSelector },
 
     /// Get recent history from ~/.claude
     History { limit: usize },
@@ -192,10 +168,10 @@ pub enum Request {
     },
 
     /// Solo a single pane for debugging (isolate one pane, hide others)
-    /// If pane_id is None, disables solo mode (restore all panes)
+    /// If `target` is None, disables solo mode (restore all panes).
     Solo {
-        #[serde(default, alias = "window_id")]
-        pane_id: Option<u64>,
+        #[serde(default)]
+        target: Option<PaneSelector>,
     },
 
     // ─── Hook Events (push path from Claude Code hooks) ────────────────────────
