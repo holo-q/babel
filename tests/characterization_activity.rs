@@ -173,6 +173,7 @@ fn hook_ipc_request_serializes_current_wire_shape() -> Result<(), serde_json::Er
         agent_kind: AgentKind::Codex,
         hook_state: Some(HookState::Idle),
         pulse: PulseEffect::Finished,
+        read: ReadEffect::MarkUnread,
         hook_type: "stop".to_string(),
     };
 
@@ -186,6 +187,7 @@ fn hook_ipc_request_serializes_current_wire_shape() -> Result<(), serde_json::Er
             "agent_kind": "codex",
             "hook_state": "Idle",
             "pulse": "finished",
+            "read": "mark_unread",
             "hook_type": "stop"
         })
     );

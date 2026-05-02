@@ -96,6 +96,7 @@ async fn push_to_daemon(
     agent_kind: AgentKind,
     hook_state: Option<HookState>,
     pulse: PulseEffect,
+    read: ReadEffect,
     hook_type: &str,
 ) {
     let request = Request::HookEvent {
@@ -105,6 +106,7 @@ async fn push_to_daemon(
         agent_kind,
         hook_state,
         pulse,
+        read,
         hook_type: hook_type.to_string(),
     };
     match send_request(&request).await {
@@ -187,6 +189,7 @@ async fn execute_hook_flow(
         agent_kind,
         hook_state,
         event.pulse,
+        event.read,
         event.canonical,
     )
     .await;

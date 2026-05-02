@@ -223,6 +223,9 @@ pub enum Request {
         /// Visual pulse requested by the harness flow.
         #[serde(default)]
         pulse: PulseEffect,
+        /// Read/unread effect requested by the harness flow.
+        #[serde(default)]
+        read: crate::ReadEffect,
         /// Which hook fired (for telemetry: "stop", "prompt", "pre_tool", etc.)
         hook_type: String,
     },

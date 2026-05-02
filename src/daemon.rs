@@ -97,6 +97,7 @@ use crate::kitty::{
 use crate::paint::{
     resolve_color, workspace_css_class, workspace_is_urgent, PaintEvent, WorkspacePaintEvent,
 };
+use crate::service::activity::hook_state_activity;
 use crate::utility::agent_discovery::{
     detect_agent_signals, get_activity_with_scrollback_on_socket, get_pane_activity_with_scrollback,
 };
@@ -464,6 +465,14 @@ pub struct BabelState {
     /// to quiet when the worker rests.
     pub pane_ring: HashMap<PaneAddr, f64>,
 
+    /// Pane-local unread state (PaneAddr).
+    ///
+    /// Storage remains the durable read/unread source of truth. This cache is
+    /// the daemon's live paint hint: unread survives pulse decay and clears on
+    /// focus/read transitions, so a finished agent can be idle while still
+    /// carrying a visible ring until the pane is heard.
+    pub pane_unread: HashSet<PaneAddr>,
+
     /// Per-workspace awaiting timer — when did the workspace enter
     /// AwaitingInput? None when no pane on the workspace is awaiting.
     /// Drives the WorkspacePaintEvent.awaiting_seconds field for tooltips.
@@ -512,6 +521,7 @@ impl BabelState {
             event_publisher: EventPublisher::new(),
             paint_publisher: paint_tx,
             pane_ring: HashMap::new(),
+            pane_unread: HashSet::new(),
             workspace_awaiting_since: HashMap::new(),
             workspace_titles: HashMap::new(),
             socket_status: HashMap::new(),
@@ -555,7 +565,14 @@ impl BabelState {
         let activity_state = self.pane_states.get(addr).copied();
         let color = resolve_color(window.agent_kind, window.hook_state, activity_state);
         let x_pos = window.screen.as_ref().map(|s| s.x);
-        let ring_intensity = self.pane_ring.get(addr).copied().unwrap_or(0.0);
+        const UNREAD_RING_INTENSITY: f64 = 0.75;
+        let ring_intensity = self.pane_ring.get(addr).copied().unwrap_or(0.0).max(
+            if self.pane_unread.contains(addr) {
+                UNREAD_RING_INTENSITY
+            } else {
+                0.0
+            },
+        );
         let event = PaintEvent::Window(IndicatorEvent::Set {
             id: Self::paint_pane_id(addr.id),
             color: color.to_string(),
@@ -906,6 +923,7 @@ impl BabelState {
             self.pane_fingerprints.remove(addr);
             self.pane_states.remove(addr);
             self.pane_ring.remove(addr);
+            self.pane_unread.remove(addr);
 
             self.event_publisher
                 .publish(BabelEvent::WindowRemoved { kitty_id: addr.id });
@@ -923,6 +941,7 @@ impl BabelState {
             .values()
             .find(|w| w.is_focused)
             .map(|w| w.addr.clone());
+        let mut read_changed_addrs: HashSet<PaneAddr> = HashSet::new();
         if old_focused != new_focused {
             // Emit PaneUnfocused for the pane that lost focus
             if let Some(ref addr) = old_focused {
@@ -944,6 +963,9 @@ impl BabelState {
                     if let Some(ref session_id) = w.session_id {
                         if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session_id)) {
                             trace_error!("failed to mark as read on focus", session_id, error = %e);
+                        }
+                        if self.pane_unread.remove(addr) {
+                            read_changed_addrs.insert(addr.clone());
                         }
                         // Dim the ring—the worker's call has been answered
                         if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id).await {
@@ -1060,9 +1082,30 @@ impl BabelState {
                         let entry = pulse_addrs.entry(addr.clone()).or_insert(0.0);
                         *entry = (*entry + 0.8).min(1.0);
 
-                        // Auto-unread when an agent finishes working and awaits input
-                        // This ensures users see the yellow dot when there's new content to review
-                        // Worker has spoken, awaits the user's voice
+                        // Clear unread state whenever work resumes from an awaiting turn.
+                        if old == scrollparse::claude::ActivityState::AwaitingInput
+                            && new_state != scrollparse::claude::ActivityState::AwaitingInput
+                        {
+                            if let Some(ref session_id) = window.session_id {
+                                if let Err(e) =
+                                    init_db().and_then(|conn| mark_read(&conn, session_id))
+                                {
+                                    trace_error!("failed to auto-read session", session_id, error = %e);
+                                }
+                                if self.pane_unread.remove(addr) {
+                                    paint_addrs.insert(addr.clone());
+                                }
+                                if let Err(e) =
+                                    reset_border_color_on_socket(&addr.socket, addr.id).await
+                                {
+                                    effect!("xfconf", "reset_border", error = e.to_string());
+                                }
+                            }
+                        }
+
+                        // Auto-unread when scrollback says the agent is awaiting input.
+                        // The durable visual is a ring over the current dot state, not
+                        // a fake activity state.
                         if new_state == scrollparse::claude::ActivityState::AwaitingInput {
                             if let Some(ref session_id) = window.session_id {
                                 if let Err(e) =
@@ -1070,8 +1113,11 @@ impl BabelState {
                                 {
                                     trace_error!("failed to auto-unread session", session_id, error = %e);
                                 }
-                                // Light the ring—the worker calls for attention
-                                // Warm amber for unread, drawing the eye to unheard voices
+                                if self.pane_unread.insert(addr.clone()) {
+                                    paint_addrs.insert(addr.clone());
+                                }
+                                // Keep the legacy terminal border cue in sync with the
+                                // daemon-owned paint ring.
                                 if let Err(e) = set_border_color_on_socket(
                                     &addr.socket,
                                     addr.id,
@@ -1145,6 +1191,8 @@ impl BabelState {
             .retain(|addr, _| new_windows.contains_key(addr));
         self.pane_ring
             .retain(|addr, _| new_windows.contains_key(addr));
+        self.pane_unread
+            .retain(|addr| new_windows.contains_key(addr));
 
         self.panes = new_windows;
         self.last_kitty_scan = Instant::now();
@@ -1164,6 +1212,9 @@ impl BabelState {
             self.emit_pane_paint(addr);
         }
         for addr in &moved_addrs {
+            paint_addrs.insert(addr.clone());
+        }
+        for addr in &read_changed_addrs {
             paint_addrs.insert(addr.clone());
         }
         for addr in &paint_addrs {
@@ -1315,20 +1366,26 @@ impl BabelState {
                         if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session_id)) {
                             trace_error!("failed to auto-read session", session_id, error = %e);
                         }
+                        if self.pane_unread.remove(addr) {
+                            paint_state_changed = true;
+                        }
                         if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id).await {
                             effect!("xfconf", "reset_border", error = e.to_string());
                         }
                     }
                 }
 
-                // Auto-unread when an agent finishes working and awaits input
-                // Worker has spoken, awaits the user's voice
+                // Auto-unread when scrollback says the agent is awaiting input.
+                // The paint stream keeps this as a durable ring over the current state.
                 if new_state == scrollparse::claude::ActivityState::AwaitingInput {
                     if let Some(ref session_id) = window.session_id {
                         if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
                             trace_error!("failed to auto-unread session", session_id, error = %e);
                         }
-                        // Light the ring—the worker calls for attention
+                        if self.pane_unread.insert(addr.clone()) {
+                            paint_state_changed = true;
+                        }
+                        // Keep the legacy terminal border cue in sync with the paint ring.
                         if let Err(e) =
                             set_border_color_on_socket(&addr.socket, addr.id, "#f67400", "#7a3a00")
                                 .await
@@ -3268,10 +3325,9 @@ mod handlers {
         agent_kind: AgentKind,
         hook_state: Option<crate::babel_storage::HookState>,
         pulse: PulseEffect,
+        read: crate::ReadEffect,
         hook_type: &str,
     ) -> Response {
-        use crate::babel_storage::HookState;
-
         let mut s = state.write().await;
 
         // Find the AgentPane by full address first, then legacy kitty_id,
@@ -3333,12 +3389,7 @@ mod handlers {
             // Mutable borrow on s.panes dropped here
 
             if let Some(hook_state) = hook_state {
-                // Map HookState -> scrollparse ActivityState for event compatibility
-                let activity_state = match hook_state {
-                    HookState::Idle => scrollparse::claude::ActivityState::AwaitingInput,
-                    HookState::Working => scrollparse::claude::ActivityState::Thinking,
-                    HookState::ToolRunning => scrollparse::claude::ActivityState::ToolUse,
-                };
+                let activity_state = hook_state_activity(hook_state);
 
                 let old_state = s
                     .pane_states
@@ -3367,6 +3418,15 @@ mod handlers {
                         s.emit_workspace_paint(ws);
                     }
                 }
+            }
+
+            let read_changed = match read {
+                crate::ReadEffect::Preserve => false,
+                crate::ReadEffect::MarkRead => s.pane_unread.remove(&addr),
+                crate::ReadEffect::MarkUnread => s.pane_unread.insert(addr.clone()),
+            };
+            if read_changed {
+                s.emit_pane_paint(&addr);
             }
 
             let pulse_intensity = match pulse {
@@ -3488,10 +3548,12 @@ async fn process_request(
             agent_kind,
             hook_state,
             pulse,
+            read,
             hook_type,
         } => {
             handlers::hook_event(
-                state, &session, kitty_id, pane_addr, agent_kind, hook_state, pulse, &hook_type,
+                state, &session, kitty_id, pane_addr, agent_kind, hook_state, pulse, read,
+                &hook_type,
             )
             .await
         }

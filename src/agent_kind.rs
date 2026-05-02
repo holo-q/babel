@@ -51,9 +51,10 @@ pub enum HookStateEffect {
 }
 
 /// Read/unread action coupled to a hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadEffect {
+    #[default]
     Preserve,
     MarkRead,
     MarkUnread,
