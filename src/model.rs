@@ -11,6 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::AgentKind;
+use spaceship_std::agents::ActivityState;
 
 /// Canonical live pane identity.
 ///
@@ -130,6 +131,49 @@ pub struct AgentSessionKey {
     pub session_id: SessionId,
 }
 
+/// Where a pane activity observation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivitySource {
+    /// Native harness lifecycle hook. This is authoritative while fresh.
+    Hook,
+    /// Scrollback parser observation. This is recovery/poll evidence.
+    Scrollback,
+    /// Focus/read transition. This should affect read state, not invent work.
+    Focus,
+    /// Unknown source for compatibility or partial data.
+    Unknown,
+}
+
+/// Canonical activity snapshot for a live pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneActivity {
+    pub state: ActivityState,
+    pub source: ActivitySource,
+    pub observed_at_ms: i64,
+    pub generation: u64,
+}
+
+impl PaneActivity {
+    pub fn new(
+        state: ActivityState,
+        source: ActivitySource,
+        observed_at_ms: i64,
+        generation: u64,
+    ) -> Self {
+        Self {
+            state,
+            source,
+            observed_at_ms,
+            generation,
+        }
+    }
+
+    pub fn next_generation(&self) -> u64 {
+        self.generation.saturating_add(1)
+    }
+}
+
 impl AgentSessionKey {
     pub fn new(agent_kind: AgentKind, session_id: impl Into<SessionId>) -> Self {
         Self {
@@ -188,6 +232,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(SessionId::new("sess-1")).unwrap(),
             json!("sess-1")
+        );
+    }
+
+    #[test]
+    fn pane_activity_carries_source_time_and_generation() {
+        let activity = PaneActivity::new(ActivityState::Thinking, ActivitySource::Hook, 1000, 7);
+
+        assert_eq!(activity.next_generation(), 8);
+        assert_eq!(
+            serde_json::to_value(&activity).unwrap(),
+            json!({
+                "state": "thinking",
+                "source": "hook",
+                "observed_at_ms": 1000,
+                "generation": 7
+            })
         );
     }
 }

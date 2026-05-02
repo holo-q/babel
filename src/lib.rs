@@ -84,6 +84,7 @@ pub mod pager;
 pub mod paint;
 #[cfg(feature = "gtk-render")]
 pub mod render;
+pub mod service;
 pub mod summarizer;
 pub mod title_policy;
 pub mod tui;
