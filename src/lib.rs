@@ -79,6 +79,7 @@ pub mod indicator;
 pub mod kitty;
 pub mod layout;
 pub mod logging;
+pub mod model;
 pub mod pager;
 pub mod paint;
 #[cfg(feature = "gtk-render")]
@@ -112,3 +113,4 @@ pub use agent_kind::{
     AgentKind, HarnessSpec, HarnessSupport, HookEventSpec, HookStateEffect, InstallStrategy,
     PulseEffect, ReadEffect,
 };
+pub use model::{AgentSessionKey, PaneAddr, SessionId};

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use claude_babel::daemon::BabelState;
 use claude_babel::fingerprint::{MatchConfidence, SessionFingerprint};
-use claude_babel::kitty::PaneAddr;
+use claude_babel::model::PaneAddr;
 use claude_babel::utility::agent_discovery::AgentPane;
 use claude_babel::AgentKind;
 

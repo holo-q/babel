@@ -38,6 +38,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::instrument;
 
+pub use crate::model::PaneAddr;
+
 // VTR semantic tracing - boundary markers for kitty IPC crossings
 // - boundary!: External domain crossings (IPC, subprocess calls)
 // - effect!: State-changing operations (mutations, side effects)
@@ -379,57 +381,17 @@ fn expand_kitty_path(path: &str) -> String {
 // Data Structures
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Address of a pane across kitty instances
-///
-/// Coordinates in the tower's architecture—the precise location of a vessel.
-/// Like a network address but for terminal panes. Uniquely identifies a vessel
-/// even when multiple towers stand.
-///
-/// Window IDs are only unique within a single kitty instance. When multiple
-/// towers rise (e.g., after a crash or intentional multi-instance), the same
-/// ID can exist in different sockets. PaneAddr solves this by combining
-/// socket + id into a composite key—a full address in the realm.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PaneAddr {
-    /// Socket path (e.g., "unix:/run/user/1000/kitty.sock-12345")
-    pub socket: String,
-    /// Pane ID within that socket's kitty instance
-    pub id: u64,
-}
-
+// Kitty-specific operations on the shared pane identity live here at the
+// runtime edge. The canonical identity type itself is `model::PaneAddr`.
 impl PaneAddr {
-    pub fn new(socket: impl Into<String>, id: u64) -> Self {
-        Self {
-            socket: socket.into(),
-            id,
-        }
-    }
-
     /// Create from KittyPane
     pub fn from_pane(pane: &KittyPane) -> Self {
         Self::new(&pane.socket, pane.id)
     }
 
-    /// Short display form for warnings/logs
-    /// e.g., "42@12345" (window 42 on kitty.sock-12345)
-    pub fn short(&self) -> String {
-        let sock_short = self
-            .socket
-            .rsplit("kitty.sock-")
-            .next()
-            .unwrap_or(&self.socket);
-        format!("{}@{}", self.id, sock_short)
-    }
-
     /// Check if this pane is on the current/default socket
     pub fn is_current_socket(&self) -> bool {
         self.socket == default_socket()
-    }
-}
-
-impl std::fmt::Display for PaneAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.socket, self.id)
     }
 }
 
