@@ -770,8 +770,8 @@ mod tests {
 
         // With trailing status bar garbage (non-breaking space separator)
         assert_eq!(
-            extract_cwd("cwd: /home/nuck/Workspace\u{a0}\u{e0b4}\u{a0}Model:\u{a0}Opus 4.5"),
-            Some(PathBuf::from("/home/nuck/Workspace"))
+            extract_cwd("cwd: /home/example/workspace\u{a0}\u{e0b4}\u{a0}Model:\u{a0}Opus 4.5"),
+            Some(PathBuf::from("/home/example/workspace"))
         );
 
         // With regular space after path
@@ -782,8 +782,8 @@ mod tests {
 
         // Path with dashes and underscores
         assert_eq!(
-            extract_cwd("cwd: /home/nuck/some-project_dir"),
-            Some(PathBuf::from("/home/nuck/some-project_dir"))
+            extract_cwd("cwd: /home/example/some-project_dir"),
+            Some(PathBuf::from("/home/example/some-project_dir"))
         );
 
         assert_eq!(extract_cwd("normal text"), None);
@@ -814,8 +814,8 @@ mod tests {
 
         // Complex status bar
         assert_eq!(
-            extract_path_from_start("/home/nuck/Workspace\u{a0}\u{e0b4}\u{a0}Model:\u{a0}Opus"),
-            "/home/nuck/Workspace"
+            extract_path_from_start("/home/example/workspace\u{a0}\u{e0b4}\u{a0}Model:\u{a0}Opus"),
+            "/home/example/workspace"
         );
     }
 
@@ -826,7 +826,7 @@ mod tests {
 ● Bash(ls -la)
 ● Read(src/auth.rs)
 ● Edit(src/auth.rs)
-cwd: /home/nuck/Workspace
+cwd: /home/example/workspace
 > add tests
 ● Write(tests/auth_test.rs)
 "#;
@@ -840,7 +840,7 @@ cwd: /home/nuck/Workspace
         assert_eq!(fp.recent_prompts.len(), 2);
         assert!(fp.recent_prompts.contains(&"add tests".to_string()));
         assert_eq!(fp.tool_sequence, vec!["Bash", "Read", "Edit", "Write"]);
-        assert_eq!(fp.cwd, Some(PathBuf::from("/home/nuck/Workspace")));
+        assert_eq!(fp.cwd, Some(PathBuf::from("/home/example/workspace")));
     }
 
     #[test]

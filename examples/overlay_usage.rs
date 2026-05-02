@@ -4,7 +4,7 @@
 //! to Claude conversations without modifying Claude's native storage.
 
 use anyhow::Result;
-use claude_babel::babel_storage::{BabelStorage, SessionMetadata};
+use babel::babel_storage::{BabelStorage, SessionMetadata};
 
 fn main() -> Result<()> {
     // Open the database (creates if needed)

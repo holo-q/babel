@@ -18,6 +18,7 @@
 //!
 //! - `color`: Base dot color (hex string, e.g. "#f0c040")
 //! - `ring_intensity`: Animated glow during activity (0.0-1.0)
+//! - `ring_color`: Optional durable ring color for semantic attention states
 //! - `has_outline`: Whether to show static outline border
 //! - `scale`: Size multiplier (1.0 = default)
 //!
@@ -51,6 +52,15 @@ pub enum IndicatorEvent {
         /// Ring glow intensity (0.0-1.0) — animated aura during token output
         #[serde(default, skip_serializing_if = "is_zero")]
         ring_intensity: f64,
+
+        /// Optional hex color for the ring.
+        ///
+        /// When absent, renderers use the dot color and may treat the ring as
+        /// a momentary pulse. When present, the ring is semantic state from
+        /// babel, such as unread completion, and should persist until babel
+        /// sends a later Set without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ring_color: Option<String>,
 
         /// Whether to show outline border (e.g., for question state)
         #[serde(default, skip_serializing_if = "is_false")]
@@ -115,6 +125,7 @@ impl IndicatorBatch {
             workspace,
             x_pos,
             ring_intensity: 0.0,
+            ring_color: None,
             has_outline: false,
             scale: 1.0,
         });
@@ -137,6 +148,7 @@ impl IndicatorBatch {
             workspace,
             x_pos,
             ring_intensity,
+            ring_color: None,
             has_outline,
             scale,
         });
@@ -187,6 +199,7 @@ mod tests {
             workspace: 4,
             x_pos: Some(100),
             ring_intensity: 0.5,
+            ring_color: Some("#d97757".to_string()),
             has_outline: true,
             scale: 1.0,
         };
@@ -195,6 +208,7 @@ mod tests {
         assert!(json.contains("\"id\":\"k5\""));
         assert!(json.contains("\"color\":\"#f0c040\""));
         assert!(json.contains("\"ring_intensity\":0.5"));
+        assert!(json.contains("\"ring_color\":\"#d97757\""));
         assert!(json.contains("\"has_outline\":true"));
     }
 
@@ -207,12 +221,14 @@ mod tests {
             workspace: 4,
             x_pos: None,
             ring_intensity: 0.0,
+            ring_color: None,
             has_outline: false,
             scale: 1.0,
         };
         let json = event.to_json();
         assert!(!json.contains("x_pos"));
         assert!(!json.contains("ring_intensity"));
+        assert!(!json.contains("ring_color"));
         assert!(!json.contains("has_outline"));
         assert!(!json.contains("scale"));
     }

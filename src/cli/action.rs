@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use tracing::instrument;
 use vtr::trace_error;
 
-use claude_babel::core::BabelCore;
-use claude_babel::utility::agent_discovery::enrich_pane;
+use babel::core::BabelCore;
+use babel::utility::agent_discovery::enrich_pane;
 
 use super::{resolve_target, Target};
 
@@ -144,7 +144,7 @@ pub async fn cmd_focus(core: &BabelCore, pane_id: Option<u64>, content_mode: boo
 ///
 /// If include_content=true, also fetches scrollback for each window (slow).
 async fn format_windows_for_pager(
-    windows: &[claude_babel::utility::agent_discovery::AgentPane],
+    windows: &[babel::utility::agent_discovery::AgentPane],
     include_content: bool,
 ) -> Result<String> {
     use serde_json::json;
@@ -565,7 +565,7 @@ pub fn cmd_fire_clean() -> Result<()> {
 /// Connection stays open until Ctrl+C or daemon shutdown.
 #[instrument(level = "debug", skip(filter))]
 pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
-    use claude_babel::utility::ipc::{socket_path, Request, Response};
+    use babel::utility::ipc::{socket_path, Request, Response};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
@@ -663,7 +663,7 @@ pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
 /// - JSON: array of {id, title, socket} objects
 #[instrument(level = "debug")]
 pub async fn cmd_target(json: bool) -> Result<()> {
-    use claude_babel::kitty::get_panes_by_platform_id;
+    use babel::kitty::get_panes_by_platform_id;
     use std::process::Command;
 
     // Run slop to get X11 window ID from user click
@@ -805,7 +805,7 @@ pub async fn cmd_solo(core: &BabelCore, target: Option<&Target>, off: bool) -> R
 /// - ".": reboot current window (from KITTY_WINDOW_ID)
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_reboot(core: &mut BabelCore, target: &Target) -> Result<()> {
-    use claude_babel::layout::{capture_all_layouts, rebuild_os_window_layout};
+    use babel::layout::{capture_all_layouts, rebuild_os_window_layout};
 
     let pane_ids = resolve_target(core, target).await?;
 

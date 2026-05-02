@@ -14,14 +14,14 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tracing::{debug, info, warn};
 
-use claude_babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
-use claude_babel::kitty::{
+use babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
+use babel::kitty::{
     default_socket, reset_border_color_on_socket, set_border_color_on_socket, PaneAddr,
 };
-use claude_babel::utility::agent_discovery::tag_pane_addr;
-use claude_babel::utility::claude_storage::path_to_encoded;
-use claude_babel::utility::ipc::{send_request, Request};
-use claude_babel::{
+use babel::utility::agent_discovery::tag_pane_addr;
+use babel::utility::claude_storage::path_to_encoded;
+use babel::utility::ipc::{send_request, Request};
+use babel::{
     AgentKind, HarnessSupport, HookEventSpec, HookStateEffect, InstallStrategy, PulseEffect,
     ReadEffect,
 };

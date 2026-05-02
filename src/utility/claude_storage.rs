@@ -876,8 +876,8 @@ mod tests {
     #[test]
     fn test_path_to_encoded() {
         assert_eq!(
-            path_to_encoded(Path::new("/home/nuck/Workspace")),
-            "-home-nuck-Workspace"
+            path_to_encoded(Path::new("/home/example/workspace")),
+            "-home-example-workspace"
         );
     }
 }

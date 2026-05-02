@@ -364,7 +364,7 @@ async fn launch_print_quiet(cwd: &PathBuf, prompt: &str) -> Result<()> {
 
 /// Launch Claude in fire-and-forget mode
 async fn launch_fire(cwd: &PathBuf, prompt: &str) -> Result<()> {
-    use claude_babel::fire::{track_task, FiredTask};
+    use babel::fire::{track_task, FiredTask};
     use std::process::{Command, Stdio};
 
     // Write prompt to temp file for safe passing
@@ -401,7 +401,7 @@ exec claude "$PROMPT"
         .stderr(Stdio::null());
 
     // Target main socket if available
-    if let Some(socket) = claude_babel::kitty::main_socket() {
+    if let Some(socket) = babel::kitty::main_socket() {
         cmd.args(["--to", &socket]);
     }
 

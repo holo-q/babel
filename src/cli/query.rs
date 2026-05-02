@@ -11,15 +11,13 @@ use tracing::instrument;
 
 use super::Target;
 use crate::cli::legend::Legend;
-use claude_babel::babel_storage::{get_generated_title, get_metadata, init_db};
-use claude_babel::core::BabelCore;
-use claude_babel::daemon::TerminalInfo;
-use claude_babel::kitty::discover_all_instances;
-use claude_babel::utility::agent_discovery::{detect_agent_signals, resolve_pane_title, AgentPane};
-use claude_babel::utility::claude_storage::{
-    get_session_display_name, get_session_path, SessionInfo,
-};
-use claude_babel::ActivityState;
+use babel::babel_storage::{get_generated_title, get_metadata, init_db};
+use babel::core::BabelCore;
+use babel::daemon::TerminalInfo;
+use babel::kitty::discover_all_instances;
+use babel::utility::agent_discovery::{detect_agent_signals, resolve_pane_title, AgentPane};
+use babel::utility::claude_storage::{get_session_display_name, get_session_path, SessionInfo};
+use babel::ActivityState;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Core Query Commands
@@ -338,7 +336,7 @@ pub async fn cmd_ls_panes(core: &BabelCore, json: bool) -> Result<()> {
     );
     println!();
 
-    let current_socket = claude_babel::kitty::default_socket();
+    let current_socket = babel::kitty::default_socket();
     for (socket, os_windows) in by_socket.iter() {
         // Show socket indicator: ● current, ○ other
         let is_current = socket == &current_socket;
@@ -660,7 +658,7 @@ pub fn print_window(wnd: &AgentPane) -> Result<()> {
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
 
     // Socket indicator - show warning for windows on non-current kitty instance
-    let current_socket = claude_babel::kitty::default_socket();
+    let current_socket = babel::kitty::default_socket();
     let is_current_socket = wnd.socket() == current_socket;
 
     // The worker's breath — reading their current state
@@ -669,7 +667,7 @@ pub fn print_window(wnd: &AgentPane) -> Result<()> {
     //
     // Icons: ⚡ Thinking, ⚙ ToolUse, 📋 PlanApproval, ◆ AwaitingInput,
     //        ◐ BackgroundTask, ○ Idle, ● Working (generic), ◌ Unknown
-    use claude_babel::babel_storage::HookState;
+    use babel::babel_storage::HookState;
 
     let (state_icon, state_style) = match (wnd.hook_state, wnd.activity_state) {
         // Hook says Idle → trust it absolutely (worker finished, awaiting the Captain's voice)
@@ -1101,7 +1099,7 @@ pub async fn cmd_get_title(core: &BabelCore, target: &Target, json: bool) -> Res
 /// Resolves target to session ID, then extracts todos from the transcript JSONL.
 #[tracing::instrument(level = "debug", skip(core))]
 pub async fn cmd_plan(core: &BabelCore, target: &str, json: bool) -> Result<()> {
-    use claude_babel::utility::claude_storage::get_todos_by_session_id;
+    use babel::utility::claude_storage::get_todos_by_session_id;
 
     // Resolve target to session ID
     let session_id = resolve_plan_target(core, target).await?;
@@ -1171,7 +1169,7 @@ async fn resolve_plan_target(core: &BabelCore, target: &str) -> Result<String> {
 }
 
 /// Pretty print a todo list
-fn print_plan(todos: &[claude_babel::utility::claude_storage::TodoItem], session_id: &str) {
+fn print_plan(todos: &[babel::utility::claude_storage::TodoItem], session_id: &str) {
     use console::style;
 
     // Header with session (truncated)

@@ -11,8 +11,8 @@ use anyhow::{anyhow, Context, Result};
 use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
 
-use claude_babel::core::BabelCore;
-use claude_babel::utility::claude_storage::claude_base;
+use babel::core::BabelCore;
+use babel::utility::claude_storage::claude_base;
 
 /// Interactive pager for browsing and resuming sessions
 ///
@@ -23,7 +23,7 @@ use claude_babel::utility::claude_storage::claude_base;
 pub async fn cmd_resume(core: &BabelCore, all: bool, _json: bool) -> Result<()> {
     // Run the pager (to be implemented in phase 2)
     // For now, just show a placeholder message
-    let selected = claude_babel::pager::run_resume_pager(core, all).await?;
+    let selected = babel::pager::run_resume_pager(core, all).await?;
 
     // If a session was selected, launch claude --resume
     if let Some(session_id) = selected {
@@ -132,7 +132,7 @@ fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
         }
 
         // Found the session file - try to extract cwd from session info
-        if let Ok(info) = claude_babel::utility::claude_storage::get_session_info(&session_file) {
+        if let Ok(info) = babel::utility::claude_storage::get_session_info(&session_file) {
             if let Some(cwd) = info.cwd {
                 if cwd.exists() {
                     return Ok(cwd);
@@ -145,7 +145,7 @@ fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
         // Claude encodes paths as: /home/user/project → -home-user-project
         if let Some(project_name) = project_dir.file_name().and_then(|n| n.to_str()) {
             if project_name.starts_with('-') {
-                // Decode: "-home-nuck-Workspace" → "/home/nuck/Workspace"
+                // Decode: "-home-user-project" -> "/home/user/project"
                 let decoded = project_name.replacen('-', "/", 1).replace('-', "/");
                 let path = PathBuf::from(&decoded);
                 if path.exists() {

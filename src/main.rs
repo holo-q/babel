@@ -12,7 +12,7 @@ mod cli;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
-use claude_babel::core::BabelCore;
+use babel::core::BabelCore;
 use cli::{Cli, Commands};
 
 /// Main entry point - thin dispatcher to CLI handlers
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     let is_daemon = matches!(cli.command, Commands::Daemon { .. });
     if is_daemon {
         // Custom init with VtrLayer - captures all tracing events to ring buffer
-        claude_babel::daemon::init_daemon_logging(&cli.logging);
+        babel::daemon::init_daemon_logging(&cli.logging);
     } else {
         // Standard spaceship-std init for CLI commands
         // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
@@ -115,9 +115,9 @@ async fn main() -> Result<()> {
         } => {
             let enable_scrollparse = !no_scrollparse;
             if trace {
-                claude_babel::daemon::run_daemon_traced(enable_scrollparse).await
+                babel::daemon::run_daemon_traced(enable_scrollparse).await
             } else {
-                claude_babel::daemon::run_daemon(enable_scrollparse).await
+                babel::daemon::run_daemon(enable_scrollparse).await
             }
         }
 
@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
         Commands::WSet { command } => cli::wset::cmd_wset(&core, command, cli.json).await,
 
         // ─── TUI Debug Console ──────────────────────────────────────────────────
-        Commands::Tui => claude_babel::tui::run_tui().await,
+        Commands::Tui => babel::tui::run_tui().await,
 
         // ─── CLI Event Monitor ──────────────────────────────────────────────────
         Commands::Monitor { filter } => cli::action::cmd_monitor(filter).await,
@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
                     kitty_id,
                 } => cli::hook::handle_pre_compact(&session, kitty_id, &transcript).await,
                 HookCommands::Stdin { event, agent } => {
-                    let agent_kind: claude_babel::AgentKind = agent.parse().unwrap_or_default();
+                    let agent_kind: babel::AgentKind = agent.parse().unwrap_or_default();
                     cli::hook::handle_stdin(&event, agent_kind).await
                 }
                 HookCommands::CodexNotify { payload } => {

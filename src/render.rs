@@ -14,7 +14,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use claude_babel::render::render_dot;
+//! use babel::render::render_dot;
 //! use spaceship_std::visual::{DotStyle, Rgb};
 //!
 //! // In a GTK DrawingArea's connect_draw:
@@ -234,7 +234,7 @@ fn render_concentric_dot(
 /// # Example
 /// ```rust,ignore
 /// let dt = now.duration_since(last_frame).as_secs_f32();
-/// claude_babel::render::decay_ring(&mut ring_intensity, dt);
+/// babel::render::decay_ring(&mut ring_intensity, dt);
 /// if ring_intensity > 0.0 {
 ///     // Queue another redraw for animation
 /// }

@@ -4,8 +4,8 @@
 //! multiple kitty windows and XFCE workspaces.
 
 use anyhow::Result;
-use claude_babel::core::BabelCore;
-use claude_babel::utility::ipc::{send_request, Request, Response};
+use babel::core::BabelCore;
+use babel::utility::ipc::{send_request, Request, Response};
 use std::io::Write;
 
 // Re-export WSetCommands from main for now (will be moved to cli module later)

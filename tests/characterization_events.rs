@@ -1,8 +1,8 @@
-use chrono::{TimeZone, Utc};
-use claude_babel::{
+use babel::{
     events::{BabelEvent, EventFilter, EventMessage, PulseTrigger},
     ActivityState, AgentKind,
 };
+use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
 fn assert_event_json_roundtrip(event: BabelEvent, expected: Value) {
@@ -18,14 +18,14 @@ fn window_events_keep_legacy_kitty_id_wire_shape() {
     assert_event_json_roundtrip(
         BabelEvent::WindowAdded {
             kitty_id: 42,
-            title: "claude - /home/nuck/project".to_string(),
+            title: "claude - /home/example/project".to_string(),
             workspace: Some(3),
             agent_kind: AgentKind::Codex,
         },
         json!({
             "event": "window_added",
             "kitty_id": 42,
-            "title": "claude - /home/nuck/project",
+            "title": "claude - /home/example/project",
             "workspace": 3,
             "agent_kind": "codex"
         }),
@@ -92,14 +92,14 @@ fn hook_session_events_keep_session_id_and_optional_kitty_id_wire_shape() {
         BabelEvent::SessionStarted {
             session_id: "sess-start".to_string(),
             kitty_id: Some(1001),
-            cwd: "/home/nuck/holoq/repo-os/babel".to_string(),
+            cwd: "/home/example/projects/babel".to_string(),
             resumed: true,
         },
         json!({
             "event": "session_started",
             "session_id": "sess-start",
             "kitty_id": 1001,
-            "cwd": "/home/nuck/holoq/repo-os/babel",
+            "cwd": "/home/example/projects/babel",
             "resumed": true
         }),
     );
@@ -138,13 +138,13 @@ fn hook_session_events_keep_session_id_and_optional_kitty_id_wire_shape() {
         BabelEvent::TranscriptCompacting {
             session_id: "sess-compact".to_string(),
             kitty_id: Some(1003),
-            transcript_path: "/home/nuck/.claude/projects/session.jsonl".to_string(),
+            transcript_path: "/home/example/.claude/projects/session.jsonl".to_string(),
         },
         json!({
             "event": "transcript_compacting",
             "session_id": "sess-compact",
             "kitty_id": 1003,
-            "transcript_path": "/home/nuck/.claude/projects/session.jsonl"
+            "transcript_path": "/home/example/.claude/projects/session.jsonl"
         }),
     );
 }

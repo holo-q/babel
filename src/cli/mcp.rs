@@ -32,7 +32,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use vtr::{checkpoint, effect, trace_error};
 
-use claude_babel::core::BabelCore;
+use babel::core::BabelCore;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request types for MCP tools

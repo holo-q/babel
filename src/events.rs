@@ -1,4 +1,4 @@
-//! Event notification system for claude-babel daemon
+//! Event notification system for babel daemon
 //!
 //! The nervous system of Babel—how the tower knows what its workers are doing.
 //! Events flow upward from individual agent panes, carrying news of state changes,

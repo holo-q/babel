@@ -6,13 +6,13 @@
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
-use claude_babel::core::BabelCore;
-use claude_babel::kitty::get_scrollback;
+use babel::core::BabelCore;
+use babel::kitty::get_scrollback;
 
-use claude_babel::fingerprint::{
+use babel::fingerprint::{
     extract_from_jsonl, extract_from_scrollback, match_fingerprints, MatchConfidence,
 };
-use claude_babel::utility::claude_storage::{list_sessions, path_to_encoded};
+use babel::utility::claude_storage::{list_sessions, path_to_encoded};
 
 /// Debug fingerprint linkage between terminals, sessions, and directories
 ///
@@ -143,7 +143,7 @@ pub async fn cmd_fingerprint(
     }
 
     // Collect terminal fingerprints for cross-matching
-    let mut terminal_fps: Vec<(u64, claude_babel::fingerprint::SessionFingerprint)> = Vec::new();
+    let mut terminal_fps: Vec<(u64, babel::fingerprint::SessionFingerprint)> = Vec::new();
 
     for win in &filtered_terminals {
         let in_scope = scope_dir
@@ -241,11 +241,8 @@ pub async fn cmd_fingerprint(
     };
 
     // Collect session fingerprints for cross-matching
-    let mut session_fps: Vec<(
-        String,
-        PathBuf,
-        claude_babel::fingerprint::SessionFingerprint,
-    )> = Vec::new();
+    let mut session_fps: Vec<(String, PathBuf, babel::fingerprint::SessionFingerprint)> =
+        Vec::new();
 
     for project_dir in &project_dirs {
         let project_name = project_dir

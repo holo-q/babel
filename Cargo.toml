@@ -1,5 +1,5 @@
 [package]
-name = "claude-babel"
+name = "babel"
 version = "0.1.0"
 edition = "2021"
 
@@ -89,7 +89,7 @@ ratatui = "0.29"
 crossterm = "0.29"
 
 # GTK/Cairo client integration. These are intentionally feature-gated so
-# protocol-only users of claude-babel do not link GTK.
+# protocol-only users of babel do not link GTK.
 cairo-rs = { version = "0.18", optional = true }
 
 # WNCK - Event-based window/workspace tracking (instant, no polling)

@@ -162,7 +162,7 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
     let filter_str = if debug {
         "trace".to_string()
     } else {
-        spaceship_std::logging::load_level("babel", "claude_babel")
+        spaceship_std::logging::load_level("babel", "babel")
     };
 
     let filter = EnvFilter::new(&filter_str);
@@ -214,7 +214,7 @@ pub fn init_daemon_logging(args: &spaceship_std::LoggingArgs) {
             use signal_hook::iterator::Signals;
             let mut signals = Signals::new(&[signal_hook::consts::SIGHUP]).unwrap();
             for _ in signals.forever() {
-                let new_filter_str = spaceship_std::logging::load_level("babel", "claude_babel");
+                let new_filter_str = spaceship_std::logging::load_level("babel", "babel");
                 let new_filter = EnvFilter::new(&new_filter_str);
                 if reload_handle.reload(new_filter).is_ok() {
                     tracing::info!("Logging config reloaded");
@@ -566,19 +566,25 @@ impl BabelState {
         let color = resolve_color(window.agent_kind, window.hook_state, activity_state);
         let x_pos = window.screen.as_ref().map(|s| s.x);
         const UNREAD_RING_INTENSITY: f64 = 0.75;
-        let ring_intensity = self.pane_ring.get(addr).copied().unwrap_or(0.0).max(
-            if self.pane_unread.contains(addr) {
-                UNREAD_RING_INTENSITY
-            } else {
-                0.0
-            },
-        );
+        let has_unread_ring = self.pane_unread.contains(addr);
+        let ring_intensity =
+            self.pane_ring
+                .get(addr)
+                .copied()
+                .unwrap_or(0.0)
+                .max(if has_unread_ring {
+                    UNREAD_RING_INTENSITY
+                } else {
+                    0.0
+                });
+        let ring_color = has_unread_ring.then(|| window.agent_kind.accent_color().to_string());
         let event = PaintEvent::Window(IndicatorEvent::Set {
             id: Self::paint_pane_id(addr.id),
             color: color.to_string(),
             workspace: window.workspace.unwrap_or(0) as u32,
             x_pos,
             ring_intensity,
+            ring_color,
             has_outline: false,
             scale: 1.0,
         });
@@ -1734,7 +1740,7 @@ impl BabelState {
                     if fp.cwd.is_some() {
                         sessions_with_cwd += 1;
                         if let Some(cwd) = &fp.cwd {
-                            if cwd.to_string_lossy().contains("claude-babel") {
+                            if cwd.to_string_lossy().contains("babel") {
                                 tracing::debug!(
                                     "Index adding session {} with CWD {:?}",
                                     session_id,
@@ -2002,7 +2008,7 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
 
     // Spawn wnck workspace change watcher (instant detection, no polling).
     // GTK/WNCK is intentionally optional so protocol/library consumers of
-    // claude-babel do not link GTK. Without the feature, normal refresh paths
+    // babel do not link GTK. Without the feature, normal refresh paths
     // still converge on workspace changes through polling/cache invalidation.
     #[cfg(feature = "wnck-watch")]
     {
@@ -2511,13 +2517,27 @@ async fn handle_client(
                 let activity_state = s.pane_states.get(addr).copied();
                 let color = resolve_color(window.agent_kind, window.hook_state, activity_state);
                 let x_pos = window.screen.as_ref().map(|s| s.x);
-                let ring_intensity = s.pane_ring.get(addr).copied().unwrap_or(0.0);
+                const UNREAD_RING_INTENSITY: f64 = 0.75;
+                let has_unread_ring = s.pane_unread.contains(addr);
+                let ring_intensity =
+                    s.pane_ring
+                        .get(addr)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .max(if has_unread_ring {
+                            UNREAD_RING_INTENSITY
+                        } else {
+                            0.0
+                        });
+                let ring_color =
+                    has_unread_ring.then(|| window.agent_kind.accent_color().to_string());
                 replay_events.push(PaintEvent::Window(IndicatorEvent::Set {
                     id: BabelState::paint_pane_id(addr.id),
                     color: color.to_string(),
                     workspace: window.workspace.unwrap_or(0) as u32,
                     x_pos,
                     ring_intensity,
+                    ring_color,
                     has_outline: false,
                     scale: 1.0,
                 }));

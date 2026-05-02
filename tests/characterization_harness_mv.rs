@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use claude_babel::agent_kind::AgentKind;
-use claude_babel::harness_ops::{
+use babel::agent_kind::AgentKind;
+use babel::harness_ops::{
     apply_migration_plan, plan_migration_with_context, AdapterReadiness, ApplyCapability,
     HarnessOpsContext, MigrationApplyOptions, MigrationEditKind, RecoveryClass,
 };

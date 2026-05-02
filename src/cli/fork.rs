@@ -16,9 +16,9 @@ use anyhow::{anyhow, Context, Result};
 use tracing::instrument;
 use vtr::{boundary, checkpoint};
 
-use claude_babel::core::BabelCore;
-use claude_babel::pager::parse_transcript;
-use claude_babel::utility::claude_storage::{
+use babel::core::BabelCore;
+use babel::pager::parse_transcript;
+use babel::utility::claude_storage::{
     find_session_transcript, get_recent_sessions, get_session_info,
 };
 use scrollparse::MessageKind;
@@ -407,7 +407,7 @@ exec claude "$PROMPT"
         .stderr(Stdio::null());
 
     // Target main socket if available
-    if let Some(socket) = claude_babel::kitty::main_socket() {
+    if let Some(socket) = babel::kitty::main_socket() {
         cmd.args(["--to", &socket]);
         boundary!("kitty", "spawn_fork", socket = socket, location = location);
     }

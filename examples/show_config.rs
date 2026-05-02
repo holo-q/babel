@@ -1,6 +1,6 @@
 //! Example showing the default configuration structure
 
-use claude_babel::config::BabelConfig;
+use babel::config::BabelConfig;
 
 fn main() {
     let config = BabelConfig::default();

@@ -8,9 +8,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use claude_babel::agent_kind::AgentKind;
-use claude_babel::core::BabelCore;
-use claude_babel::harness_ops::{
+use babel::agent_kind::AgentKind;
+use babel::core::BabelCore;
+use babel::harness_ops::{
     apply_migration_plan, migration_manifest_root, migration_manifests_by_ref,
     plan_migration_apply_ready, recent_migration_manifests, AdapterReadiness,
     HarnessMigrationReport, MigrationApplyOptions, MigrationEdit, MigrationManifestEntry,

@@ -1529,15 +1529,9 @@ mod tests {
 
     #[test]
     fn claude_project_keys_ignore_trailing_slashes() {
-        let path = Path::new("/home/nuck/holoq/repo-os/claude-babel/");
-        assert_eq!(
-            claude_encode_cc_port(path),
-            "-home-nuck-holoq-repo-os-claude-babel"
-        );
-        assert_eq!(
-            claude_encode_ccmv(path),
-            "-home-nuck-holoq-repo-os-claude-babel"
-        );
+        let path = Path::new("/home/example/projects/babel/");
+        assert_eq!(claude_encode_cc_port(path), "-home-example-projects-babel");
+        assert_eq!(claude_encode_ccmv(path), "-home-example-projects-babel");
     }
 
     #[test]

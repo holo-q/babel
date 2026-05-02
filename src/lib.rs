@@ -39,7 +39,7 @@
 //! CLI commands should use `BabelCore` as their single entry point:
 //!
 //! ```rust,ignore
-//! use claude_babel::core::BabelCore;
+//! use babel::core::BabelCore;
 //!
 //! let core = BabelCore::connect().await;
 //!

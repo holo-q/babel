@@ -9,7 +9,7 @@
 //! - WSpace: A chamber in the tower where workers gather (XFCE workspace)
 //! - Session: A claude conversation (identified by session_id UUID)
 //!
-//! Storage: ~/.config/claude-babel/wsets/
+//! Storage: ~/.config/babel/wsets/
 //! - _current: Single line with name of active wset
 //! - {name}.toml: WSet definitions
 
@@ -121,7 +121,7 @@ pub struct WSetSummary {
 pub fn wsets_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("Failed to get config directory")?
-        .join("claude-babel")
+        .join("babel")
         .join("wsets");
 
     if !dir.exists() {

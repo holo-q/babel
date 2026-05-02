@@ -93,8 +93,9 @@ impl PaintEvent {
 ///
 /// MOVED FROM richmon-babel — babel is now authoritative over UX.
 /// Active/working color comes from the harness accent. Idle/Awaiting/Plan
-/// remain universal state colors unless a future paint field carries a durable
-/// unread ring color separately. Returns the hex color including '#'.
+/// remain universal state colors; unread completion is expressed as a durable
+/// `IndicatorEvent::Set::ring_color` around the inactive dot. Returns the hex
+/// color including '#'.
 pub fn resolve_color(
     agent_kind: AgentKind,
     hook_state: Option<HookState>,

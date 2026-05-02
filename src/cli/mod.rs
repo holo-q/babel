@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
+use babel::core::BabelCore;
 use clap::{Parser, Subcommand, ValueEnum};
-use claude_babel::core::BabelCore;
 
 // Re-export submodules
 pub mod action;
@@ -95,7 +95,7 @@ pub fn current_pane_info() -> anyhow::Result<(u64, String)> {
         .map_err(|_| anyhow::anyhow!("Invalid KITTY_WINDOW_ID: {}", id_str))?;
 
     let socket =
-        std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| claude_babel::kitty::default_socket());
+        std::env::var("KITTY_LISTEN_ON").unwrap_or_else(|_| babel::kitty::default_socket());
 
     Ok((id, socket))
 }
@@ -104,9 +104,9 @@ pub fn current_pane_info() -> anyhow::Result<(u64, String)> {
 ///
 /// Combines KITTY_WINDOW_ID and KITTY_LISTEN_ON into a PaneAddr for
 /// precise addressing. Useful for operations that need socket-specific targeting.
-pub fn current_pane_addr() -> anyhow::Result<claude_babel::kitty::PaneAddr> {
+pub fn current_pane_addr() -> anyhow::Result<babel::kitty::PaneAddr> {
     let (id, socket) = current_pane_info()?;
-    Ok(claude_babel::kitty::PaneAddr::new(socket, id))
+    Ok(babel::kitty::PaneAddr::new(socket, id))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -974,25 +974,25 @@ pub enum HookInstallTarget {
 }
 
 impl HookInstallTarget {
-    pub fn agent_kind(self) -> claude_babel::AgentKind {
+    pub fn agent_kind(self) -> babel::AgentKind {
         match self {
-            HookInstallTarget::Claude => claude_babel::AgentKind::Claude,
-            HookInstallTarget::Codex => claude_babel::AgentKind::Codex,
-            HookInstallTarget::FactoryDroid => claude_babel::AgentKind::FactoryDroid,
-            HookInstallTarget::QwenCode => claude_babel::AgentKind::QwenCode,
-            HookInstallTarget::Kimi => claude_babel::AgentKind::Kimi,
-            HookInstallTarget::Gemini => claude_babel::AgentKind::Gemini,
-            HookInstallTarget::Crush => claude_babel::AgentKind::Crush,
-            HookInstallTarget::Cursor => claude_babel::AgentKind::Cursor,
-            HookInstallTarget::Cline => claude_babel::AgentKind::Cline,
-            HookInstallTarget::OpenCode => claude_babel::AgentKind::OpenCode,
-            HookInstallTarget::Amp => claude_babel::AgentKind::Amp,
-            HookInstallTarget::Kiro => claude_babel::AgentKind::Kiro,
-            HookInstallTarget::GithubCopilot => claude_babel::AgentKind::GithubCopilot,
-            HookInstallTarget::RooCode => claude_babel::AgentKind::RooCode,
-            HookInstallTarget::KiloCode => claude_babel::AgentKind::KiloCode,
-            HookInstallTarget::Aider => claude_babel::AgentKind::Aider,
-            HookInstallTarget::Antigravity => claude_babel::AgentKind::Antigravity,
+            HookInstallTarget::Claude => babel::AgentKind::Claude,
+            HookInstallTarget::Codex => babel::AgentKind::Codex,
+            HookInstallTarget::FactoryDroid => babel::AgentKind::FactoryDroid,
+            HookInstallTarget::QwenCode => babel::AgentKind::QwenCode,
+            HookInstallTarget::Kimi => babel::AgentKind::Kimi,
+            HookInstallTarget::Gemini => babel::AgentKind::Gemini,
+            HookInstallTarget::Crush => babel::AgentKind::Crush,
+            HookInstallTarget::Cursor => babel::AgentKind::Cursor,
+            HookInstallTarget::Cline => babel::AgentKind::Cline,
+            HookInstallTarget::OpenCode => babel::AgentKind::OpenCode,
+            HookInstallTarget::Amp => babel::AgentKind::Amp,
+            HookInstallTarget::Kiro => babel::AgentKind::Kiro,
+            HookInstallTarget::GithubCopilot => babel::AgentKind::GithubCopilot,
+            HookInstallTarget::RooCode => babel::AgentKind::RooCode,
+            HookInstallTarget::KiloCode => babel::AgentKind::KiloCode,
+            HookInstallTarget::Aider => babel::AgentKind::Aider,
+            HookInstallTarget::Antigravity => babel::AgentKind::Antigravity,
         }
     }
 }
@@ -1224,7 +1224,7 @@ pub enum WSetCommands {
     /// Save current workspace layout
     ///
     /// Captures all agent panes and their positions across workspaces.
-    /// WSet files are stored in ~/.config/claude-babel/wsets/
+    /// WSet files are stored in ~/.config/babel/wsets/
     #[command(alias = "s")]
     Save {
         /// Name for the WSet (defaults to "default")
@@ -1292,8 +1292,8 @@ mod tests {
             "babel",
             "--doctor",
             "mv",
-            "Workspace/Daemons/claude-babel/",
-            "holoq/repo-os/babel/",
+            "old/projects/babel/",
+            "new/projects/babel/",
         ])
         .unwrap();
         assert!(global.doctor);
@@ -1301,8 +1301,8 @@ mod tests {
         let trailing = Cli::try_parse_from([
             "babel",
             "mv",
-            "Workspace/Daemons/claude-babel/",
-            "holoq/repo-os/babel/",
+            "old/projects/babel/",
+            "new/projects/babel/",
             "--doctor",
         ])
         .unwrap();

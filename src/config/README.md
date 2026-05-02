@@ -9,7 +9,7 @@ Configuration is loaded from `~/.config/babel/babel.toml`. If the file doesn't e
 ## Usage
 
 ```rust
-use claude_babel::config::load_config;
+use babel::config::load_config;
 
 let config = load_config()?;
 if config.title_policy.enabled {

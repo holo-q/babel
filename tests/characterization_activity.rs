@@ -1,9 +1,9 @@
-use claude_babel::babel_storage::{
+use babel::babel_storage::{
     get_hook_state, get_metadata, mark_read, mark_unread, set_hook_state, HookState,
 };
-use claude_babel::paint::{resolve_color, workspace_css_class, workspace_is_urgent};
-use claude_babel::utility::ipc::Request;
-use claude_babel::{AgentKind, HookStateEffect, PulseEffect, ReadEffect};
+use babel::paint::{resolve_color, workspace_css_class, workspace_is_urgent};
+use babel::utility::ipc::Request;
+use babel::{AgentKind, HookStateEffect, PulseEffect, ReadEffect};
 use rusqlite::Connection;
 use scrollparse::claude::ActivityState;
 use serde_json::json;

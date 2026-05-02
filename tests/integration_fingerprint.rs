@@ -17,13 +17,13 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use claude_babel::fingerprint::{
+use babel::fingerprint::{
     extract_from_jsonl, extract_from_scrollback, match_fingerprints, MatchConfidence,
     SessionFingerprint,
 };
-use claude_babel::kitty::get_scrollback;
-use claude_babel::utility::agent_discovery::{discover_agent_panes, find_agent_panes};
-use claude_babel::utility::claude_storage::{list_projects, list_sessions};
+use babel::kitty::get_scrollback;
+use babel::utility::agent_discovery::{discover_agent_panes, find_agent_panes};
+use babel::utility::claude_storage::{list_projects, list_sessions};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test Utilities
@@ -427,7 +427,7 @@ async fn test_matching_accuracy_report() -> Result<()> {
 #[test]
 #[ignore]
 fn test_daemon_fingerprint_index() -> Result<()> {
-    use claude_babel::utility::ipc::{send_request_sync, Request, Response};
+    use babel::utility::ipc::{send_request_sync, Request, Response};
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║  Test: Daemon Fingerprint Index                              ║");

@@ -7,12 +7,12 @@
 //! - Socket connectivity
 
 use anyhow::Result;
-use claude_babel::core::BabelCore;
-use claude_babel::harness_ops::{
+use babel::core::BabelCore;
+use babel::harness_ops::{
     plan_migration, AdapterReadiness, HarnessMigrationReport, LivePaneImpact,
     MigrationDoctorReport, RiskSeverity,
 };
-use claude_babel::utility::agent_discovery::AgentPane;
+use babel::utility::agent_discovery::AgentPane;
 use std::path::{Path, PathBuf};
 
 /// ANSI color codes for output
@@ -92,8 +92,8 @@ fn blue(text: impl std::fmt::Display) -> String {
 
 /// Check if the babel daemon is running and responsive
 async fn check_daemon() -> bool {
-    use claude_babel::utility::ipc::{send_request, socket_path};
-    use claude_babel::utility::ipc::{Request, Response};
+    use babel::utility::ipc::{send_request, socket_path};
+    use babel::utility::ipc::{Request, Response};
 
     let socket = socket_path();
     if !socket.exists() {
@@ -208,7 +208,7 @@ fn check_watcher() -> bool {
 
 /// Check kitty socket connectivity
 fn check_kitty_sockets() -> bool {
-    use claude_babel::kitty::find_all_sockets;
+    use babel::kitty::find_all_sockets;
 
     let sockets = find_all_sockets();
     if sockets.is_empty() {
@@ -667,7 +667,7 @@ fn state_label(state: &str, migratable: bool) -> String {
     }
 }
 
-fn harness_name(harness: claude_babel::AgentKind) -> String {
+fn harness_name(harness: babel::AgentKind) -> String {
     if let Some((r, g, b)) = parse_hex_color(harness.accent_color()) {
         let brightness = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000;
         if brightness < 80 {
