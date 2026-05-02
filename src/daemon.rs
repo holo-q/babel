@@ -102,6 +102,9 @@ use crate::paint::{
     resolve_color, workspace_css_class, workspace_is_urgent, PaintEvent, WorkspacePaintEvent,
 };
 use crate::service::activity::{reduce_activity, ActivityObservation};
+use crate::service::matching::{
+    coordinate_matches, ClaimKind, FingerprintMatch, MatchCandidate, MatchOutcome,
+};
 use crate::service::refresh::diff_agent_panes;
 use crate::utility::agent_discovery::{
     detect_agent_signals, get_activity_with_scrollback_on_socket, get_pane_activity_with_scrollback,
@@ -111,7 +114,7 @@ use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_sessi
 use crate::utility::ipc::{create_listener, Request, Response};
 use crate::wset::{get_current_wset_name, list_wsets, set_current_wset_name, WSet};
 use crate::{AgentKind, PulseEffect};
-use vtr::trace::{generate_trace_id, with_trace_id, RingBuffer, TraceSnapshot, VtrLayer};
+use vtr::trace::{generate_trace_id, RingBuffer, TraceSnapshot, VtrLayer};
 use vtr::{boundary, checkpoint, effect, state, trace_error};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,6 +242,24 @@ macro_rules! trace {
             tracing::trace!($($arg)*);
         }
     };
+}
+
+fn log_duplicate_claim(addr: &PaneAddr, session_id: &str, kind: ClaimKind, phase: &str) {
+    let pane = addr.short();
+    tracing::warn!(
+        pane = %pane,
+        session_id = %session_id,
+        kind = ?kind,
+        phase = %phase,
+        "duplicate_claim"
+    );
+    checkpoint!(
+        "duplicate_claim",
+        pane = pane,
+        session_id = session_id.to_string(),
+        kind = format!("{kind:?}"),
+        phase = phase.to_string()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -879,7 +900,7 @@ impl BabelState {
             let workspace = workspaces.get(&kw.platform_window_id).copied();
 
             // Check if we have existing data for this pane (use get, not remove)
-            let mut agent_pane = if let Some(existing) = self.panes.get(&addr) {
+            let agent_pane = if let Some(existing) = self.panes.get(&addr) {
                 // Clone existing and update dynamic fields
                 let mut updated = existing.clone();
                 updated.workspace = workspace;
@@ -939,23 +960,57 @@ impl BabelState {
                 }
             };
 
-            // Try to match unmatched panes using summary index
-            if agent_pane.session_id.is_none() {
-                trace!(
-                    "Window {} needs matching (title: {})",
-                    addr.short(),
-                    agent_pane.title
-                );
-
-                if let Some(session_id) = self.match_title_to_session(&agent_pane.title) {
-                    trace!("  → Title matched to session: {}", session_id);
-                    agent_pane.session_id = Some(session_id);
-                } else {
-                    trace!("  → Title match failed, will defer fingerprinting");
-                }
-            }
-
             new_windows.insert(addr, agent_pane);
+        }
+
+        // Coordinate cheap title-derived matches as a batch before any state
+        // mutation. This preserves title-first matching while preventing two
+        // panes discovered in the same refresh tick from claiming the same
+        // session id.
+        let title_candidates: Vec<_> = new_windows
+            .values()
+            .map(|pane| {
+                let title_match = if pane.session_id.is_none() {
+                    trace!(
+                        "Window {} needs matching (title: {})",
+                        pane.addr.short(),
+                        pane.title
+                    );
+                    self.match_title_to_session(&pane.title)
+                } else {
+                    None
+                };
+
+                MatchCandidate::new(pane.addr.clone())
+                    .with_current_session(pane.session_id.clone())
+                    .with_cwd(Some(pane.cwd.clone()))
+                    .with_title_match(title_match)
+            })
+            .collect();
+
+        for decision in coordinate_matches(title_candidates, &HashSet::new()) {
+            match decision.outcome {
+                MatchOutcome::TitleMatched { session_id } => {
+                    trace!(
+                        "  → Title matched {} to session: {}",
+                        decision.addr.short(),
+                        session_id
+                    );
+                    if let Some(pane) = new_windows.get_mut(&decision.addr) {
+                        pane.session_id = Some(session_id);
+                    }
+                }
+                MatchOutcome::DuplicateClaim { session_id, kind } => {
+                    log_duplicate_claim(&decision.addr, &session_id, kind, "title");
+                }
+                MatchOutcome::NoMatch => {
+                    trace!(
+                        "  → Title match failed for {}, will defer fingerprinting",
+                        decision.addr.short()
+                    );
+                }
+                MatchOutcome::AlreadyMatched { .. } | MatchOutcome::FingerprintMatched { .. } => {}
+            }
         }
 
         // Compute structural pane changes before applying effects. This is the
@@ -2359,11 +2414,49 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
                                 .flatten()
                                 .collect();
 
-                            // Phase 6: Apply fingerprint results with quick write lock
+                            // Phase 6: Coordinate same-batch fingerprint claims, then apply with quick write lock
                             if !fingerprint_results.is_empty() {
+                                let fingerprint_candidates: Vec<_> = fingerprint_results
+                                    .into_iter()
+                                    .map(|(addr, session_id, confidence, fingerprint)| {
+                                        MatchCandidate::new(addr).with_fingerprint_match(Some(
+                                            FingerprintMatch {
+                                                session_id,
+                                                confidence,
+                                                fingerprint,
+                                            },
+                                        ))
+                                    })
+                                    .collect();
+                                let decisions =
+                                    coordinate_matches(fingerprint_candidates, &claimed_sessions);
                                 let mut s = state_clone.write().await;
-                                for (addr, session_id, confidence, fingerprint) in fingerprint_results {
-                                    s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
+                                for decision in decisions {
+                                    match decision.outcome {
+                                        MatchOutcome::FingerprintMatched {
+                                            session_id,
+                                            confidence,
+                                            fingerprint,
+                                        } => {
+                                            s.apply_fingerprint_result(
+                                                &decision.addr,
+                                                session_id,
+                                                confidence,
+                                                fingerprint,
+                                            );
+                                        }
+                                        MatchOutcome::DuplicateClaim { session_id, kind } => {
+                                            log_duplicate_claim(
+                                                &decision.addr,
+                                                &session_id,
+                                                kind,
+                                                "poll_fingerprint",
+                                            );
+                                        }
+                                        MatchOutcome::AlreadyMatched { .. }
+                                        | MatchOutcome::TitleMatched { .. }
+                                        | MatchOutcome::NoMatch => {}
+                                    }
                                 }
                             }
 
@@ -2654,7 +2747,7 @@ async fn handle_client(
     // state on connect so panel restarts converge instantly without waiting
     // for the next event.
     if let Request::SubscribePaint = request {
-        let mut s = state.write().await;
+        let s = state.write().await;
         let rx = s.paint_publisher.subscribe();
         let subscriber_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3277,7 +3370,7 @@ mod handlers {
         };
 
         // Phase 2: Get windows needing fingerprints + index + claimed sessions
-        let (needs_matching, fingerprint_index, mut claimed_sessions) = {
+        let (needs_matching, fingerprint_index, claimed_sessions) = {
             let s = state.read().await;
             (
                 s.get_panes_needing_fingerprints(),
@@ -3288,20 +3381,50 @@ mod handlers {
 
         // Phase 3: Do expensive I/O without lock
         // Pass kitty CWD (reliable) instead of extracting from scrollback
-        // Sequential processing: update claimed_sessions as we go to avoid double-matching
-        for (addr, cwd) in needs_matching {
-            if let Some((session_id, confidence, fingerprint)) = BabelState::fingerprint_match_addr(
-                &addr,
-                &cwd,
-                &fingerprint_index,
-                &claimed_sessions,
-            )
-            .await
+        let mut fingerprint_results = Vec::new();
+        for (addr, cwd) in &needs_matching {
+            if let Some((session_id, confidence, fingerprint)) =
+                BabelState::fingerprint_match_addr(addr, cwd, &fingerprint_index, &claimed_sessions)
+                    .await
             {
-                // Mark this session as claimed before processing next window
-                claimed_sessions.insert(session_id.clone());
-                let mut s = state.write().await;
-                s.apply_fingerprint_result(&addr, session_id, confidence, fingerprint);
+                fingerprint_results.push((addr.clone(), session_id, confidence, fingerprint));
+            }
+        }
+
+        if !fingerprint_results.is_empty() {
+            let fingerprint_candidates: Vec<_> = fingerprint_results
+                .into_iter()
+                .map(|(addr, session_id, confidence, fingerprint)| {
+                    MatchCandidate::new(addr).with_fingerprint_match(Some(FingerprintMatch {
+                        session_id,
+                        confidence,
+                        fingerprint,
+                    }))
+                })
+                .collect();
+            let decisions = coordinate_matches(fingerprint_candidates, &claimed_sessions);
+            let mut s = state.write().await;
+            for decision in decisions {
+                match decision.outcome {
+                    MatchOutcome::FingerprintMatched {
+                        session_id,
+                        confidence,
+                        fingerprint,
+                    } => {
+                        s.apply_fingerprint_result(
+                            &decision.addr,
+                            session_id,
+                            confidence,
+                            fingerprint,
+                        );
+                    }
+                    MatchOutcome::DuplicateClaim { session_id, kind } => {
+                        log_duplicate_claim(&decision.addr, &session_id, kind, "ipc_refresh");
+                    }
+                    MatchOutcome::AlreadyMatched { .. }
+                    | MatchOutcome::TitleMatched { .. }
+                    | MatchOutcome::NoMatch => {}
+                }
             }
         }
 

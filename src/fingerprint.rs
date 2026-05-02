@@ -42,7 +42,7 @@ use vtr::{checkpoint, scope};
 /// - Tool call sequences for workflow matching
 /// - CWD for project context
 /// - Timestamp for recency weighting
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionFingerprint {
     /// The opening words, etched in memory
     ///

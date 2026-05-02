@@ -5,11 +5,15 @@
 //! outside this file; the protected seam is the state snapshot passed to matching
 //! and the state mutation applied after fingerprint I/O returns.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use babel::daemon::{BabelState, PaneIdResolution};
 use babel::fingerprint::{MatchConfidence, SessionFingerprint};
 use babel::model::PaneAddr;
+use babel::service::matching::{
+    coordinate_matches, ClaimKind, FingerprintMatch, MatchCandidate, MatchOutcome,
+};
 use babel::utility::agent_discovery::AgentPane;
 use babel::AgentKind;
 
@@ -299,4 +303,121 @@ fn paint_pane_id_includes_socket_pid_to_disambiguate_collisions() {
     assert_ne!(alpha_id, beta_id);
     assert!(alpha_id.contains("alpha"));
     assert!(beta_id.contains("beta"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Matching coordinator characterization
+//
+// Wave 4 introduced `babel::service::matching` as the single arbitration
+// point: callers (daemon refresh, IPC) now hand a batch of `MatchCandidate`s
+// plus the externally-claimed session set to `coordinate_matches` and apply
+// the returned `MatchDecision`s. The four tests below pin the contract that
+// downstream code now depends on:
+//
+//   1. session ids already held — by panes outside the batch (the
+//      `already_claimed` set) or by an in-batch pane via `current_session_id`
+//      — block any later same-batch claim against the same session,
+//   2. when two candidate panes target the same free session in the same
+//      batch, sort order produces a deterministic winner and the loser is
+//      surfaced as a `DuplicateClaim` (no silent drop),
+//   3. when both signals are free, title beats fingerprint (cheaper signal
+//      and the one humans see in the kitty tab),
+//   4. a candidate with no evidence yields `NoMatch` and never a synthetic
+//      session id — the daemon must not invent identity downstream.
+
+fn matching_addr(socket: &str, id: u64) -> PaneAddr {
+    PaneAddr::new(format!("unix:/run/user/1000/kitty.sock-{socket}"), id)
+}
+
+fn matching_fp(session_id: &str, confidence: MatchConfidence) -> FingerprintMatch {
+    FingerprintMatch {
+        session_id: session_id.to_string(),
+        confidence,
+        fingerprint: SessionFingerprint::default(),
+    }
+}
+
+#[test]
+fn refresh_matching_existing_sessions_block_later_batch_claims() {
+    let already: HashSet<String> = ["S_EXTERNAL".to_string()].into_iter().collect();
+
+    // Three candidates in one batch:
+    // - id=1 already owns "S_OWNED" → AlreadyMatched, joins batch claim set,
+    // - id=2 tries to title-claim "S_OWNED" → blocked by the in-batch claim,
+    // - id=3 tries to title-claim "S_EXTERNAL" → blocked by `already_claimed`.
+    let candidates = vec![
+        MatchCandidate::new(matching_addr("a", 1)).with_current_session(Some("S_OWNED".into())),
+        MatchCandidate::new(matching_addr("a", 2)).with_title_match(Some("S_OWNED".into())),
+        MatchCandidate::new(matching_addr("a", 3)).with_title_match(Some("S_EXTERNAL".into())),
+    ];
+
+    let decisions = coordinate_matches(candidates, &already);
+
+    assert!(matches!(
+        &decisions[0].outcome,
+        MatchOutcome::AlreadyMatched { session_id } if session_id == "S_OWNED"
+    ));
+    assert!(matches!(
+        &decisions[1].outcome,
+        MatchOutcome::DuplicateClaim { session_id, kind: ClaimKind::Title }
+            if session_id == "S_OWNED"
+    ));
+    assert!(matches!(
+        &decisions[2].outcome,
+        MatchOutcome::DuplicateClaim { session_id, kind: ClaimKind::Title }
+            if session_id == "S_EXTERNAL"
+    ));
+}
+
+#[test]
+fn refresh_matching_same_batch_duplicate_picks_deterministic_winner() {
+    // Two panes both want session "S" via title in the same batch. Sort
+    // order — (socket, id) — puts ("a", 1) before ("a", 2) regardless of
+    // input order, so the first wins and the second surfaces a
+    // DuplicateClaim. This is the silent-double-claim bug Wave 4 fixes.
+    let candidates = vec![
+        MatchCandidate::new(matching_addr("a", 2)).with_title_match(Some("S".into())),
+        MatchCandidate::new(matching_addr("a", 1)).with_title_match(Some("S".into())),
+    ];
+
+    let decisions = coordinate_matches(candidates, &HashSet::new());
+
+    assert_eq!(decisions[0].addr, matching_addr("a", 1));
+    assert!(matches!(
+        &decisions[0].outcome,
+        MatchOutcome::TitleMatched { session_id } if session_id == "S"
+    ));
+    assert_eq!(decisions[1].addr, matching_addr("a", 2));
+    assert!(matches!(
+        &decisions[1].outcome,
+        MatchOutcome::DuplicateClaim { session_id, kind: ClaimKind::Title }
+            if session_id == "S"
+    ));
+}
+
+#[test]
+fn refresh_matching_title_beats_fingerprint_when_both_free() {
+    let candidates = vec![MatchCandidate::new(matching_addr("a", 1))
+        .with_title_match(Some("S_TITLE".into()))
+        .with_fingerprint_match(Some(matching_fp("S_FP", MatchConfidence::High)))];
+
+    let decisions = coordinate_matches(candidates, &HashSet::new());
+
+    assert!(matches!(
+        &decisions[0].outcome,
+        MatchOutcome::TitleMatched { session_id } if session_id == "S_TITLE"
+    ));
+}
+
+#[test]
+fn refresh_matching_unmatched_pane_yields_no_match_with_no_synthetic_id() {
+    // A candidate with neither title nor fingerprint evidence must yield
+    // NoMatch. The variant carries no payload by design: the caller is
+    // forbidden from synthesising a session id for an unmatched pane.
+    let candidates = vec![MatchCandidate::new(matching_addr("a", 1))];
+
+    let decisions = coordinate_matches(candidates, &HashSet::new());
+
+    assert_eq!(decisions.len(), 1);
+    assert!(matches!(decisions[0].outcome, MatchOutcome::NoMatch));
 }
