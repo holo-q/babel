@@ -219,4 +219,127 @@ mod tests {
         assert_eq!(reduction.reason, ActivityDecision::IgnoredOlderObservation);
         assert_eq!(reduction.activity, current);
     }
+
+    // The freshness window is inclusive: at exactly hook_fresh_ms past the
+    // current hook timestamp, the hook still wins over a scrollback poll.
+    // Pin the inclusive boundary so the production worker can re-tune the
+    // window without accidentally flipping to strict-less-than.
+    #[test]
+    fn fresh_hook_precedence_holds_at_window_boundary() {
+        let current = PaneActivity::new(ActivityState::ToolUse, ActivitySource::Hook, 1_000, 4);
+        let reduction = reduce_activity_with_hook_fresh_ms(
+            Some(&current),
+            ActivityObservation::new(ActivityState::Idle, ActivitySource::Scrollback, 2_000),
+            1_000,
+        );
+
+        assert!(!reduction.accepted);
+        assert_eq!(
+            reduction.reason,
+            ActivityDecision::IgnoredFreshHookPrecedence
+        );
+        assert_eq!(reduction.activity, current);
+    }
+
+    // Equal-timestamp scrollback is not "older" but it is also not newer than
+    // a fresh hook, so the freshness window still suppresses it.
+    #[test]
+    fn equal_timestamp_scrollback_loses_to_current_hook() {
+        let current = PaneActivity::new(ActivityState::ToolUse, ActivitySource::Hook, 1_000, 4);
+        let reduction = reduce_activity_with_hook_fresh_ms(
+            Some(&current),
+            ActivityObservation::new(ActivityState::Idle, ActivitySource::Scrollback, 1_000),
+            1_000,
+        );
+
+        assert!(!reduction.accepted);
+        assert_eq!(
+            reduction.reason,
+            ActivityDecision::IgnoredFreshHookPrecedence
+        );
+        assert_eq!(reduction.activity, current);
+    }
+
+    // The freshness window only protects hook truth from scrollback noise.
+    // Hook->hook updates inside the window must always supersede so that a
+    // fast-arriving second hook (e.g. ToolRunning right after Working) is
+    // not dropped on the floor.
+    #[test]
+    fn hook_to_hook_within_window_supersedes() {
+        let current = PaneActivity::new(ActivityState::Thinking, ActivitySource::Hook, 1_000, 4);
+        let reduction = reduce_activity_with_hook_fresh_ms(
+            Some(&current),
+            ActivityObservation::from_hook_state(HookState::ToolRunning, 1_500),
+            1_000,
+        );
+
+        assert!(reduction.accepted);
+        assert_eq!(reduction.reason, ActivityDecision::NewerHook);
+        assert_eq!(reduction.activity.state, ActivityState::ToolUse);
+        assert_eq!(reduction.activity.source, ActivitySource::Hook);
+        assert_eq!(reduction.activity.generation, 5);
+    }
+
+    // Scrollback -> scrollback follows the simple "newer wins" rule with no
+    // freshness gate, since neither side is hook truth.
+    #[test]
+    fn scrollback_to_scrollback_newer_supersedes() {
+        let current = PaneActivity::new(
+            ActivityState::Thinking,
+            ActivitySource::Scrollback,
+            1_000,
+            2,
+        );
+        let reduction = reduce_activity_with_hook_fresh_ms(
+            Some(&current),
+            ActivityObservation::new(ActivityState::Idle, ActivitySource::Scrollback, 1_500),
+            1_000,
+        );
+
+        assert!(reduction.accepted);
+        assert_eq!(reduction.reason, ActivityDecision::NewerObservation);
+        assert_eq!(reduction.activity.state, ActivityState::Idle);
+        assert_eq!(reduction.activity.source, ActivitySource::Scrollback);
+        assert_eq!(reduction.activity.generation, 3);
+    }
+
+    // Characterization: today the reducer treats Focus like any non-hook
+    // observation. The model docs say Focus should signal read-state rather
+    // than synthesize work-state, so this test pins the *current* behavior so
+    // that a future change which special-cases Focus is loud at the test
+    // boundary instead of silently shifting reducer policy.
+    #[test]
+    fn focus_observation_is_treated_as_generic_newer_observation() {
+        let current = PaneActivity::new(ActivityState::Idle, ActivitySource::Scrollback, 1_000, 1);
+        let reduction = reduce_activity(
+            Some(&current),
+            ActivityObservation::new(ActivityState::Thinking, ActivitySource::Focus, 1_500),
+        );
+
+        assert!(reduction.accepted);
+        assert_eq!(reduction.reason, ActivityDecision::NewerObservation);
+        assert_eq!(reduction.activity.state, ActivityState::Thinking);
+        assert_eq!(reduction.activity.source, ActivitySource::Focus);
+        assert_eq!(reduction.activity.generation, 2);
+    }
+
+    // The HookState -> ActivityState mapping is the single chokepoint for
+    // turning hook truth into reducer input. Pin it via the constructor that
+    // production paths use, so any drift between hook_state_activity and
+    // ActivityObservation::from_hook_state is caught here.
+    #[test]
+    fn from_hook_state_carries_hook_source_and_canonical_state() {
+        let working = ActivityObservation::from_hook_state(HookState::Working, 10);
+        assert_eq!(working.source, ActivitySource::Hook);
+        assert_eq!(working.state, ActivityState::Thinking);
+        assert_eq!(working.observed_at_ms, 10);
+
+        let tool = ActivityObservation::from_hook_state(HookState::ToolRunning, 20);
+        assert_eq!(tool.source, ActivitySource::Hook);
+        assert_eq!(tool.state, ActivityState::ToolUse);
+
+        let idle = ActivityObservation::from_hook_state(HookState::Idle, 30);
+        assert_eq!(idle.source, ActivitySource::Hook);
+        assert_eq!(idle.state, ActivityState::Idle);
+    }
 }

@@ -71,6 +71,37 @@ fn read_unread_and_hook_state_share_one_metadata_row() -> anyhow::Result<()> {
     Ok(())
 }
 
+// The hook handler can be the very first writer to a session row (no prior
+// focus/read had happened). Pin that set_hook_state implicitly creates the
+// row with is_read=false, and that mark_read afterwards does not reset the
+// hook state. This freezes the unread/hook-state independence in both
+// directions ahead of the wave-2 reducer wiring.
+#[test]
+fn set_hook_state_on_fresh_session_creates_unread_row_and_preserves_state() -> anyhow::Result<()> {
+    let conn = metadata_conn();
+    let session = "claude:wave-two-fresh";
+
+    set_hook_state(&conn, session, HookState::Working)?;
+    let meta = get_metadata(&conn, session)?.unwrap();
+    assert!(
+        !meta.is_read,
+        "set_hook_state must not flip is_read to true on row creation"
+    );
+    assert_eq!(meta.hook_state, HookState::Working);
+    assert!(meta.last_hook_at.is_some());
+
+    mark_read(&conn, session)?;
+    let meta = get_metadata(&conn, session)?.unwrap();
+    assert!(meta.is_read);
+    assert_eq!(
+        meta.hook_state,
+        HookState::Working,
+        "mark_read must not reset hook state"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn paint_color_resolution_prefers_hook_truth_then_activity_detail() {
     assert_eq!(

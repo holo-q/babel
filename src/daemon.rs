@@ -83,7 +83,6 @@ use crate::fingerprint::{
     SessionFingerprint,
 };
 use crate::indicator::IndicatorEvent;
-use crate::kitty::{PaneAddr, PaneSelector};
 use crate::kitty::{
     default_socket,
     discover_all_instances,
@@ -97,10 +96,12 @@ use crate::kitty::{
     send_text_on_socket,
     set_border_color_on_socket,
 };
+use crate::kitty::{PaneAddr, PaneSelector};
+use crate::model::{ActivitySource, PaneActivity};
 use crate::paint::{
     resolve_color, workspace_css_class, workspace_is_urgent, PaintEvent, WorkspacePaintEvent,
 };
-use crate::service::activity::hook_state_activity;
+use crate::service::activity::{reduce_activity, ActivityObservation};
 use crate::utility::agent_discovery::{
     detect_agent_signals, get_activity_with_scrollback_on_socket, get_pane_activity_with_scrollback,
 };
@@ -404,6 +405,14 @@ impl Default for ScrollbackActivity {
     }
 }
 
+#[derive(Debug)]
+struct PaneActivityApply {
+    old_state: Option<scrollparse::claude::ActivityState>,
+    new_state: scrollparse::claude::ActivityState,
+    state_changed: bool,
+    initialized: bool,
+}
+
 /// Babel state - shared across tasks
 ///
 /// All window/terminal state is keyed by PaneAddr (socket + id) to support
@@ -437,6 +446,14 @@ pub struct BabelState {
     /// Used to detect state changes and emit SessionStateChanged events
     /// Tracking each worker's breath—their current state in the cycle
     pub pane_states: HashMap<PaneAddr, scrollparse::claude::ActivityState>,
+
+    /// Canonical reduced activity snapshots (PaneAddr → PaneActivity).
+    ///
+    /// `pane_states` remains the legacy paint/event cache. This richer snapshot
+    /// is the service reducer's source-of-truth: it remembers whether the last
+    /// observation came from hooks or scrollback so fresh hook truth is not
+    /// overwritten by a noisy parser poll.
+    pub pane_activity_snapshots: HashMap<PaneAddr, PaneActivity>,
 
     /// Scrollback activity tracking for ActivityPulse events (PaneAddr → ScrollbackActivity)
     /// Tracks content hashes and deltas to detect token output / tool execution
@@ -517,6 +534,7 @@ impl BabelState {
             session_paths: HashMap::new(),
             pane_fingerprints: HashMap::new(),
             pane_states: HashMap::new(),
+            pane_activity_snapshots: HashMap::new(),
             pane_activity: HashMap::new(),
             start_time: Instant::now(),
             last_kitty_scan: Instant::now(),
@@ -672,6 +690,46 @@ impl BabelState {
         self.emit_pane_paint(addr);
     }
 
+    /// Apply one semantic activity observation through the service reducer.
+    ///
+    /// Hook events and scrollback polls reach this point with different
+    /// authority. The reducer keeps that policy in one place, while the daemon
+    /// mirrors the accepted state into `pane_states` for legacy paint/event
+    /// consumers.
+    fn apply_pane_activity_observation(
+        &mut self,
+        addr: &PaneAddr,
+        observation: ActivityObservation,
+    ) -> PaneActivityApply {
+        let old_state = self.pane_states.get(addr).copied();
+        let fallback_current =
+            old_state.map(|state| PaneActivity::new(state, ActivitySource::Unknown, 0, 0));
+        let current = self
+            .pane_activity_snapshots
+            .get(addr)
+            .or(fallback_current.as_ref());
+        let reduction = reduce_activity(current, observation);
+
+        let initialized = old_state.is_none() && reduction.accepted;
+        let new_state = if reduction.accepted {
+            let state = reduction.activity.state;
+            self.pane_activity_snapshots
+                .insert(addr.clone(), reduction.activity.clone());
+            self.pane_states.insert(addr.clone(), state);
+            state
+        } else {
+            old_state.unwrap_or(reduction.activity.state)
+        };
+        let state_changed = reduction.accepted && old_state.is_some_and(|old| old != new_state);
+
+        PaneActivityApply {
+            old_state,
+            new_state,
+            state_changed,
+            initialized,
+        }
+    }
+
     /// Refresh kitty windows from ALL sockets
     ///
     /// Returns list of workspaces that had windows added or removed,
@@ -792,9 +850,8 @@ impl BabelState {
 
         // Emit TerminalClosed events for removed terminals
         for addr in old_terminal_addrs.difference(&new_terminal_addrs) {
-            self.event_publisher.publish(BabelEvent::TerminalClosed {
-                addr: addr.clone(),
-            });
+            self.event_publisher
+                .publish(BabelEvent::TerminalClosed { addr: addr.clone() });
         }
 
         // Emit TerminalBecameAgent for terminals that just became agent sessions
@@ -942,12 +999,12 @@ impl BabelState {
             // Clean up cached data for closed window
             self.pane_fingerprints.remove(addr);
             self.pane_states.remove(addr);
+            self.pane_activity_snapshots.remove(addr);
             self.pane_ring.remove(addr);
             self.pane_unread.remove(addr);
 
-            self.event_publisher.publish(BabelEvent::WindowRemoved {
-                addr: addr.clone(),
-            });
+            self.event_publisher
+                .publish(BabelEvent::WindowRemoved { addr: addr.clone() });
             // Paint: tell clients to drop the dot. Pass the full address so
             // the Remove id matches the addr-derived Set id we published when
             // the pane first appeared.
@@ -1069,12 +1126,20 @@ impl BabelState {
             for (addr, window) in &new_windows {
                 // Get state, asking_question, and scrollback in one fetch to avoid double I/O
                 let activity = get_pane_activity_with_scrollback(addr.id).await;
-                let new_state = activity.state;
-                let old_state = self.pane_states.get(addr).copied();
+                let observed_at_ms = chrono::Utc::now().timestamp_millis();
+                let activity_apply = self.apply_pane_activity_observation(
+                    addr,
+                    ActivityObservation::new(
+                        activity.state,
+                        ActivitySource::Scrollback,
+                        observed_at_ms,
+                    ),
+                );
+                let new_state = activity_apply.new_state;
 
                 // ─── State Change Detection ─────────────────────────────────────────────
-                match old_state {
-                    Some(old) if old != new_state => {
+                match activity_apply.old_state {
+                    Some(old) if activity_apply.state_changed => {
                         // State changed - emit event
                         state!("pane_activity", format!("{:?}", old) => format!("{:?}", new_state), window = addr.short());
                         self.event_publisher
@@ -1087,7 +1152,6 @@ impl BabelState {
                                 asking_question: activity.asking_question,
                                 agent_kind: window.agent_kind,
                             });
-                        self.pane_states.insert(addr.clone(), new_state);
                         paint_addrs.insert(addr.clone());
                         if let Some(ws) = window.workspace {
                             paint_workspaces.insert(ws);
@@ -1154,9 +1218,8 @@ impl BabelState {
                             }
                         }
                     }
-                    None => {
+                    None if activity_apply.initialized => {
                         // New window - initialize state (no event, WindowAdded already fired)
-                        self.pane_states.insert(addr.clone(), new_state);
                         paint_addrs.insert(addr.clone());
                         if let Some(ws) = window.workspace {
                             paint_workspaces.insert(ws);
@@ -1209,6 +1272,8 @@ impl BabelState {
 
         // Clean up states for removed windows
         self.pane_states
+            .retain(|addr, _| new_windows.contains_key(addr));
+        self.pane_activity_snapshots
             .retain(|addr, _| new_windows.contains_key(addr));
         self.pane_activity
             .retain(|addr, _| new_windows.contains_key(addr));
@@ -1334,7 +1399,6 @@ impl BabelState {
         asking_question: bool,
         scrollback: String,
     ) {
-        let old_state = self.pane_states.get(addr).copied();
         let window = match self.panes.get(addr) {
             Some(w) => w,
             None => return, // Window no longer exists
@@ -1342,6 +1406,8 @@ impl BabelState {
         // Capture workspace before touching mutable state — needed for the
         // post-update paint pass.
         let pane_workspace = window.workspace;
+        let pane_session_id = window.session_id.clone();
+        let pane_agent_kind = window.agent_kind;
         // Paint staging — flags set during the existing publish path, then
         // applied at the end of the function after borrows on self.panes
         // are released. emit_pane_paint takes &self, but bump_ring_and_emit
@@ -1349,30 +1415,38 @@ impl BabelState {
         let mut paint_state_changed = false;
         let mut paint_state_pulse_intensity: f64 = 0.0;
         let mut paint_pulse_intensity: Option<f64> = None;
+        let activity_apply = self.apply_pane_activity_observation(
+            addr,
+            ActivityObservation::new(
+                new_state,
+                ActivitySource::Scrollback,
+                chrono::Utc::now().timestamp_millis(),
+            ),
+        );
+        let new_state = activity_apply.new_state;
 
         // ─── State Change Detection ─────────────────────────────────────────────
-        match old_state {
-            Some(old) if old != new_state => {
+        match activity_apply.old_state {
+            Some(old) if activity_apply.state_changed => {
                 // State changed - emit event
                 state!("pane_activity", format!("{:?}", old) => format!("{:?}", new_state), window = addr.short());
                 self.event_publisher
                     .publish(BabelEvent::SessionStateChanged {
                         addr: addr.clone(),
-                        session_id: window.session_id.clone(),
-                        workspace: window.workspace,
+                        session_id: pane_session_id.clone(),
+                        workspace: pane_workspace,
                         old_state: old,
                         new_state,
                         asking_question,
-                        agent_kind: window.agent_kind,
+                        agent_kind: pane_agent_kind,
                     });
-                self.pane_states.insert(addr.clone(), new_state);
                 paint_state_changed = true;
 
                 // Also emit ActivityPulse on state transitions
                 self.event_publisher.publish(BabelEvent::ActivityPulse {
                     addr: addr.clone(),
-                    session_id: window.session_id.clone(),
-                    workspace: window.workspace,
+                    session_id: pane_session_id.clone(),
+                    workspace: pane_workspace,
                     intensity: 0.8, // State transitions are significant
                     trigger: crate::events::PulseTrigger::StateTransition,
                 });
@@ -1385,7 +1459,7 @@ impl BabelState {
                 if old == scrollparse::claude::ActivityState::AwaitingInput
                     && new_state != scrollparse::claude::ActivityState::AwaitingInput
                 {
-                    if let Some(ref session_id) = window.session_id {
+                    if let Some(ref session_id) = pane_session_id {
                         if let Err(e) = init_db().and_then(|conn| mark_read(&conn, session_id)) {
                             trace_error!("failed to auto-read session", session_id, error = %e);
                         }
@@ -1401,7 +1475,7 @@ impl BabelState {
                 // Auto-unread when scrollback says the agent is awaiting input.
                 // The paint stream keeps this as a durable ring over the current state.
                 if new_state == scrollparse::claude::ActivityState::AwaitingInput {
-                    if let Some(ref session_id) = window.session_id {
+                    if let Some(ref session_id) = pane_session_id {
                         if let Err(e) = init_db().and_then(|conn| mark_unread(&conn, session_id)) {
                             trace_error!("failed to auto-unread session", session_id, error = %e);
                         }
@@ -1418,9 +1492,8 @@ impl BabelState {
                     }
                 }
             }
-            None => {
+            None if activity_apply.initialized => {
                 // New window - initialize state (no event)
-                self.pane_states.insert(addr.clone(), new_state);
                 paint_state_changed = true;
             }
             _ => {
@@ -1450,8 +1523,8 @@ impl BabelState {
                 if intensity > 0.05 {
                     self.event_publisher.publish(BabelEvent::ActivityPulse {
                         addr: addr.clone(),
-                        session_id: window.session_id.clone(),
-                        workspace: window.workspace,
+                        session_id: pane_session_id.clone(),
+                        workspace: pane_workspace,
                         intensity,
                         trigger,
                     });
@@ -1463,7 +1536,7 @@ impl BabelState {
                 // ─── File Index Update ───────────────────────────────────────────────
                 // Extract file operations from scrollback and record them
                 // Only process if we have a session_id (we need it to track touches)
-                if let Some(ref session_id) = window.session_id {
+                if let Some(ref session_id) = pane_session_id {
                     let file_ops = crate::file_index::extract_file_operations(&scrollback);
                     if !file_ops.is_empty() {
                         // Record touches to database (best effort - don't fail on DB errors)
@@ -3597,23 +3670,25 @@ mod handlers {
             // Mutable borrow on s.panes dropped here
 
             if let Some(hook_state) = hook_state {
-                let activity_state = hook_state_activity(hook_state);
+                let activity_apply = s.apply_pane_activity_observation(
+                    &addr,
+                    ActivityObservation::from_hook_state(
+                        hook_state,
+                        chrono::Utc::now().timestamp_millis(),
+                    ),
+                );
 
-                let old_state = s
-                    .pane_states
-                    .get(&addr)
-                    .copied()
-                    .unwrap_or(scrollparse::claude::ActivityState::Unknown);
-
-                if old_state != activity_state {
-                    s.pane_states.insert(addr.clone(), activity_state);
+                if activity_apply.state_changed || activity_apply.initialized {
+                    let old_state = activity_apply
+                        .old_state
+                        .unwrap_or(scrollparse::claude::ActivityState::Unknown);
                     s.event_publisher
                         .publish(crate::events::BabelEvent::SessionStateChanged {
                             addr: addr.clone(),
                             session_id: Some(session.to_string()),
                             workspace,
                             old_state,
-                            new_state: activity_state,
+                            new_state: activity_apply.new_state,
                             asking_question: false, // Hooks don't carry this signal yet
                             agent_kind: resolved_agent_kind,
                         });
