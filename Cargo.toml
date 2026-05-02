@@ -53,7 +53,7 @@ async-trait = "0.1"
 # Logging - delegated to spaceship-std for centralized config
 # View logs: journalctl -t babel -f
 # Reload: kill -HUP $(pgrep babel)
-spaceship-std = { version = "0.2", path = "../../../Workspace/Lib/spaceship-std" }
+spaceship-std = { version = "0.2", path = "../spaceship-std" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }  # Daemon VtrLayer setup
 signal-hook = "0.3"                                                   # SIGHUP handler for log reload
@@ -65,7 +65,7 @@ vtr = { path = "../../repo-os2/vtr" }
 once_cell = "1"                   # Lazy static initialization for VTR buffer
 
 # Scrollback parsing - ActivityState detection for Claude sessions
-scrollparse = { version = "0.1", path = "../../../Workspace/Tools/scrollparse", features = ["serde"] }
+scrollparse = { version = "0.1", path = "../repo-tools/scrollparse", features = ["serde"] }
 
 # Async recursion for layout tree rebuilding
 async-recursion = "1"
@@ -93,7 +93,7 @@ crossterm = "0.29"
 cairo-rs = { version = "0.18", optional = true }
 
 # WNCK - Event-based window/workspace tracking (instant, no polling)
-wnck-rs = { path = "../../../Workspace/Lib/wnck-rs", optional = true }
+wnck-rs = { path = "../wnck-rs", optional = true }
 glib = { version = "0.18", optional = true }
 gtk = { version = "0.18", optional = true }
 
