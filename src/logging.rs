@@ -26,19 +26,21 @@ use crate::events::{BabelEvent, PulseTrigger};
 pub fn format_event(event: &BabelEvent) -> String {
     match event {
         // ─── Pane Events ────────────────────────────────────────────────────────
-        BabelEvent::PaneFocused {
-            addr,
-            session_id,
-        } => match session_id {
-            Some(sid) => format!("Pane({})::Focused {{ {} }}", pane_label(addr), short_uuid(sid)),
+        BabelEvent::PaneFocused { addr, session_id } => match session_id {
+            Some(sid) => format!(
+                "Pane({})::Focused {{ {} }}",
+                pane_label(addr),
+                short_uuid(sid)
+            ),
             None => format!("Pane({})::Focused", pane_label(addr)),
         },
 
-        BabelEvent::PaneUnfocused {
-            addr,
-            session_id,
-        } => match session_id {
-            Some(sid) => format!("Pane({})::Unfocused {{ {} }}", pane_label(addr), short_uuid(sid)),
+        BabelEvent::PaneUnfocused { addr, session_id } => match session_id {
+            Some(sid) => format!(
+                "Pane({})::Unfocused {{ {} }}",
+                pane_label(addr),
+                short_uuid(sid)
+            ),
             None => format!("Pane({})::Unfocused", pane_label(addr)),
         },
 
@@ -54,7 +56,11 @@ pub fn format_event(event: &BabelEvent) -> String {
             let ask = if *asking_question { " ?" } else { "" };
             format!(
                 "Pane(k{})::State {{ {:?} → {:?}{}{} }}",
-                addr.short(), old_state, new_state, ws, ask
+                addr.short(),
+                old_state,
+                new_state,
+                ws,
+                ask
             )
         }
 
@@ -92,7 +98,10 @@ pub fn format_event(event: &BabelEvent) -> String {
             };
             format!(
                 "Window(k{})::Added {{ {}{}{} }}",
-                addr.short(), agent_tag, ws, short_title
+                addr.short(),
+                agent_tag,
+                ws,
+                short_title
             )
         }
 
@@ -121,7 +130,9 @@ pub fn format_event(event: &BabelEvent) -> String {
             let short_title = truncate_title(title, 30);
             format!(
                 "Terminal(k{})::Opened {{ {}{} }}",
-                addr.short(), ws, short_title
+                addr.short(),
+                ws,
+                short_title
             )
         }
 
@@ -131,7 +142,11 @@ pub fn format_event(event: &BabelEvent) -> String {
 
         BabelEvent::TerminalBecameAgent { addr, title } => {
             let short_title = truncate_title(title, 30);
-            format!("Terminal(k{})::BecameAgent {{ {} }}", addr.short(), short_title)
+            format!(
+                "Terminal(k{})::BecameAgent {{ {} }}",
+                addr.short(),
+                short_title
+            )
         }
 
         // ─── Session Events ─────────────────────────────────────────────────────
@@ -474,7 +489,10 @@ mod tests {
             agent_kind: crate::AgentKind::Claude,
         };
         let formatted = format_event(&event);
-        assert_eq!(formatted, "Pane(k42@12345)::State { Idle → Thinking ws:3 ? }");
+        assert_eq!(
+            formatted,
+            "Pane(k42@12345)::State { Idle → Thinking ws:3 ? }"
+        );
     }
 
     #[test]

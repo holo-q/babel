@@ -319,9 +319,7 @@ fn legacy_agent_event_payloads_without_agent_kind_still_decode_as_claude() {
 
     match &window_added {
         BabelEvent::WindowAdded {
-            addr,
-            agent_kind,
-            ..
+            addr, agent_kind, ..
         } => {
             assert_eq!(addr.id, 7);
             assert_eq!(*agent_kind, AgentKind::Claude);

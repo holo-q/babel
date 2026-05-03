@@ -76,6 +76,7 @@ pub mod fingerprint;
 pub mod fire;
 pub mod harness_ops;
 pub mod indicator;
+pub mod ipc;
 pub mod kitty;
 pub mod layout;
 pub mod logging;

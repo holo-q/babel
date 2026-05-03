@@ -5,7 +5,8 @@
 
 use anyhow::Result;
 use babel::core::BabelCore;
-use babel::utility::ipc::{send_request, Request, Response};
+use babel::ipc::{Request, Response};
+use babel::utility::ipc::send_request;
 use std::io::Write;
 
 // Re-export WSetCommands from main for now (will be moved to cli module later)

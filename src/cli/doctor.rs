@@ -92,8 +92,8 @@ fn blue(text: impl std::fmt::Display) -> String {
 
 /// Check if the babel daemon is running and responsive
 async fn check_daemon() -> bool {
+    use babel::ipc::{Request, Response};
     use babel::utility::ipc::{send_request, socket_path};
-    use babel::utility::ipc::{Request, Response};
 
     let socket = socket_path();
     if !socket.exists() {

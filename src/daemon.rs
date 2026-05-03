@@ -83,6 +83,7 @@ use crate::fingerprint::{
     SessionFingerprint,
 };
 use crate::indicator::IndicatorEvent;
+use crate::ipc::{Request, Response, TitleTarget};
 use crate::kitty::{
     default_socket,
     discover_all_instances,
@@ -111,7 +112,7 @@ use crate::utility::agent_discovery::{
 };
 use crate::utility::agent_discovery::{enrich_pane, load_wset, AgentPane};
 use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_session_info};
-use crate::utility::ipc::{create_listener, Request, Response};
+use crate::utility::ipc::create_listener;
 use crate::wset::{get_current_wset_name, list_wsets, set_current_wset_name, WSet};
 use crate::{AgentKind, PulseEffect};
 use vtr::trace::{generate_trace_id, RingBuffer, TraceSnapshot, VtrLayer};
@@ -3136,12 +3137,7 @@ mod handlers {
     }
 
     /// Resolve the best available title for a platform window or pane.
-    pub async fn get_title(
-        state: &Arc<RwLock<BabelState>>,
-        target: crate::utility::ipc::TitleTarget,
-    ) -> Response {
-        use crate::utility::ipc::TitleTarget;
-
+    pub async fn get_title(state: &Arc<RwLock<BabelState>>, target: TitleTarget) -> Response {
         let s = state.read().await;
         let window = match target {
             TitleTarget::PlatformWindow { platform_window_id } => s

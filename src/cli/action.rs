@@ -565,7 +565,8 @@ pub fn cmd_fire_clean() -> Result<()> {
 /// Connection stays open until Ctrl+C or daemon shutdown.
 #[instrument(level = "debug", skip(filter))]
 pub async fn cmd_monitor(filter: Vec<String>) -> Result<()> {
-    use babel::utility::ipc::{socket_path, Request, Response};
+    use babel::ipc::{Request, Response};
+    use babel::utility::ipc::socket_path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 

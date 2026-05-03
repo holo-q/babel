@@ -16,10 +16,11 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::service::state::TerminalInfo;
 use crate::fire::FiredTask;
+use crate::ipc::{Request, Response};
+use crate::service::state::TerminalInfo;
 use crate::utility::agent_discovery::AgentPane;
-use crate::utility::ipc::{self, Request, Response};
+use crate::utility::ipc;
 
 use super::ipc_client::{IpcLogEntry, LoggingIpcClient};
 use super::ui;

@@ -15,12 +15,13 @@ use serde_json::{json, Map, Value};
 use tracing::{debug, info, warn};
 
 use babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
+use babel::ipc::Request;
 use babel::kitty::{
     default_socket, reset_border_color_on_socket, set_border_color_on_socket, PaneAddr,
 };
 use babel::utility::agent_discovery::tag_pane_addr;
 use babel::utility::claude_storage::path_to_encoded;
-use babel::utility::ipc::{send_request, Request};
+use babel::utility::ipc::send_request;
 use babel::{
     AgentKind, HarnessSupport, HookEventSpec, HookStateEffect, InstallStrategy, PulseEffect,
     ReadEffect,

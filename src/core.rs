@@ -40,11 +40,12 @@ use tracing::{debug, info, instrument, warn};
 use vtr::trace_error;
 
 use crate::babel_storage;
-use crate::service::state::{BabelState, TerminalInfo};
+use crate::ipc::{Request, Response};
 use crate::kitty::{self, PaneAddr, PaneSelector};
+use crate::service::state::{BabelState, TerminalInfo};
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::{MigrateResult, SessionInfo};
-use crate::utility::ipc::{is_daemon_running, send_request, Request, Response};
+use crate::utility::ipc::{is_daemon_running, send_request};
 use scrollparse::claude::{detect_activity_state, ActivityState};
 
 /// Core API for agent session management
@@ -360,24 +361,17 @@ impl BabelCore {
     /// Get scrollback text from a pane (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn scrollback(&self, pane_id: u64, lines: Option<usize>) -> Result<String> {
-        self.scrollback_with(PaneSelector::from(pane_id), lines).await
+        self.scrollback_with(PaneSelector::from(pane_id), lines)
+            .await
     }
 
     /// Address-aware scrollback fetch for daemon-resolved targets.
     #[instrument(level = "debug", skip(self))]
-    pub async fn scrollback_addr(
-        &self,
-        addr: &PaneAddr,
-        lines: Option<usize>,
-    ) -> Result<String> {
+    pub async fn scrollback_addr(&self, addr: &PaneAddr, lines: Option<usize>) -> Result<String> {
         self.scrollback_with(PaneSelector::from(addr), lines).await
     }
 
-    async fn scrollback_with(
-        &self,
-        target: PaneSelector,
-        lines: Option<usize>,
-    ) -> Result<String> {
+    async fn scrollback_with(&self, target: PaneSelector, lines: Option<usize>) -> Result<String> {
         let pane_id = target.id();
         let text = match &self.mode {
             CoreMode::Connected => {
@@ -499,7 +493,8 @@ impl BabelCore {
     /// composing prompts incrementally or staging input.
     #[instrument(level = "debug", skip(self, text))]
     pub async fn type_text(&self, pane_id: u64, text: &str) -> Result<()> {
-        self.type_text_target(PaneSelector::from(pane_id), text).await
+        self.type_text_target(PaneSelector::from(pane_id), text)
+            .await
     }
 
     /// Type text without submitting, addressed canonically.
@@ -546,11 +541,9 @@ impl BabelCore {
 
     /// Address-aware variant of `has_pending_input`.
     #[instrument(level = "debug", skip(self))]
-    pub async fn has_pending_input_addr(
-        &self,
-        addr: &PaneAddr,
-    ) -> Result<(bool, Option<String>)> {
-        self.has_pending_input_target(PaneSelector::from(addr)).await
+    pub async fn has_pending_input_addr(&self, addr: &PaneAddr) -> Result<(bool, Option<String>)> {
+        self.has_pending_input_target(PaneSelector::from(addr))
+            .await
     }
 
     async fn has_pending_input_target(
@@ -588,7 +581,8 @@ impl BabelCore {
     /// Set icon/tag for a pane (legacy bare-id edge).
     #[instrument(level = "debug", skip(self))]
     pub async fn set_icon(&self, pane_id: u64, icon: &str) -> Result<()> {
-        self.set_icon_target(PaneSelector::from(pane_id), icon).await
+        self.set_icon_target(PaneSelector::from(pane_id), icon)
+            .await
     }
 
     /// Set icon/tag for a pane addressed canonically.

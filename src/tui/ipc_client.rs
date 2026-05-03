@@ -10,7 +10,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Local};
 use tokio::sync::Mutex;
 
-use crate::utility::ipc::{self, Request, Response};
+use crate::ipc::{Request, Response};
+use crate::utility::ipc;
 
 /// Maximum entries in the IPC log ring buffer
 const MAX_LOG_ENTRIES: usize = 1000;
