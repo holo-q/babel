@@ -13,7 +13,7 @@ use super::Target;
 use crate::cli::legend::Legend;
 use babel::babel_storage::{get_generated_title, get_metadata, init_db};
 use babel::core::BabelCore;
-use babel::daemon::TerminalInfo;
+use babel::service::state::TerminalInfo;
 use babel::kitty::discover_all_instances;
 use babel::utility::agent_discovery::{detect_agent_signals, resolve_pane_title, AgentPane};
 use babel::utility::claude_storage::{get_session_display_name, get_session_path, SessionInfo};

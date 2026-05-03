@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use babel::daemon::{BabelState, PaneIdResolution};
+use babel::daemon::{BabelState, PaneIdResolution, SocketStatus, TerminalInfo};
 use babel::fingerprint::{MatchConfidence, SessionFingerprint};
 use babel::model::PaneAddr;
 use babel::service::matching::{
@@ -16,6 +16,7 @@ use babel::service::matching::{
 };
 use babel::utility::agent_discovery::AgentPane;
 use babel::AgentKind;
+use serde_json::json;
 
 #[derive(Debug, PartialEq, Eq)]
 struct MatchingSnapshot {
@@ -286,6 +287,74 @@ fn legacy_id_shims_resolve_when_unique() {
         .expect("unique legacy id resolves to address");
     assert_eq!(addr.id, 7);
     assert_eq!(addr.socket, "unix:/run/user/1000/kitty.sock-alpha");
+}
+
+#[test]
+fn terminal_info_and_socket_status_keep_compat_imports_and_wire_shape() {
+    // Wave 5 moves the state DTOs into `babel::service::state` while keeping
+    // `babel::daemon::{TerminalInfo, SocketStatus}` re-exports for downstream
+    // CLIs and panel widgets that already import them. This test pins both
+    // ends of that contract: the `daemon::*` path stays usable, and the
+    // serde shape — including the legacy `is_claude` alias on `is_agent` —
+    // survives the move so existing JSON snapshots keep decoding.
+    let info = TerminalInfo {
+        addr: PaneAddr::new("unix:/run/user/1000/kitty.sock-alpha", 7),
+        title: "fish".to_string(),
+        cwd: PathBuf::from("/work/alpha"),
+        foreground_command: Some("fish".to_string()),
+        workspace: Some(2),
+        is_agent: true,
+        is_focused: false,
+        platform_window_id: 4242,
+    };
+    assert_eq!(info.id(), 7);
+
+    let info_json = serde_json::to_value(&info).unwrap();
+    assert_eq!(
+        info_json,
+        json!({
+            "addr": { "socket": "unix:/run/user/1000/kitty.sock-alpha", "id": 7 },
+            "title": "fish",
+            "cwd": "/work/alpha",
+            "foreground_command": "fish",
+            "workspace": 2,
+            "is_agent": true,
+            "is_focused": false,
+            "platform_window_id": 4242,
+        })
+    );
+
+    // Legacy snapshots written before the agent rename still decode via the
+    // serde alias. Drop this and panels with cached state files break on
+    // upgrade.
+    let legacy: TerminalInfo = serde_json::from_value(json!({
+        "addr": { "socket": "unix:/run/user/1000/kitty.sock-alpha", "id": 7 },
+        "title": "claude",
+        "cwd": "/work/alpha",
+        "workspace": null,
+        "is_claude": true,
+        "is_focused": false,
+        "platform_window_id": 4242,
+    }))
+    .unwrap();
+    assert!(legacy.is_agent);
+    assert_eq!(legacy.foreground_command, None);
+
+    let status = SocketStatus {
+        is_current: true,
+        is_responsive: true,
+        pane_count: 3,
+        last_error: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&status).unwrap(),
+        json!({
+            "is_current": true,
+            "is_responsive": true,
+            "pane_count": 3,
+            "last_error": null,
+        })
+    );
 }
 
 #[test]

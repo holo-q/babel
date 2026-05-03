@@ -16,7 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::daemon::TerminalInfo;
+use crate::service::state::TerminalInfo;
 use crate::fire::FiredTask;
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::ipc::{self, Request, Response};

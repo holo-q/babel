@@ -40,7 +40,7 @@ use tracing::{debug, info, instrument, warn};
 use vtr::trace_error;
 
 use crate::babel_storage;
-use crate::daemon::{BabelState, TerminalInfo};
+use crate::service::state::{BabelState, TerminalInfo};
 use crate::kitty::{self, PaneAddr, PaneSelector};
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::{MigrateResult, SessionInfo};
@@ -247,7 +247,7 @@ impl BabelCore {
     #[instrument(level = "debug", skip(self))]
     pub async fn sockets(
         &self,
-    ) -> Result<std::collections::HashMap<String, crate::daemon::SocketStatus>> {
+    ) -> Result<std::collections::HashMap<String, crate::service::state::SocketStatus>> {
         match &self.mode {
             CoreMode::Connected => match send_request(&Request::ListSockets).await {
                 Ok(Response::Sockets { sockets }) => Ok(sockets),

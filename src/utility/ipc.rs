@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::instrument;
 
-use crate::daemon::{SocketStatus, TerminalInfo};
+use crate::service::state::{SocketStatus, TerminalInfo};
 use crate::events::EventMessage;
 use crate::kitty::{KittyPane, PaneAddr, PaneSelector};
 use crate::paint::PaintEvent;

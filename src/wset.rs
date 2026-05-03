@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use vtr::{effect, trace_error};
 
-use crate::daemon::BabelState;
+use crate::service::state::BabelState;
 use crate::utility::agent_discovery::AgentPane;
 
 // ═══════════════════════════════════════════════════════════════════════════════
