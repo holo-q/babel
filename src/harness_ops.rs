@@ -804,10 +804,227 @@ pub fn plan_migration_with_context(
     )
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MigrationPlanScope {
     Doctor,
     Apply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlannerAvailability {
+    ApplyAndDoctor,
+    DoctorOnly,
+}
+
+type MigrationPlannerFn =
+    for<'a> fn(&mut MigrationPlannerInput<'a>) -> Result<HarnessMigrationReport>;
+
+struct MigrationPlanner {
+    kind: AgentKind,
+    availability: PlannerAvailability,
+    plan: MigrationPlannerFn,
+}
+
+impl MigrationPlanner {
+    const fn apply_and_doctor(kind: AgentKind, plan: MigrationPlannerFn) -> Self {
+        Self {
+            kind,
+            availability: PlannerAvailability::ApplyAndDoctor,
+            plan,
+        }
+    }
+
+    const fn doctor_only(kind: AgentKind, plan: MigrationPlannerFn) -> Self {
+        Self {
+            kind,
+            availability: PlannerAvailability::DoctorOnly,
+            plan,
+        }
+    }
+
+    fn runs_in(&self, scope: MigrationPlanScope) -> bool {
+        matches!(
+            (scope, self.availability),
+            (MigrationPlanScope::Doctor, _)
+                | (
+                    MigrationPlanScope::Apply,
+                    PlannerAvailability::ApplyAndDoctor
+                )
+        )
+    }
+}
+
+struct MigrationPlannerInput<'a> {
+    context: &'a HarnessOpsContext,
+    old_abs: &'a Path,
+    new_abs: &'a Path,
+    path_needles: &'a [String],
+    risks: &'a mut Vec<MigrationRisk>,
+}
+
+const MIGRATION_PLANNERS: &[MigrationPlanner] = &[
+    MigrationPlanner::apply_and_doctor(AgentKind::Claude, plan_claude_entry),
+    MigrationPlanner::apply_and_doctor(AgentKind::Codex, plan_codex_entry),
+    MigrationPlanner::apply_and_doctor(AgentKind::Aider, plan_aider_entry),
+    MigrationPlanner::doctor_only(AgentKind::FactoryDroid, plan_factory_entry),
+    MigrationPlanner::doctor_only(AgentKind::QwenCode, plan_qwen_entry),
+    MigrationPlanner::doctor_only(AgentKind::Kimi, plan_kimi_entry),
+    MigrationPlanner::doctor_only(AgentKind::Gemini, plan_gemini_entry),
+    MigrationPlanner::doctor_only(AgentKind::Crush, plan_crush_entry),
+    MigrationPlanner::doctor_only(AgentKind::Cursor, plan_cursor_entry),
+    MigrationPlanner::doctor_only(AgentKind::Cline, plan_cline_entry),
+    MigrationPlanner::doctor_only(AgentKind::OpenCode, plan_opencode_entry),
+    MigrationPlanner::doctor_only(AgentKind::Amp, plan_amp_entry),
+    MigrationPlanner::doctor_only(AgentKind::Kiro, plan_kiro_entry),
+    MigrationPlanner::doctor_only(AgentKind::GithubCopilot, plan_github_copilot_entry),
+    MigrationPlanner::doctor_only(AgentKind::RooCode, plan_roo_entry),
+    MigrationPlanner::doctor_only(AgentKind::KiloCode, plan_kilo_entry),
+    MigrationPlanner::doctor_only(AgentKind::Antigravity, plan_antigravity_entry),
+];
+
+fn migration_planners_for_scope(
+    scope: MigrationPlanScope,
+) -> impl Iterator<Item = &'static MigrationPlanner> {
+    MIGRATION_PLANNERS
+        .iter()
+        .filter(move |planner| planner.runs_in(scope))
+}
+
+fn plan_claude_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    claude::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+        input.risks,
+    )
+}
+
+fn plan_codex_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    codex::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+        codex::CodexDiscoveryMode::Indexed,
+    )
+}
+
+fn plan_aider_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    Ok(aider::plan_for_source(input.old_abs))
+}
+
+fn plan_factory_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    factory::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_qwen_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    qwen::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_kimi_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    kimi::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_gemini_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    gemini::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_crush_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    crush::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_cursor_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    Ok(cursor::plan(input.context))
+}
+
+fn plan_cline_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    cline::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_opencode_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    Ok(opencode::plan(input.context))
+}
+
+fn plan_amp_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    amp::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_kiro_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    kiro::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_github_copilot_entry(
+    input: &mut MigrationPlannerInput<'_>,
+) -> Result<HarnessMigrationReport> {
+    github_copilot::plan(input.context, input.path_needles, input.risks)
+}
+
+fn plan_roo_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    roo::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_kilo_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    kilo::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
+}
+
+fn plan_antigravity_entry(input: &mut MigrationPlannerInput<'_>) -> Result<HarnessMigrationReport> {
+    antigravity::plan(
+        input.context,
+        input.old_abs,
+        input.new_abs,
+        input.path_needles,
+    )
 }
 
 fn plan_migration_with_context_and_scope(
@@ -858,47 +1075,23 @@ fn plan_migration_with_context_and_scope(
     }
 
     let mut harnesses = Vec::new();
-    tracing::debug!("mv.plan: planning Claude storage");
-    harnesses.push(claude::plan(
-        context,
-        &old_abs,
-        &new_abs,
-        &path_needles,
-        &mut risks,
-    )?);
-    tracing::debug!("mv.plan: planning Codex storage");
-    harnesses.push(codex::plan(
-        context,
-        &old_abs,
-        &new_abs,
-        &path_needles,
-        codex::CodexDiscoveryMode::Indexed,
-    )?);
-    tracing::debug!("mv.plan: planning Aider storage");
-    harnesses.push(aider::plan_for_source(&old_abs));
+    for planner in migration_planners_for_scope(scope) {
+        tracing::debug!(
+            harness = %planner.kind,
+            availability = ?planner.availability,
+            "mv.plan: planning harness storage"
+        );
+        let mut input = MigrationPlannerInput {
+            context,
+            old_abs: &old_abs,
+            new_abs: &new_abs,
+            path_needles: &path_needles,
+            risks: &mut risks,
+        };
+        harnesses.push((planner.plan)(&mut input)?);
+    }
 
     if matches!(scope, MigrationPlanScope::Doctor) {
-        tracing::debug!("mv.plan: planning full doctor-only harness roster");
-        harnesses.push(factory::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(qwen::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(kimi::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(gemini::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(crush::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(cursor::plan(context));
-        harnesses.push(cline::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(opencode::plan(context));
-        harnesses.push(amp::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(kiro::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(github_copilot::plan(context, &path_needles, &mut risks)?);
-        harnesses.push(roo::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(kilo::plan(context, &old_abs, &new_abs, &path_needles)?);
-        harnesses.push(antigravity::plan(
-            context,
-            &old_abs,
-            &new_abs,
-            &path_needles,
-        )?);
-
         for kind in AgentKind::ALL {
             if harnesses.iter().any(|report| report.harness == *kind) {
                 continue;
@@ -1394,9 +1587,9 @@ fn path_needles(original: &Path, absolute: &Path) -> Vec<String> {
 }
 
 pub fn supported_operation_harnesses() -> Vec<AgentKind> {
-    AgentKind::ALL
+    MIGRATION_PLANNERS
         .iter()
-        .copied()
+        .map(|planner| planner.kind)
         .filter(|kind| !matches!(kind.spec().support, HarnessSupport::Unsupported))
         .collect()
 }
@@ -1410,6 +1603,39 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut file = fs::File::create(path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn migration_planner_registry_covers_each_real_harness_once() {
+        let planned = migration_planners_for_scope(MigrationPlanScope::Doctor)
+            .map(|planner| planner.kind)
+            .collect::<Vec<_>>();
+        let registered: BTreeSet<_> = planned.iter().map(|kind| kind.slug()).collect();
+        let canonical: BTreeSet<_> = AgentKind::ALL.iter().map(|kind| kind.slug()).collect();
+
+        assert_eq!(planned.len(), AgentKind::ALL.len());
+        assert_eq!(registered.len(), AgentKind::ALL.len());
+        assert_eq!(
+            registered, canonical,
+            "doctor planning roster should cover every AgentKind exactly once"
+        );
+        assert_eq!(
+            &planned[..3],
+            &[AgentKind::Claude, AgentKind::Codex, AgentKind::Aider],
+            "apply-ready planners run first so apply scope is a strict prefix of doctor scope"
+        );
+    }
+
+    #[test]
+    fn apply_scope_registry_only_runs_mutation_ready_planners() {
+        let planned = migration_planners_for_scope(MigrationPlanScope::Apply)
+            .map(|planner| planner.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            planned,
+            vec![AgentKind::Claude, AgentKind::Codex, AgentKind::Aider]
+        );
     }
 
     #[test]
@@ -2381,5 +2607,135 @@ mod tests {
             fs::read_to_string(&text).unwrap(),
             format!("cwd={}\n", old.display())
         );
+    }
+
+    fn repo_tempdir() -> tempfile::TempDir {
+        fs::create_dir_all("tmp").ok();
+        tempfile::Builder::new()
+            .prefix("harness_ops_migration_")
+            .tempdir_in("tmp")
+            .expect("create tempdir under repo-local tmp/")
+    }
+
+    #[test]
+    fn doctor_scope_includes_every_agent_kind_exactly_once_end_to_end() {
+        let tmp = repo_tempdir();
+        let home = tmp.path();
+        let old = home.join("Workspace/old");
+        let new = home.join("Workspace/new");
+        fs::create_dir_all(&old).unwrap();
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+
+        let report = plan_migration_with_context_and_scope(
+            &ctx,
+            &old,
+            &new,
+            Vec::new(),
+            MigrationPlanScope::Doctor,
+        )
+        .unwrap();
+
+        let kinds: Vec<AgentKind> = report
+            .harnesses
+            .iter()
+            .map(|harness| harness.harness)
+            .collect();
+        let unique: BTreeSet<&str> = kinds.iter().map(|kind| kind.slug()).collect();
+
+        assert_eq!(
+            kinds.len(),
+            AgentKind::ALL.len(),
+            "doctor report must list every harness exactly once"
+        );
+        assert_eq!(
+            unique.len(),
+            AgentKind::ALL.len(),
+            "doctor report contains duplicate AgentKind entries"
+        );
+        for kind in AgentKind::ALL {
+            assert!(
+                kinds.contains(kind),
+                "doctor report missing coverage for {}",
+                kind.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn apply_scope_includes_only_apply_planned_adapters_end_to_end() {
+        let tmp = repo_tempdir();
+        let home = tmp.path();
+        let old = home.join("Workspace/old");
+        let new = home.join("Workspace/new");
+        fs::create_dir_all(&old).unwrap();
+        let ctx = HarnessOpsContext::from_home(home.to_path_buf());
+
+        let report = plan_migration_with_context_and_scope(
+            &ctx,
+            &old,
+            &new,
+            Vec::new(),
+            MigrationPlanScope::Apply,
+        )
+        .unwrap();
+
+        let kinds: Vec<AgentKind> = report
+            .harnesses
+            .iter()
+            .map(|harness| harness.harness)
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![AgentKind::Claude, AgentKind::Codex, AgentKind::Aider],
+            "apply scope must mutate only the Claude/Codex/Aider adapter set; \
+             pin or update this assertion if the apply-capable roster intentionally changes"
+        );
+        assert_eq!(
+            report.harnesses.len(),
+            3,
+            "apply scope should not pad the report with doctor-fill entries"
+        );
+    }
+
+    #[test]
+    fn supported_operation_harnesses_pins_supported_subset() {
+        let supported = supported_operation_harnesses();
+
+        let expected: Vec<AgentKind> = MIGRATION_PLANNERS
+            .iter()
+            .map(|planner| planner.kind)
+            .filter(|kind| !matches!(kind.spec().support, HarnessSupport::Unsupported))
+            .collect();
+        assert_eq!(
+            supported, expected,
+            "supported_operation_harnesses() must mirror MIGRATION_PLANNERS minus Unsupported in registry order"
+        );
+
+        assert!(
+            supported
+                .iter()
+                .all(|kind| !matches!(kind.spec().support, HarnessSupport::Unsupported)),
+            "supported_operation_harnesses() must drop AgentKinds whose spec marks them Unsupported"
+        );
+
+        let supported_set: BTreeSet<&str> = supported.iter().map(|kind| kind.slug()).collect();
+        assert_eq!(
+            supported_set.len(),
+            supported.len(),
+            "no duplicate kinds in supported roster"
+        );
+
+        for unsupported_in_registry in MIGRATION_PLANNERS
+            .iter()
+            .filter(|planner| matches!(planner.kind.spec().support, HarnessSupport::Unsupported))
+            .map(|planner| planner.kind)
+        {
+            assert!(
+                !supported.contains(&unsupported_in_registry),
+                "supported_operation_harnesses() must not surface {} (Unsupported)",
+                unsupported_in_registry.slug()
+            );
+        }
     }
 }
