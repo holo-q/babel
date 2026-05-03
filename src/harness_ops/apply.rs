@@ -8,12 +8,12 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 use filetime::{set_file_times, FileTime};
 use indicatif::{ProgressBar, ProgressStyle};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ApplyCapability, MigrationDoctorReport, MigrationEdit, MigrationEditKind, RecoveryClass,
-    VerificationSpec,
+    open_sqlite_read_only, open_sqlite_read_write, ApplyCapability, MigrationDoctorReport,
+    MigrationEdit, MigrationEditKind, RecoveryClass, VerificationSpec,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,11 +1013,8 @@ fn apply_sqlite_text_column_rewrite(
         "UPDATE {table} SET {column} = replace({column}, ?1, ?2) WHERE instr({column}, ?1) > 0"
     );
 
-    let mut conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
+    let mut conn = open_sqlite_read_write(path)
+        .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
     let changed = {
         let tx_sql = conn.transaction()?;
         let changed = tx_sql.execute(&sql, params![from, to])?;
@@ -1198,10 +1195,7 @@ fn count_sqlite_text_column_refs(
     let table = quote_sql_ident(table)?;
     let column = quote_sql_ident(column)?;
     let sql = format!("SELECT COUNT(*) FROM {table} WHERE instr({column}, ?1) > 0");
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = open_sqlite_read_only(path)?;
     Ok(conn.query_row(&sql, params![needle], |row| row.get(0))?)
 }
 

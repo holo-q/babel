@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::agent_kind::AgentKind;
 
-use super::{AdapterReadiness, HarnessMigrationReport, HarnessOpsContext, MigrationEdit};
+use super::{
+    open_sqlite_read_only, AdapterReadiness, HarnessMigrationReport, HarnessOpsContext,
+    MigrationEdit,
+};
 
 #[derive(Default)]
 struct CursorDiscovery {
@@ -280,11 +283,7 @@ fn discover(context: &HarnessOpsContext) -> CursorDiscovery {
 }
 
 fn inspect_cursor_db(path: &Path) -> Result<CursorDbDiscovery, ()> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| ())?;
+    let conn = open_sqlite_read_only(path).map_err(|_| ())?;
     let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
 
     let mut db = CursorDbDiscovery {

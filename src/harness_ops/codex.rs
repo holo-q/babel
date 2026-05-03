@@ -4,13 +4,12 @@ use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
-use rusqlite::{Connection, OpenFlags};
 
 use crate::agent_kind::AgentKind;
 
 use super::{
-    is_probably_text_state_file, text_file_contains_any, AdapterReadiness, HarnessMigrationReport,
-    HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    is_probably_text_state_file, open_sqlite_read_only, text_file_contains_any, AdapterReadiness,
+    HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
 };
 
 #[derive(Default)]
@@ -451,10 +450,7 @@ fn collect_threads_cwd_refs(
     old_path: &Path,
     child_prefix: &str,
 ) -> Result<CodexStateDbDiscovery> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = open_sqlite_read_only(path)?;
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads')",
         [],

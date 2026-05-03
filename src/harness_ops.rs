@@ -1091,23 +1091,6 @@ fn plan_migration_with_context_and_scope(
         harnesses.push((planner.plan)(&mut input)?);
     }
 
-    if matches!(scope, MigrationPlanScope::Doctor) {
-        for kind in AgentKind::ALL {
-            if harnesses.iter().any(|report| report.harness == *kind) {
-                continue;
-            }
-            harnesses.push(HarnessMigrationReport::from_edits(
-                *kind,
-                AdapterReadiness::Unsupported,
-                Vec::new(),
-                0,
-                0,
-                Vec::new(),
-                vec!["no path-move adapter available".to_string()],
-            ));
-        }
-    }
-
     risks.push(MigrationRisk {
         severity: RiskSeverity::Info,
         harness: None,
@@ -1463,6 +1446,35 @@ struct TextScan {
     path_references_found: usize,
     truncated: bool,
     large_files_sampled: usize,
+}
+
+/// Open a SQLite database read-only with the harness adapters' standard flag set.
+///
+/// Babel Wave 8 deduplicated four near-identical opens spread across the
+/// `cursor`, `crush`, `opencode`, `codex`, and `apply` adapters. The flag set
+/// (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`) is preserved verbatim — the
+/// no-mutex bit matters because adapters never share a `Connection` across
+/// threads, and the read-only bit is the contract for *inspection* helpers
+/// that must not mutate provider-native state.
+pub(super) fn open_sqlite_read_only(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Open a SQLite database read-write with the harness adapters' standard flag set.
+///
+/// Mirror of [`open_sqlite_read_only`] for the apply path: `apply.rs` performs
+/// in-place rewrites of provider DBs inside an outer transaction. The flags
+/// (`SQLITE_OPEN_READ_WRITE | SQLITE_OPEN_NO_MUTEX`) match the pre-Wave-8
+/// behavior exactly — *no* `SQLITE_OPEN_CREATE`, so a missing DB is still an
+/// error rather than a silently-created empty file.
+pub(super) fn open_sqlite_read_write(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
 }
 
 fn scan_text_refs(root: &Path, needles: &[String]) -> Result<TextScan> {

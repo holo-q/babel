@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 
 use crate::agent_kind::AgentKind;
 
-use super::{AdapterReadiness, HarnessMigrationReport, HarnessOpsContext, MigrationEdit};
+use super::{
+    open_sqlite_read_only, AdapterReadiness, HarnessMigrationReport, HarnessOpsContext,
+    MigrationEdit,
+};
 
 const CRUSH_DB_FILE: &str = "crush.db";
 const CRUSH_DATA_DIR: &str = ".crush";
@@ -192,11 +195,8 @@ struct CrushDbSummary {
 }
 
 fn inspect_crush_db(path: &Path, needles: &[String]) -> Result<CrushDbSummary> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("open Crush DB read-only: {}", path.display()))?;
+    let conn = open_sqlite_read_only(path)
+        .with_context(|| format!("open Crush DB read-only: {}", path.display()))?;
 
     let tables = table_names(&conn)?;
     if !tables.contains("sessions") || !tables.contains("messages") {

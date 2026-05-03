@@ -2,11 +2,14 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
+
 use crate::agent_kind::AgentKind;
 
-use rusqlite::{Connection, OpenFlags};
-
-use super::{AdapterReadiness, HarnessMigrationReport, HarnessOpsContext, MigrationEdit};
+use super::{
+    open_sqlite_read_only, AdapterReadiness, HarnessMigrationReport, HarnessOpsContext,
+    MigrationEdit,
+};
 
 #[derive(Default)]
 struct OpenCodeDiscovery {
@@ -132,10 +135,7 @@ fn inspect_db_path(path: PathBuf, discovery: &mut OpenCodeDiscovery) {
 }
 
 fn sqlite_facts(path: &Path) -> rusqlite::Result<DbFacts> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = open_sqlite_read_only(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
 
     if table_exists(&conn, "session")? {
