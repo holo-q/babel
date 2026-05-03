@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
@@ -8,8 +9,9 @@ use anyhow::Result;
 use crate::agent_kind::AgentKind;
 
 use super::{
-    is_probably_text_state_file, open_sqlite_read_only, text_file_contains_any, AdapterReadiness,
-    HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    for_each_jsonl_value, is_probably_text_state_file, open_sqlite_read_only,
+    text_file_contains_any, AdapterReadiness, HarnessMigrationReport, HarnessOpsContext,
+    MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
 };
 
 #[derive(Default)]
@@ -642,24 +644,18 @@ fn read_session_cwd_matches(
     old_path: &Path,
     child_prefix: &str,
 ) -> Result<Vec<CodexSession>> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
     let mut matches = Vec::new();
-    for line in reader.lines().take(150) {
-        let line = line?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
+    for_each_jsonl_value::<()>(path, Some(150), |value| {
         let Some(kind) = value.get("type").and_then(|value| value.as_str()) else {
-            continue;
+            return ControlFlow::Continue(());
         };
         let Some((selector, action)) = codex_cwd_selector(kind) else {
-            continue;
+            return ControlFlow::Continue(());
         };
         let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
         let cwd = payload.get("cwd").and_then(|value| value.as_str());
         if !cwd_matches(cwd, old_path, child_prefix) {
-            continue;
+            return ControlFlow::Continue(());
         }
         let id = payload
             .get("id")
@@ -673,7 +669,8 @@ fn read_session_cwd_matches(
             action,
             stored_cwd: cwd.unwrap_or_default().to_string(),
         });
-    }
+        ControlFlow::Continue(())
+    })?;
 
     Ok(matches)
 }

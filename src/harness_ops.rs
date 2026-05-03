@@ -8,7 +8,8 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
@@ -1417,26 +1418,17 @@ fn count_jsonl_files(dir: &Path) -> Result<usize> {
 }
 
 fn count_history_refs(history_path: &Path, old_path: &Path) -> Result<usize> {
-    if !history_path.exists() {
-        return Ok(0);
-    }
-
-    let content = fs::read_to_string(history_path)?;
     let old_path = old_path.to_string_lossy();
     let child_prefix = format!("{}/", old_path);
     let mut count = 0;
-
-    for line in content.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(project) = value.get("project").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if project == old_path || project.starts_with(&child_prefix) {
-            count += 1;
+    for_each_jsonl_value::<()>(history_path, None, |value| {
+        if let Some(project) = value.get("project").and_then(|v| v.as_str()) {
+            if project == old_path.as_ref() || project.starts_with(&child_prefix) {
+                count += 1;
+            }
         }
-    }
+        ControlFlow::Continue(())
+    })?;
     Ok(count)
 }
 
@@ -1446,6 +1438,63 @@ struct TextScan {
     path_references_found: usize,
     truncated: bool,
     large_files_sampled: usize,
+}
+
+/// Visit successfully-parsed JSON values in a JSONL file, with optional line cap and
+/// honest early-exit semantics.
+///
+/// Wave 9 collapses the `read_session_*` JSONL scanners that all repeated the
+/// same incantation: open, wrap in `BufReader`, optionally take the first N
+/// lines, trim, `serde_json::from_str`, ignore malformed. Behavior is
+/// preserved verbatim:
+/// - missing path returns `Ok(None)` so callers can drop their own existence
+///   check and a non-existent file never surfaces a spurious IO error;
+/// - IO errors on lines that *are* read still propagate via `line?`;
+/// - empty / whitespace-only lines are skipped before parsing;
+/// - parse failures are silently ignored — JSONL files in the wild interleave
+///   junk lines, especially around crashes, and the scanners want signal not
+///   strictness;
+/// - a `Some(n)` cap is enforced via `Iterator::take(n)`; `None` is unbounded.
+///
+/// `ControlFlow::Break(R)` short-circuits *honestly*: once the visitor breaks,
+/// later lines are never read, so a downstream IO error past the decisive line
+/// can never surface. Factory's identity scanner exploits this — the first
+/// `session_start` is decisive and lines after it should not influence the
+/// outcome at all. Callers that need a prefix transform (e.g., antigravity's
+/// legacy chat scanner stripping a binary header) intentionally don't route
+/// here; one-off prefix logic does not justify a generic transform parameter.
+pub(super) fn for_each_jsonl_value<R>(
+    path: &Path,
+    max_lines: Option<usize>,
+    mut visit: impl FnMut(&serde_json::Value) -> ControlFlow<R>,
+) -> Result<Option<R>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut remaining = max_lines;
+    while remaining.map_or(true, |n| n > 0) {
+        let Some(line) = lines.next() else {
+            break;
+        };
+        let line = line?;
+        if let Some(n) = remaining.as_mut() {
+            *n -= 1;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if let ControlFlow::Break(out) = visit(&value) {
+            return Ok(Some(out));
+        }
+    }
+    Ok(None)
 }
 
 /// Open a SQLite database read-only with the harness adapters' standard flag set.
@@ -2749,5 +2798,88 @@ mod tests {
                 unsupported_in_registry.slug()
             );
         }
+    }
+
+    #[test]
+    fn for_each_jsonl_value_skips_blanks_and_garbage_and_respects_cap_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("scan.jsonl");
+        write_file(
+            &path,
+            "{\"i\":1}\n\
+             \n\
+             not json at all\n\
+             {\"i\":2}\n\
+             {\"i\":3}\n\
+             {\"i\":4}\n",
+        );
+
+        let mut seen = Vec::new();
+        let outcome = for_each_jsonl_value::<()>(&path, Some(4), |value| {
+            seen.push(value.get("i").and_then(|v| v.as_i64()).unwrap_or(-1));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert!(outcome.is_none());
+        // Cap of 4 covers the first four physical lines (one of which is blank
+        // and another is malformed); only the parsed values reach the visitor,
+        // and order is preserved.
+        assert_eq!(seen, vec![1, 2]);
+    }
+
+    #[test]
+    fn for_each_jsonl_value_break_short_circuits_before_later_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("break.jsonl");
+        write_file(
+            &path,
+            "{\"i\":1}\n\
+             {\"i\":2,\"stop\":true}\n\
+             {\"i\":3}\n\
+             {\"i\":4}\n",
+        );
+
+        let mut visits = 0usize;
+        let outcome = for_each_jsonl_value::<i64>(&path, None, |value| {
+            visits += 1;
+            if value.get("stop").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let i = value.get("i").and_then(|v| v.as_i64()).unwrap();
+                ControlFlow::Break(i)
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(outcome, Some(2));
+        // Visitor must not run on records after the decisive Break, and the
+        // helper must stop reading lines past that point.
+        assert_eq!(visits, 2);
+    }
+
+    #[test]
+    fn count_history_refs_matches_exact_and_child_prefix_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let history = tmp.path().join("history.jsonl");
+        let old = Path::new("/home/u/Workspace/old");
+
+        write_file(
+            &history,
+            "{\"project\":\"/home/u/Workspace/old\"}\n\
+             {\"project\":\"/home/u/Workspace/old/sub\"}\n\
+             {\"project\":\"/home/u/Workspace/old-sibling\"}\n\
+             {\"project\":\"/home/u/Workspace/older\"}\n\
+             {\"no_project\":\"x\"}\n\
+             not even json\n\
+             \n\
+             {\"project\":42}\n",
+        );
+
+        let count = count_history_refs(&history, old).unwrap();
+        // Counts the exact match plus the child-prefix match. Sibling and
+        // longer-name paths must not match. Malformed / missing / wrong-typed
+        // project rows are silently ignored.
+        assert_eq!(count, 2);
     }
 }

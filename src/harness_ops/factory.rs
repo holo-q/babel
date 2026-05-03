@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -8,8 +8,9 @@ use anyhow::Result;
 use crate::agent_kind::AgentKind;
 
 use super::{
-    is_probably_text_state_file, scan_text_refs, text_file_contains_any, AdapterReadiness,
-    HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    for_each_jsonl_value, is_probably_text_state_file, scan_text_refs, text_file_contains_any,
+    AdapterReadiness, HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES,
+    MAX_SCAN_FILES,
 };
 
 const FACTORY_PROJECTS: &str = ".factory/projects";
@@ -274,34 +275,27 @@ fn read_session_identity(
     old_path: &Path,
     child_prefix: &str,
 ) -> Result<Option<FactorySession>> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-
-    for line in reader.lines().take(150) {
-        let line = line?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
+    let outcome = for_each_jsonl_value::<Option<FactorySession>>(path, Some(150), |value| {
         if value.get("type").and_then(|value| value.as_str()) != Some("session_start") {
-            continue;
+            return ControlFlow::Continue(());
         }
         let cwd = value.get("cwd").and_then(|value| value.as_str());
         if !cwd_matches(cwd, old_path, child_prefix) {
-            return Ok(None);
+            return ControlFlow::Break(None);
         }
         let id = value
             .get("id")
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| session_id_from_path(path));
-        return Ok(Some(FactorySession {
+        ControlFlow::Break(Some(FactorySession {
             id,
             path: path.to_path_buf(),
             root_kind,
-        }));
-    }
+        }))
+    })?;
 
-    Ok(None)
+    Ok(outcome.flatten())
 }
 
 fn text_file_ref_count(path: &Path, needles: &[String]) -> Result<usize> {

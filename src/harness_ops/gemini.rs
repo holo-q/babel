@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -8,8 +8,8 @@ use anyhow::Result;
 use crate::agent_kind::AgentKind;
 
 use super::{
-    is_probably_text_state_file, text_file_contains_any, AdapterReadiness, HarnessMigrationReport,
-    HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
+    for_each_jsonl_value, is_probably_text_state_file, text_file_contains_any, AdapterReadiness,
+    HarnessMigrationReport, HarnessOpsContext, MigrationEdit, MAX_SCAN_BYTES, MAX_SCAN_FILES,
 };
 
 #[derive(Default)]
@@ -399,27 +399,18 @@ fn read_jsonl_session_identity(
     project_id: &str,
     needles: &[String],
 ) -> Result<Option<GeminiSession>> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
     let mut state = serde_json::Map::new();
     let mut saw_message = false;
 
-    for line in reader.lines().take(200) {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
+    for_each_jsonl_value::<()>(path, Some(200), |value| {
         if let Some(set) = value.get("$set").and_then(|value| value.as_object()) {
             for (key, value) in set {
                 state.insert(key.clone(), value.clone());
             }
-            continue;
+            return ControlFlow::Continue(());
         }
         if value.get("$rewindTo").is_some() {
-            continue;
+            return ControlFlow::Continue(());
         }
         if value.get("type").is_some() || value.get("role").is_some() || value.get("id").is_some() {
             saw_message = true;
@@ -431,7 +422,8 @@ fn read_jsonl_session_identity(
                 }
             }
         }
-    }
+        ControlFlow::Continue(())
+    })?;
 
     let mut value = serde_json::Value::Object(state);
     if saw_message {
