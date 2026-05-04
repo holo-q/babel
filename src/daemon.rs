@@ -76,7 +76,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon};
+use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon, set_last_workspace};
 use crate::events::{BabelEvent, EventFilter, EventMessage};
 use crate::fingerprint::{
     extract_from_jsonl, extract_from_scrollback, match_fingerprints, MatchConfidence,
@@ -827,6 +827,15 @@ impl BabelState {
             if let Some(ws) = workspace_move.new_workspace {
                 changed_workspaces.insert(ws);
                 paint_workspaces.insert(ws);
+
+                // Persist workspace in overlay DB for resume placement
+                if let Some(pane) = new_windows.get(&workspace_move.addr) {
+                    if let Some(ref sid) = pane.session_id {
+                        if let Ok(conn) = init_db() {
+                            let _ = set_last_workspace(&conn, sid, ws);
+                        }
+                    }
+                }
             }
             moved_addrs.push(workspace_move.addr.clone());
             trace!(
