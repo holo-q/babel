@@ -136,11 +136,12 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
                     }
                 }
                 eprintln!(
-                    " {} {} {}  {}",
+                    " {} {} {}  {}  {}",
                     style(format!("{:>2}", idx)).dim(),
                     style(session.agent_kind.slug()).bold(),
                     style(&cwd.display().to_string()).dim(),
-                    title
+                    title,
+                    style(&resume_full).dim(),
                 );
             }
             Ok(output) => {
