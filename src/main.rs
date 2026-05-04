@@ -130,8 +130,8 @@ async fn main() -> Result<()> {
 
         Commands::LsSockets => cli::query::cmd_ls_sockets(&core, cli.json).await,
 
-        Commands::LsSessions { count, kind } => {
-            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), cli.json).await
+        Commands::LsSessions { count, kind, all } => {
+            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), all, cli.json).await
         }
 
         Commands::GetWindow { pane_id } => {

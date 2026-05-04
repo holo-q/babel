@@ -1189,6 +1189,8 @@ struct NativeSession {
     last_prompt: Option<String>,
     turn_count: u32,
     last_seen_at: i64,
+    /// True if the session had real user interaction (not a system-only spawn).
+    interactive: bool,
 }
 
 /// List all known sessions across all harnesses.
@@ -1200,6 +1202,7 @@ pub async fn cmd_ls_sessions(
     _core: &BabelCore,
     count: usize,
     kind: Option<&str>,
+    show_all: bool,
     json: bool,
 ) -> Result<()> {
     let mut sessions = Vec::new();
@@ -1220,6 +1223,9 @@ pub async fn cmd_ls_sessions(
     }
 
     sessions.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+    if !show_all {
+        sessions.retain(|s| s.interactive);
+    }
     let total = sessions.len();
     sessions.truncate(count);
 
@@ -1289,8 +1295,11 @@ pub async fn cmd_ls_sessions(
 
     // Pass 3: print
     for row in &rows {
-        let harness_style = Style::new().color256(closest_ansi256_from_hex(row.accent));
-        let state_style = row.state_style();
+        // Non-interactive sessions (subagent spawns, system prompts) render fully dimmed
+        let accent_c = closest_ansi256_from_hex(row.accent);
+        let harness_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let text_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let state_style = if row.interactive { row.state_style() } else { Style::new().dim() };
 
         print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
@@ -1301,10 +1310,10 @@ pub async fn cmd_ls_sessions(
         print!("  {:>w_time$}", dim.apply_to(&row.time));
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
         let tpad = w_title - row.title.chars().count();
-        print!("  {}{}", harness_style.apply_to(&row.title), " ".repeat(tpad));
+        print!("  {}{}", text_style.apply_to(&row.title), " ".repeat(tpad));
         if w_prompt > 0 {
             let ppad = w_prompt - row.last_prompt.chars().count();
-            print!("  {}{}", harness_style.apply_to(&row.last_prompt), " ".repeat(ppad));
+            print!("  {}{}", text_style.apply_to(&row.last_prompt), " ".repeat(ppad));
         }
         if let Some(ref cmd) = row.resume_cmd {
             println!("  {}", dim.apply_to(cmd));
@@ -1409,6 +1418,7 @@ struct SessionRow {
     last_prompt: String,
     resume_cmd: Option<String>,
     accent: &'static str,
+    interactive: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1505,6 +1515,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         last_prompt,
         resume_cmd,
         accent,
+        interactive: s.interactive,
     }
 }
 
@@ -1600,6 +1611,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
             },
             turn_count: acc.turns,
             last_seen_at: acc.last_ts,
+            interactive: true,
         })
         .collect())
 }
@@ -1661,7 +1673,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, first_user_message, updated_at
+                "SELECT id, cwd, title, first_user_message, updated_at, has_user_event
                  FROM threads
                  WHERE archived = 0
                  ORDER BY updated_at DESC",
@@ -1674,12 +1686,13 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, bool>(5)?,
                 ))
             })?;
 
             let mut out = Vec::new();
             for row in rows.flatten() {
-                let (id, cwd, title, first_msg, updated_at) = row;
+                let (id, cwd, title, first_msg, updated_at, has_user_event) = row;
                 let prompts = prompt_data.remove(&id);
                 let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
 
@@ -1700,6 +1713,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     last_prompt,
                     turn_count,
                     last_seen_at: updated_at,
+                    interactive: has_user_event || turn_count > 0,
                 });
             }
             return Ok(out);
@@ -1717,6 +1731,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             last_prompt: if acc.turns > 1 { Some(acc.last_text) } else { None },
             turn_count: acc.turns,
             last_seen_at: 0,
+            interactive: true,
         })
         .collect())
 }
@@ -1778,6 +1793,7 @@ fn scan_gemini() -> Result<Vec<NativeSession>> {
                 last_prompt: None,
                 turn_count: 0,
                 last_seen_at: mtime,
+                interactive: true,
             });
         }
     }
@@ -1820,6 +1836,7 @@ fn scan_kimi() -> Result<Vec<NativeSession>> {
                 last_prompt: None,
                 turn_count: 0,
                 last_seen_at: mtime,
+                interactive: true,
             });
         }
     }

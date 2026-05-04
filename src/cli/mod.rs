@@ -281,6 +281,7 @@ pub enum Commands {
     ///   babel ls-sessions          # Last 50 sessions
     ///   babel ls-sessions 20       # Last 20 sessions
     ///   babel ls-sessions --kind claude  # Only Claude sessions
+    ///   babel ls-sessions --all         # Include non-interactive spawns
     #[command()]
     LsSessions {
         /// Maximum number of sessions to show (default: 50)
@@ -290,6 +291,10 @@ pub enum Commands {
         /// Filter to a specific harness (e.g. "claude", "codex", "gemini")
         #[arg(short, long)]
         kind: Option<String>,
+
+        /// Include non-interactive sessions (subagent spawns, system prompts)
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Get status of a kitty window
