@@ -28,6 +28,23 @@ Terminal support should follow the same adapter discipline as harness support. A
 | zellij | Candidate | Potentially viable after proving stable pane identity and control/context APIs. |
 | other terminals | Unsupported | Considered equally, but blocked until they expose the required orchestration context. |
 
+## Panel Plugins
+
+Babel exposes a typed **paint stream** — subscribers receive
+`PaintEvent::Window` / `PaintEvent::Workspace` payloads with all per-pane
+UX truth (color, ring intensity, scale, outline, x position) already
+resolved by the daemon. Consumers don't classify state or pick colors;
+they just relay bytes to a panel-side renderer.
+
+| Project | Surface | What it does |
+| --- | --- | --- |
+| [xfce4-panel-richmon-babel](https://github.com/holo-q/xfce4-panel-richmon-babel) | XFCE panel daemon | Forwards `PaintEvent::Window` to the [richmon](https://github.com/holo-q/xfce4-panel-richmon) panel widget — a dot per pane, colored by harness/state |
+| [xfce4-panel-richspace-babel](https://github.com/holo-q/xfce4-panel-richspace-babel) | XFCE panel daemon | Aggregates per-workspace ring intensity and animates transitions for the [richspace](https://github.com/holo-q/xfce4-panel-richspace) workspace switcher |
+
+The protocol is in `babel::paint::PaintEvent` — PRs welcome for
+tmux/Wayland/i3bar/waybar/polybar equivalents; the typed surface is
+stable and clients only need a Unix socket and JSON.
+
 ## Building
 
 ```bash
