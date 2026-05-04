@@ -87,9 +87,9 @@ pub struct SessionMetadata {
     /// Notes scrawled in margins: "refactoring auth", "blocked on API", "ready for review"
     pub notes: Option<String>,
 
-    /// The worker's current state—ground truth from Claude Code hooks
-    /// This is the neural interface's verdict, not a scrollback heuristic
-    pub hook_state: HookState,
+    /// The worker's current state—ground truth from Claude Code hooks.
+    /// None = no signal (stale/unknown). Some(Idle) = heard stop. Some(Working) = heard prompt.
+    pub hook_state: Option<HookState>,
 
     /// When the last hook fired (unix timestamp)
     /// The pulse of the neural link—when did we last hear from this worker?
@@ -365,9 +365,7 @@ impl BabelStorage {
             };
 
             let hook_state_str: Option<String> = row.get(5)?;
-            let hook_state = hook_state_str
-                .map(|s| HookState::from_str(&s))
-                .unwrap_or_default();
+            let hook_state = hook_state_str.map(|s| HookState::from_str(&s));
 
             Ok(Some(SessionMetadata {
                 session_id: row.get(0)?,
@@ -802,9 +800,7 @@ impl BabelStorage {
             };
 
             let hook_state_str: Option<String> = row.get(5)?;
-            let hook_state = hook_state_str
-                .map(|s| HookState::from_str(&s))
-                .unwrap_or_default();
+            let hook_state = hook_state_str.map(|s| HookState::from_str(&s));
 
             Ok(SessionMetadata {
                 session_id: row.get(0)?,
@@ -866,9 +862,7 @@ pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<Sessio
         };
 
         let hook_state_str: Option<String> = row.get(5)?;
-        let hook_state = hook_state_str
-            .map(|s| HookState::from_str(&s))
-            .unwrap_or_default();
+        let hook_state = hook_state_str.map(|s| HookState::from_str(&s));
 
         Ok(Some(SessionMetadata {
             session_id: row.get(0)?,
@@ -931,6 +925,45 @@ pub fn set_last_workspace(conn: &Connection, session_id: &str, workspace: i32) -
     )
     .context("Failed to set last workspace")?;
     Ok(())
+}
+
+/// Clear stale hook states on daemon startup.
+///
+/// Any session with hook_state != idle whose session_id is NOT in the live set
+/// gets its hook_state set to NULL. "idle" means we heard a stop signal —
+/// that's a fact. But "working" from a dead pane is a lie, and NULL means
+/// "no signal" which is the truth.
+pub fn reconcile_hook_states(conn: &Connection, live_session_ids: &[&str]) -> Result<usize> {
+    if live_session_ids.is_empty() {
+        let changed = conn.execute(
+            "UPDATE session_metadata SET hook_state = NULL
+             WHERE hook_state IS NOT NULL AND hook_state != 'idle'",
+            [],
+        )?;
+        return Ok(changed);
+    }
+
+    let placeholders: String = live_session_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "UPDATE session_metadata SET hook_state = NULL
+         WHERE hook_state IS NOT NULL AND hook_state != 'idle'
+         AND session_id NOT IN ({})",
+        placeholders
+    );
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = live_session_ids
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let changed = conn.execute(&sql, params.as_slice())?;
+    Ok(changed)
 }
 
 /// Set the hook state for a session—ground truth from the neural interface

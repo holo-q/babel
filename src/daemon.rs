@@ -76,7 +76,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::babel_storage::{init_db, mark_read, mark_unread, set_icon, set_last_workspace};
+use crate::babel_storage::{
+    init_db, mark_read, mark_unread, reconcile_hook_states, set_icon, set_last_workspace,
+};
 use crate::events::{BabelEvent, EventFilter, EventMessage};
 use crate::fingerprint::{
     extract_from_jsonl, extract_from_scrollback, match_fingerprints, MatchConfidence,
@@ -1829,6 +1831,22 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
             .refresh_panes(!enable_scrollparse)
             .await
             .context("Failed initial window scan")?;
+
+        // Reconcile stale hook states: any session marked working/tool_running
+        // that has no live pane is reset to NULL (no signal, not idle).
+        let live_sids: Vec<String> = s
+            .panes
+            .values()
+            .filter_map(|w| w.session_id.clone())
+            .collect();
+        let live_refs: Vec<&str> = live_sids.iter().map(|s| s.as_str()).collect();
+        if let Ok(conn) = init_db() {
+            match reconcile_hook_states(&conn, &live_refs) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("Cleared {} stale hook states", n),
+                Err(e) => tracing::debug!(error = %e, "Failed to reconcile hook states"),
+            }
+        }
 
         // Compute meaningful stats
         let sessions_with_fingerprints = s.fingerprint_index.len();

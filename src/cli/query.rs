@@ -1450,7 +1450,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
     let meta = get_metadata(conn, &session_key).ok().flatten();
     let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
-    let hook_state = meta.as_ref().map(|m| m.hook_state);
+    let hook_state = meta.as_ref().and_then(|m| m.hook_state);
 
     let (state_icon, state_kind) = match hook_state {
         Some(HookState::Idle) => ("○", StateKind::Idle),
