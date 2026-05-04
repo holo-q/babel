@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The worker's current state—derived from Claude Code hooks
@@ -93,6 +94,28 @@ pub struct SessionMetadata {
     /// When the last hook fired (unix timestamp)
     /// The pulse of the neural link—when did we last hear from this worker?
     pub last_hook_at: Option<i64>,
+}
+
+/// Cross-harness session registry entry.
+///
+/// Populated by hooks (live) and backfill (historical). Every session that
+/// has ever fired a hook or been discovered in native storage gets a row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionIndexEntry {
+    /// Babel-namespaced key: "claude:<uuid>", "codex:<uuid>", etc.
+    pub session_key: String,
+    /// Harness slug: "claude", "codex", "gemini", etc.
+    pub agent_kind: String,
+    /// Provider-native session id (without namespace prefix).
+    pub native_id: String,
+    /// Working directory or project path where the session ran.
+    pub project_path: Option<String>,
+    /// Human-readable title: summary, first prompt, or /rename name.
+    pub display_name: Option<String>,
+    /// Unix timestamp (seconds) when this session was first seen by babel.
+    pub first_seen_at: i64,
+    /// Unix timestamp (seconds) of most recent activity.
+    pub last_seen_at: i64,
 }
 
 /// The Tower's Memory—What Persists When Workers Sleep
@@ -232,6 +255,38 @@ impl BabelStorage {
                 [],
             )
             .context("Failed to create generated_titles table")?;
+
+        // Cross-harness session index: every session that has ever fired a hook
+        // or been discovered in native storage gets a row here. Backing store for
+        // `babel ls-sessions` — the unified view across all 17+ harnesses.
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS session_index (
+                    session_key TEXT PRIMARY KEY,
+                    agent_kind TEXT NOT NULL,
+                    native_id TEXT NOT NULL,
+                    project_path TEXT,
+                    display_name TEXT,
+                    first_seen_at INTEGER NOT NULL,
+                    last_seen_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .context("Failed to create session_index table")?;
+
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_index_kind ON session_index(agent_kind)",
+                [],
+            )
+            .context("Failed to create session_index agent_kind index")?;
+
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_index_last ON session_index(last_seen_at DESC)",
+                [],
+            )
+            .context("Failed to create session_index last_seen_at index")?;
 
         // Migration: add hook_state and last_hook_at columns if they don't exist
         // These columns track state from the neural interface (Claude Code hooks)
@@ -617,6 +672,91 @@ impl BabelStorage {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
+    // Session Index — Cross-Harness Session Registry
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Upsert a session into the cross-harness index.
+    ///
+    /// On conflict (same session_key), updates display_name, project_path,
+    /// and last_seen_at. first_seen_at is preserved from the original insert.
+    pub fn upsert_session_index(
+        &self,
+        entry: &SessionIndexEntry,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO session_index
+                    (session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(session_key) DO UPDATE SET
+                    project_path = COALESCE(?4, session_index.project_path),
+                    display_name = COALESCE(?5, session_index.display_name),
+                    last_seen_at = MAX(?7, session_index.last_seen_at)",
+                params![
+                    entry.session_key,
+                    entry.agent_kind,
+                    entry.native_id,
+                    entry.project_path,
+                    entry.display_name,
+                    entry.first_seen_at,
+                    entry.last_seen_at,
+                ],
+            )
+            .context("Failed to upsert session index entry")?;
+        Ok(())
+    }
+
+    /// Query recent sessions, optionally filtered by harness.
+    ///
+    /// Returns entries ordered by last_seen_at descending (most recent first).
+    pub fn query_session_index(
+        &self,
+        limit: usize,
+        kind_filter: Option<&str>,
+    ) -> Result<Vec<SessionIndexEntry>> {
+        if let Some(kind) = kind_filter {
+            let mut stmt = self.conn.prepare(
+                "SELECT session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at
+                 FROM session_index
+                 WHERE agent_kind = ?1
+                 ORDER BY last_seen_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![kind, limit as i64], row_to_index_entry)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at
+                 FROM session_index
+                 ORDER BY last_seen_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], row_to_index_entry)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
+    }
+
+    /// Count total sessions in the index, optionally filtered by harness.
+    pub fn session_index_count(&self, kind_filter: Option<&str>) -> Result<usize> {
+        let count: i64 = if let Some(kind) = kind_filter {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM session_index WHERE agent_kind = ?1",
+                params![kind],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM session_index",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        Ok(count as usize)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
     // Session Metadata API (continued)
     // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -664,6 +804,18 @@ impl BabelStorage {
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to collect metadata rows")
     }
+}
+
+fn row_to_index_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionIndexEntry> {
+    Ok(SessionIndexEntry {
+        session_key: row.get(0)?,
+        agent_kind: row.get(1)?,
+        native_id: row.get(2)?,
+        project_path: row.get(3)?,
+        display_name: row.get(4)?,
+        first_seen_at: row.get(5)?,
+        last_seen_at: row.get(6)?,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -811,6 +963,60 @@ pub fn get_generated_title(conn: &Connection, session_id: &str) -> Result<Option
         Ok(Some(row.get(0)?))
     } else {
         Ok(None)
+    }
+}
+
+/// Upsert a session into the cross-harness index (standalone function)
+pub fn upsert_session_index(conn: &Connection, entry: &SessionIndexEntry) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_index
+            (session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(session_key) DO UPDATE SET
+            project_path = COALESCE(?4, session_index.project_path),
+            display_name = COALESCE(?5, session_index.display_name),
+            last_seen_at = MAX(?7, session_index.last_seen_at)",
+        params![
+            entry.session_key,
+            entry.agent_kind,
+            entry.native_id,
+            entry.project_path,
+            entry.display_name,
+            entry.first_seen_at,
+            entry.last_seen_at,
+        ],
+    )
+    .context("Failed to upsert session index entry")?;
+    Ok(())
+}
+
+/// Query recent sessions from the cross-harness index (standalone function)
+pub fn query_session_index(
+    conn: &Connection,
+    limit: usize,
+    kind_filter: Option<&str>,
+) -> Result<Vec<SessionIndexEntry>> {
+    if let Some(kind) = kind_filter {
+        let mut stmt = conn.prepare(
+            "SELECT session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at
+             FROM session_index
+             WHERE agent_kind = ?1
+             ORDER BY last_seen_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![kind, limit as i64], row_to_index_entry)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT session_key, agent_kind, native_id, project_path, display_name, first_seen_at, last_seen_at
+             FROM session_index
+             ORDER BY last_seen_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], row_to_index_entry)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 }
 

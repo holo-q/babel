@@ -271,6 +271,27 @@ pub enum Commands {
     #[command()]
     LsSockets,
 
+    /// List all known sessions across all harnesses
+    ///
+    /// Queries the session index for recent sessions from all installed
+    /// harnesses (Claude, Codex, Gemini, etc.). Sessions are discovered
+    /// via hooks (live) and backfilled from native storage (historical).
+    ///
+    /// Examples:
+    ///   babel ls-sessions          # Last 50 sessions
+    ///   babel ls-sessions 20       # Last 20 sessions
+    ///   babel ls-sessions --kind claude  # Only Claude sessions
+    #[command()]
+    LsSessions {
+        /// Maximum number of sessions to show (default: 50)
+        #[arg(default_value = "50")]
+        count: usize,
+
+        /// Filter to a specific harness (e.g. "claude", "codex", "gemini")
+        #[arg(short, long)]
+        kind: Option<String>,
+    },
+
     /// Get status of a kitty window
     ///
     /// Shows detailed information about an agent pane including session info,

@@ -14,7 +14,10 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tracing::{debug, info, warn};
 
-use babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
+use babel::babel_storage::{
+    init_db, mark_read, mark_unread, set_hook_state, upsert_session_index, HookState,
+    SessionIndexEntry,
+};
 use babel::ipc::Request;
 use babel::kitty::{
     default_socket, reset_border_color_on_socket, set_border_color_on_socket, PaneAddr,
@@ -175,11 +178,30 @@ async fn execute_hook_flow(
     ensure_pane_tag(session, pane_addr.as_ref()).await;
 
     let hook_state = event.state.map(hook_state_from_effect);
-    if let Some(state) = hook_state {
-        if let Ok(conn) = init_db() {
+    if let Ok(conn) = init_db() {
+        if let Some(state) = hook_state {
             if let Err(e) = set_hook_state(&conn, session, state) {
                 warn!(session, error = %e, "Failed to set hook state");
             }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let native_id = AgentKind::native_session_id(session);
+        let cwd = current_working_dir();
+        let entry = SessionIndexEntry {
+            session_key: session.to_string(),
+            agent_kind: agent_kind.slug().to_string(),
+            native_id: native_id.to_string(),
+            project_path: Some(cwd.to_string_lossy().into_owned()),
+            display_name: None,
+            first_seen_at: now,
+            last_seen_at: now,
+        };
+        if let Err(e) = upsert_session_index(&conn, &entry) {
+            debug!(session, error = %e, "Failed to upsert session index");
         }
     }
 

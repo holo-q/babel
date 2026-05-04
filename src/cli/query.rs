@@ -1168,6 +1168,606 @@ async fn resolve_plan_target(core: &BabelCore, target: &str) -> Result<String> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Session Index — Cross-Harness Session Listing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// List all known sessions across all harnesses.
+///
+/// Queries the session_index table, triggering a lazy backfill from native
+/// harness storage on first invocation (when the index is empty).
+#[instrument(level = "debug", skip(_core))]
+pub async fn cmd_ls_sessions(
+    _core: &BabelCore,
+    count: usize,
+    kind: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    use babel::babel_storage::BabelStorage;
+
+    let db = BabelStorage::open().context("Failed to open babel storage")?;
+
+    if db.session_index_count(None)? == 0 {
+        backfill_session_index(&db)?;
+    }
+
+    let entries = db.query_session_index(count, kind)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        if kind.is_some() {
+            println!("No sessions found for harness {:?}", kind.unwrap());
+        } else {
+            println!("No sessions found");
+        }
+        println!();
+        println!(
+            "{}",
+            Style::new().dim().apply_to(
+                "Sessions appear here via hooks (live) or backfill (historical).\n\
+                 Run `babel hook install` to set up hooks for your harnesses."
+            )
+        );
+        return Ok(());
+    }
+
+    let total = db.session_index_count(kind)?;
+    let showing = entries.len();
+    let dim = Style::new().dim();
+
+    if let Some(k) = kind {
+        println!(
+            "Sessions ({} of {} for {}):",
+            showing,
+            total,
+            style(k).bold()
+        );
+    } else {
+        println!("Sessions ({} of {}):", showing, total);
+    }
+    println!();
+
+    let conn = init_db()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    for entry in &entries {
+        print_session_index_entry(entry, &conn, now)?;
+    }
+
+    println!();
+    println!(
+        "{}",
+        dim.apply_to(format!(
+            "  {} total across {} harness{}",
+            db.session_index_count(None)?,
+            count_distinct_kinds(&entries),
+            if count_distinct_kinds(&entries) == 1 {
+                ""
+            } else {
+                "es"
+            }
+        ))
+    );
+
+    Ok(())
+}
+
+fn count_distinct_kinds(entries: &[babel::babel_storage::SessionIndexEntry]) -> usize {
+    let mut kinds = std::collections::HashSet::new();
+    for e in entries {
+        kinds.insert(&e.agent_kind);
+    }
+    kinds.len()
+}
+
+/// Truncate a string at a char boundary.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+/// Format relative time from seconds ago.
+fn relative_time(seconds_ago: i64) -> String {
+    if seconds_ago < 0 {
+        return "just now".to_string();
+    }
+    if seconds_ago < 60 {
+        return format!("{}s ago", seconds_ago);
+    }
+    let minutes = seconds_ago / 60;
+    if minutes < 60 {
+        return format!("{}m ago", minutes);
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{}h ago", hours);
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("{}d ago", days);
+    }
+    let months = days / 30;
+    format!("{}mo ago", months)
+}
+
+/// Parse a hex accent color to RGB.
+fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Print one session index row with harness-colored accent.
+fn print_session_index_entry(
+    entry: &babel::babel_storage::SessionIndexEntry,
+    conn: &rusqlite::Connection,
+    now: i64,
+) -> Result<()> {
+    use babel::babel_storage::{get_metadata, HookState};
+    use babel::AgentKind;
+
+    let dim = Style::new().dim();
+
+    let agent_kind = AgentKind::from_slug(&entry.agent_kind);
+    let accent = agent_kind.map(|k| k.accent_color()).unwrap_or("#666666");
+    let (r, g, b) = hex_to_rgb(accent).unwrap_or((102, 102, 102));
+
+    let harness_style = Style::new().color256(
+        closest_ansi256(r, g, b),
+    );
+
+    let meta = get_metadata(conn, &entry.session_key).ok().flatten();
+    let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
+    let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
+    let hook_state = meta.as_ref().map(|m| m.hook_state);
+
+    let (state_icon, state_style) = match hook_state {
+        Some(HookState::Idle) => ("○", Style::new().dim()),
+        Some(HookState::Working) => ("●", Style::new().yellow()),
+        Some(HookState::ToolRunning) => ("⚙", Style::new().cyan().bold()),
+        None => (" ", Style::new().dim()),
+    };
+
+    let marker = if let Some(icon) = custom_icon {
+        format!("{} ", icon)
+    } else if unread {
+        format!("{} ", style("●").yellow())
+    } else {
+        "  ".to_string()
+    };
+
+    let harness_name = format!("{:<8}", entry.agent_kind);
+
+    let cwd_display = entry
+        .project_path
+        .as_deref()
+        .and_then(|p| {
+            let home = dirs::home_dir()?;
+            let path = std::path::Path::new(p);
+            path.strip_prefix(&home)
+                .ok()
+                .map(|rel| format!("~/{}", rel.display()))
+                .or_else(|| Some(p.to_string()))
+        })
+        .unwrap_or_default();
+    let cwd_short = if cwd_display.len() > 30 {
+        format!("…{}", &cwd_display[cwd_display.len() - 28..])
+    } else {
+        cwd_display
+    };
+
+    let raw_title = entry.display_name.as_deref().unwrap_or("");
+    let title = &raw_title.replace('\n', "↵").replace('\r', "");
+    let title_short: String = title.chars().take(40).collect();
+    let title_display = if title.chars().count() > 40 {
+        format!("{}…", title_short)
+    } else {
+        title_short
+    };
+
+    let elapsed = now - entry.last_seen_at;
+    let time_str = format!("{:>7}", relative_time(elapsed));
+
+    print!(
+        " {}{}",
+        marker,
+        state_style.apply_to(state_icon),
+    );
+    print!(" {}", harness_style.apply_to(&harness_name));
+    print!(" {}  ", dim.apply_to(format!("{:<30}", cwd_short)));
+    print!("{} ", dim.apply_to(&time_str));
+    println!("{}", harness_style.apply_to(&title_display));
+
+    Ok(())
+}
+
+/// Map RGB to closest ANSI 256-color index (216-color cube).
+fn closest_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    let ri = ((r as u16) * 5 / 255) as u8;
+    let gi = ((g as u16) * 5 / 255) as u8;
+    let bi = ((b as u16) * 5 / 255) as u8;
+    16 + 36 * ri + 6 * gi + bi
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Session Index Backfill — Populate from Native Harness Storage
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Backfill session index from all harnesses with discoverable native storage.
+///
+/// Called lazily on first `ls-sessions` when the index is empty. Each harness
+/// adapter scans its native storage layout and upserts entries. Harnesses
+/// without central storage are hook-only (no backfill).
+fn backfill_session_index(db: &babel::babel_storage::BabelStorage) -> Result<()> {
+    let mut total = 0usize;
+
+    total += backfill_claude(db).unwrap_or(0);
+    total += backfill_codex(db).unwrap_or(0);
+    total += backfill_gemini(db).unwrap_or(0);
+    total += backfill_kimi(db).unwrap_or(0);
+    // Factory Droid and Qwen use Claude-fork storage with different base dirs.
+    // Their sessions appear via hooks; no known stable storage path for backfill.
+
+    if total > 0 {
+        eprintln!(
+            "{}",
+            Style::new()
+                .dim()
+                .apply_to(format!("Backfilled {} sessions from native storage", total))
+        );
+    }
+
+    Ok(())
+}
+
+/// Backfill from Claude Code's ~/.claude/history.jsonl
+///
+/// Reads history.jsonl directly for display names and timestamps rather than
+/// parsing each session JSONL file (which would be O(n * file_size)).
+fn backfill_claude(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+    use babel::utility::claude_storage::claude_base;
+    use std::io::{BufRead, BufReader};
+
+    let history_path = claude_base().join("history.jsonl");
+    if !history_path.exists() {
+        return Ok(0);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct HistEntry {
+        display: String,
+        #[serde(rename = "sessionId", default)]
+        session_id: Option<String>,
+        project: std::path::PathBuf,
+        timestamp: i64,
+    }
+
+    let file = std::fs::File::open(&history_path)?;
+    let reader = BufReader::new(file);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: HistEntry = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let session_id = match entry.session_id {
+            Some(id) if !id.is_empty() => id,
+            _ => continue,
+        };
+        if !seen.insert(session_id.clone()) {
+            continue;
+        }
+
+        let key = babel::AgentKind::Claude.session_key(&session_id);
+        let project_str = entry.project.to_string_lossy().into_owned();
+        let display = if entry.display.is_empty() {
+            None
+        } else {
+            Some(entry.display)
+        };
+
+        // Claude history.jsonl timestamps are milliseconds
+        let ts_secs = entry.timestamp / 1000;
+
+        let idx = babel::babel_storage::SessionIndexEntry {
+            session_key: key,
+            agent_kind: "claude".to_string(),
+            native_id: session_id,
+            project_path: Some(project_str),
+            display_name: display,
+            first_seen_at: ts_secs,
+            last_seen_at: ts_secs,
+        };
+        if db.upsert_session_index(&idx).is_ok() {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Backfill from Codex CLI's ~/.codex/history.jsonl + session_index.jsonl
+///
+/// history.jsonl has per-prompt entries: {session_id, ts, text}
+/// session_index.jsonl has thread names: {id, thread_name, updated_at}
+/// We merge both to get session_id → (display_name, first/last timestamps).
+fn backfill_codex(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+    use std::io::{BufRead, BufReader};
+
+    let codex_home = dirs::home_dir().context("no home dir")?.join(".codex");
+    if !codex_home.exists() {
+        return Ok(0);
+    }
+
+    // Phase 1: Read thread names from session_index.jsonl
+    #[derive(serde::Deserialize)]
+    struct ThreadEntry {
+        id: String,
+        thread_name: String,
+    }
+
+    let mut thread_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let idx_path = codex_home.join("session_index.jsonl");
+    if idx_path.exists() {
+        if let Ok(file) = std::fs::File::open(&idx_path) {
+            for line in BufReader::new(file).lines().flatten() {
+                if let Ok(e) = serde_json::from_str::<ThreadEntry>(&line) {
+                    if !e.thread_name.is_empty() {
+                        thread_names.insert(e.id, e.thread_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Read history.jsonl to discover sessions with timestamps
+    #[derive(serde::Deserialize)]
+    struct HistEntry {
+        session_id: String,
+        ts: i64,
+        text: String,
+    }
+
+    struct SessionAcc {
+        first_ts: i64,
+        last_ts: i64,
+        first_text: String,
+    }
+
+    let hist_path = codex_home.join("history.jsonl");
+    if !hist_path.exists() {
+        return Ok(0);
+    }
+
+    let mut sessions: std::collections::HashMap<String, SessionAcc> =
+        std::collections::HashMap::new();
+
+    if let Ok(file) = std::fs::File::open(&hist_path) {
+        for line in BufReader::new(file).lines().flatten() {
+            if let Ok(e) = serde_json::from_str::<HistEntry>(&line) {
+                if e.session_id.is_empty() {
+                    continue;
+                }
+                sessions
+                    .entry(e.session_id.clone())
+                    .and_modify(|acc| {
+                        acc.first_ts = acc.first_ts.min(e.ts);
+                        acc.last_ts = acc.last_ts.max(e.ts);
+                    })
+                    .or_insert(SessionAcc {
+                        first_ts: e.ts,
+                        last_ts: e.ts,
+                        first_text: truncate_str(&e.text, 100),
+                    });
+            }
+        }
+    }
+
+    let mut count = 0;
+    for (session_id, acc) in &sessions {
+        let key = babel::AgentKind::Codex.session_key(session_id);
+        let display = thread_names
+            .get(session_id)
+            .cloned()
+            .or_else(|| {
+                if acc.first_text.is_empty() {
+                    None
+                } else {
+                    Some(acc.first_text.clone())
+                }
+            });
+
+        let entry = babel::babel_storage::SessionIndexEntry {
+            session_key: key,
+            agent_kind: "codex".to_string(),
+            native_id: session_id.clone(),
+            project_path: None,
+            display_name: display,
+            first_seen_at: acc.first_ts,
+            last_seen_at: acc.last_ts,
+        };
+        if db.upsert_session_index(&entry).is_ok() {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Backfill from Gemini CLI's ~/.gemini/
+fn backfill_gemini(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+    let gemini_dir = dirs::home_dir()
+        .context("no home dir")?
+        .join(".gemini");
+
+    if !gemini_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+
+    // Gemini stores sessions in tmp/<project-id>/chats/ (JSON/JSONL files)
+    let tmp_dir = gemini_dir.join("tmp");
+    if tmp_dir.exists() {
+        for project_entry in std::fs::read_dir(&tmp_dir).into_iter().flatten() {
+            let project_entry = match project_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let project_path = project_entry.path();
+            if !project_path.is_dir() {
+                continue;
+            }
+            let chats_dir = project_path.join("chats");
+            if !chats_dir.exists() {
+                continue;
+            }
+            for chat_entry in std::fs::read_dir(&chats_dir).into_iter().flatten() {
+                let chat_entry = match chat_entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let chat_path = chat_entry.path();
+                let ext = chat_path.extension().and_then(|e| e.to_str());
+                if !matches!(ext, Some("json" | "jsonl")) {
+                    continue;
+                }
+
+                let session_id = chat_path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if session_id.is_empty() {
+                    continue;
+                }
+
+                let mtime = chat_entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                let key = babel::AgentKind::Gemini.session_key(&session_id);
+                let entry = babel::babel_storage::SessionIndexEntry {
+                    session_key: key,
+                    agent_kind: "gemini".to_string(),
+                    native_id: session_id,
+                    project_path: None,
+                    display_name: None,
+                    first_seen_at: mtime,
+                    last_seen_at: mtime,
+                };
+                if db.upsert_session_index(&entry).is_ok() {
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+/// Backfill from Kimi CLI's ~/.local/share/kimi-cli/sessions/
+fn backfill_kimi(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+    let kimi_dir = dirs::data_dir()
+        .context("no data dir")?
+        .join("kimi-cli")
+        .join("sessions");
+
+    if !kimi_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+
+    // Kimi stores sessions in sessions/<workdir-hash>/<session-id>/
+    for workdir_entry in std::fs::read_dir(&kimi_dir).into_iter().flatten() {
+        let workdir_entry = match workdir_entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let workdir_path = workdir_entry.path();
+        if !workdir_path.is_dir() {
+            continue;
+        }
+        for session_entry in std::fs::read_dir(&workdir_path).into_iter().flatten() {
+            let session_entry = match session_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let session_path = session_entry.path();
+            if !session_path.is_dir() {
+                continue;
+            }
+
+            let session_id = session_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if session_id.is_empty() {
+                continue;
+            }
+
+            let mtime = session_entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            let key = babel::AgentKind::Kimi.session_key(&session_id);
+            let entry = babel::babel_storage::SessionIndexEntry {
+                session_key: key,
+                agent_kind: "kimi".to_string(),
+                native_id: session_id,
+                project_path: None,
+                display_name: None,
+                first_seen_at: mtime,
+                last_seen_at: mtime,
+            };
+            if db.upsert_session_index(&entry).is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 /// Pretty print a todo list
 fn print_plan(todos: &[babel::utility::claude_storage::TodoItem], session_id: &str) {
     use console::style;
