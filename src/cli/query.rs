@@ -1396,23 +1396,13 @@ fn print_session_index_entry(
     print!("{} ", dim.apply_to(&time_str));
     print!("{}", harness_style.apply_to(&title_display));
 
-    let resume_cmd = resume_command(&entry.agent_kind, &entry.native_id);
-    println!("  {}", dim.apply_to(&resume_cmd));
+    if let Some(cmd) = agent_kind.and_then(|k| k.spec().resume_command(&entry.native_id)) {
+        println!("  {}", dim.apply_to(&cmd));
+    } else {
+        println!();
+    }
 
     Ok(())
-}
-
-/// Generate a copy-pasteable resume command for a session.
-fn resume_command(agent_kind: &str, native_id: &str) -> String {
-    match agent_kind {
-        "claude" => format!("claude --resume {}", native_id),
-        "codex" => format!("codex resume {}", native_id),
-        "gemini" => format!("gemini --session {}", native_id),
-        "kimi" => format!("kimi resume {}", native_id),
-        "factory-droid" => format!("factory --resume {}", native_id),
-        "qwen-code" => format!("qwen-code --resume {}", native_id),
-        _ => format!("{} (no resume)", agent_kind),
-    }
 }
 
 /// Map RGB to closest ANSI 256-color index (216-color cube).
