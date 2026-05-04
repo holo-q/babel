@@ -152,7 +152,13 @@ async fn main() -> Result<()> {
 
         Commands::Plan { target } => cli::query::cmd_plan(&core, &target, cli.json).await,
 
-        Commands::Resume { all } => cli::resume::cmd_resume(&core, all, cli.json).await,
+        Commands::Resume { indices, all } => {
+            if indices.is_empty() {
+                cli::resume::cmd_resume(&core, all, cli.json).await
+            } else {
+                cli::resume::cmd_resume_by_index(&indices).await
+            }
+        }
 
         Commands::Continue => cli::resume::cmd_continue(&core).await,
 

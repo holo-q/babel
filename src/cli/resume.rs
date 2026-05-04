@@ -1,13 +1,16 @@
 //! Resume and Continue commands - conversation history browsing
 //!
 //! - `babel resume` / `babel r` - Interactive TUI pager for session browsing
+//! - `babel resume 3 6 9` - Resume sessions by ls-sessions index
 //! - `babel continue` / `babel c` - Resume most recent non-running session
 
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
+use console::style;
 use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
 
@@ -28,6 +31,135 @@ pub async fn cmd_resume(core: &BabelCore, all: bool, _json: bool) -> Result<()> 
     // If a session was selected, launch claude --resume
     if let Some(session_id) = selected {
         launch_claude_resume(&session_id)?;
+    }
+
+    Ok(())
+}
+
+/// Resume sessions by their ls-sessions index.
+///
+/// Resolves indices against the same scan pipeline as `ls-sessions`, then
+/// spawns a kitty terminal per session with the harness-native resume command.
+/// Restores to last-known workspace when available in the overlay DB.
+#[instrument(level = "debug")]
+pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
+    use babel::babel_storage::{get_metadata, init_db};
+    use babel::AgentKind;
+
+    let sessions = super::query::scan_all_sessions(None, false);
+
+    if sessions.is_empty() {
+        return Err(anyhow!("No sessions found"));
+    }
+
+    let conn = init_db().ok();
+    let main_socket = babel::kitty::main_socket();
+
+    for &idx in indices {
+        if idx == 0 || idx > sessions.len() {
+            eprintln!(
+                "{} index {} out of range (1-{})",
+                style("✗").red(),
+                idx,
+                sessions.len()
+            );
+            continue;
+        }
+
+        let session = &sessions[idx - 1];
+        let spec = session.agent_kind.spec();
+
+        let Some(resume_tpl) = spec.resume_cmd else {
+            eprintln!(
+                "{} {} has no resume command",
+                style("✗").red(),
+                session.agent_kind.display_name()
+            );
+            continue;
+        };
+
+        let resume_full = resume_tpl.replace("{}", &session.native_id);
+        let parts: Vec<&str> = resume_full.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let cwd = session
+            .project_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        // Check overlay DB for workspace placement
+        let session_key = session.agent_kind.session_key(&session.native_id);
+        let target_workspace = conn
+            .as_ref()
+            .and_then(|c| get_metadata(c, &session_key).ok().flatten())
+            .and_then(|m| m.last_workspace);
+
+        // Spawn in kitty via kitten @ launch
+        let mut cmd = Command::new("kitten");
+        cmd.arg("@").arg("launch");
+        cmd.args(["--type", "os-window"]);
+        cmd.args(["--cwd", &cwd.to_string_lossy()]);
+
+        if let Some(ref socket) = main_socket {
+            cmd.args(["--to", socket]);
+        }
+
+        cmd.arg("--");
+        cmd.args(&parts);
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let title = session
+            .display_name
+            .as_deref()
+            .map(|t| super::query::sanitize_display(t, 40))
+            .unwrap_or_default();
+
+        match cmd.output() {
+            Ok(output) if output.status.success() => {
+                // Move to workspace if we have placement data
+                if let Some(ws) = target_workspace {
+                    // Parse new pane id from launch output
+                    let pane_id_str = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(pane_id) = pane_id_str.trim().parse::<u64>() {
+                        if let Ok(Some(pane)) = babel::kitty::get_window(pane_id).await {
+                            if let Err(e) = pane.move_to_workspace(ws) {
+                                tracing::debug!(error = %e, ws, "Failed to move to workspace");
+                            }
+                        }
+                    }
+                }
+                eprintln!(
+                    " {} {} {}  {}",
+                    style(format!("{:>2}", idx)).dim(),
+                    style(session.agent_kind.slug()).bold(),
+                    style(&cwd.display().to_string()).dim(),
+                    title
+                );
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "{} failed to launch {}: {}",
+                    style("✗").red(),
+                    session.agent_kind.display_name(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} failed to spawn kitten: {}",
+                    style("✗").red(),
+                    e
+                );
+            }
+        }
     }
 
     Ok(())

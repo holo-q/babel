@@ -1181,32 +1181,25 @@ async fn resolve_plan_target(core: &BabelCore, target: &str) -> Result<String> {
 /// This is a read-through view — no caching, no DB. Each harness scanner reads
 /// its native storage and returns these. The overlay DB (session_metadata) is
 /// only consulted for babel's own runtime state (hook_state, icon, is_read).
-struct NativeSession {
-    agent_kind: babel::AgentKind,
-    native_id: String,
-    project_path: Option<String>,
-    display_name: Option<String>,
-    last_prompt: Option<String>,
-    turn_count: u32,
-    last_seen_at: i64,
-    /// True if the session had real user interaction (not a system-only spawn).
-    interactive: bool,
+pub(super) struct NativeSession {
+    pub(super) agent_kind: babel::AgentKind,
+    pub(super) native_id: String,
+    pub(super) project_path: Option<String>,
+    pub(super) display_name: Option<String>,
+    pub(super) last_prompt: Option<String>,
+    pub(super) turn_count: u32,
+    pub(super) last_seen_at: i64,
+    pub(super) interactive: bool,
 }
 
-/// List all known sessions across all harnesses.
+/// Scan all harnesses and return interactive sessions sorted by recency.
 ///
-/// Reads native storage directly per harness, merges, sorts by recency,
-/// and joins with session_metadata for overlay enrichment (hook_state, icon, is_read).
-#[instrument(level = "debug", skip(_core))]
-pub async fn cmd_ls_sessions(
-    _core: &BabelCore,
-    count: usize,
+/// This is the shared pipeline for `ls-sessions` and `resume <index>`.
+pub(super) fn scan_all_sessions(
     kind: Option<&str>,
     show_all: bool,
-    json: bool,
-) -> Result<()> {
+) -> Vec<NativeSession> {
     let mut sessions = Vec::new();
-
     let kind_filter = kind.and_then(babel::AgentKind::from_slug);
 
     if kind_filter.is_none() || kind_filter == Some(babel::AgentKind::Claude) {
@@ -1226,6 +1219,22 @@ pub async fn cmd_ls_sessions(
     if !show_all {
         sessions.retain(|s| s.interactive);
     }
+    sessions
+}
+
+/// List all known sessions across all harnesses.
+///
+/// Reads native storage directly per harness, merges, sorts by recency,
+/// and joins with session_metadata for overlay enrichment (hook_state, icon, is_read).
+#[instrument(level = "debug", skip(_core))]
+pub async fn cmd_ls_sessions(
+    _core: &BabelCore,
+    count: usize,
+    kind: Option<&str>,
+    show_all: bool,
+    json: bool,
+) -> Result<()> {
+    let mut sessions = scan_all_sessions(kind, show_all);
     let total = sessions.len();
     sessions.truncate(count);
 
@@ -1285,6 +1294,7 @@ pub async fn cmd_ls_sessions(
         .collect();
 
     // Pass 2: measure column widths
+    let w_idx = format!("{}", rows.len()).len();
     let w_harness = rows.iter().map(|r| r.harness.len()).max().unwrap_or(0);
     let w_ws = rows.iter().map(|r| r.workspace.len()).max().unwrap_or(0);
     let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
@@ -1294,13 +1304,14 @@ pub async fn cmd_ls_sessions(
     let w_prompt = rows.iter().map(|r| r.last_prompt.chars().count()).max().unwrap_or(0);
 
     // Pass 3: print
-    for row in &rows {
-        // Non-interactive sessions (subagent spawns, system prompts) render fully dimmed
+    for (i, row) in rows.iter().enumerate() {
+        let idx = i + 1; // 1-based
         let accent_c = closest_ansi256_from_hex(row.accent);
         let harness_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
         let text_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
         let state_style = if row.interactive { row.state_style() } else { Style::new().dim() };
 
+        print!(" {:>w_idx$}", dim.apply_to(idx));
         print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
         if w_ws > 0 {
@@ -1315,11 +1326,7 @@ pub async fn cmd_ls_sessions(
             let ppad = w_prompt - row.last_prompt.chars().count();
             print!("  {}{}", text_style.apply_to(&row.last_prompt), " ".repeat(ppad));
         }
-        if let Some(ref cmd) = row.resume_cmd {
-            println!("  {}", dim.apply_to(cmd));
-        } else {
-            println!();
-        }
+        println!();
     }
 
     println!();
@@ -1352,7 +1359,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn sanitize_display(s: &str, max_chars: usize) -> String {
+pub(super) fn sanitize_display(s: &str, max_chars: usize) -> String {
     let clean = s.replace('\n', "↵").replace('\r', "");
     if clean.chars().count() > max_chars {
         let short: String = clean.chars().take(max_chars).collect();
@@ -1416,7 +1423,6 @@ struct SessionRow {
     turns: String,
     title: String,
     last_prompt: String,
-    resume_cmd: Option<String>,
     accent: &'static str,
     interactive: bool,
 }
@@ -1500,7 +1506,6 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
 
     let elapsed = now - s.last_seen_at;
     let time = relative_time(elapsed);
-    let resume_cmd = s.agent_kind.spec().resume_command(&s.native_id);
 
     SessionRow {
         marker,
@@ -1513,7 +1518,6 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         turns,
         title,
         last_prompt,
-        resume_cmd,
         accent,
         interactive: s.interactive,
     }

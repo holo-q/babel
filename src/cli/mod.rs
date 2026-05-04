@@ -399,20 +399,24 @@ pub enum Commands {
         target: String,
     },
 
-    /// Browse and resume conversation history
+    /// Resume sessions by ls-sessions index or browse interactively
     ///
-    /// Opens an interactive TUI pager showing sessions from ~/.claude.
-    /// Left panel shows session list, right panel shows transcript preview.
-    /// Tab toggles between current directory and all projects.
-    /// Enter resumes the selected session.
+    /// With indices: launches the harness-native resume command for each
+    /// session at the given position in `babel ls-sessions` output.
+    /// Without indices: opens the interactive TUI session browser.
     ///
     /// Examples:
-    ///   babel resume              # Browse sessions in current directory
-    ///   babel resume --all        # Browse all sessions
-    ///   babel r                   # Shorthand
+    ///   babel resume 1            # Resume most recent session
+    ///   babel resume 3 6 9        # Resume sessions at indices 3, 6, 9
+    ///   babel resume              # Interactive TUI browser
+    ///   babel r 1                 # Shorthand
     #[command(visible_alias = "r")]
     Resume {
-        /// Show all projects (not just current directory)
+        /// Session indices from `babel ls-sessions` (1-based)
+        #[arg(value_name = "INDEX")]
+        indices: Vec<usize>,
+
+        /// Show all projects (not just current directory) in TUI mode
         #[arg(short, long)]
         all: bool,
     },

@@ -185,14 +185,12 @@ async fn execute_hook_flow(
         }
     }
 
-    // Persist workspace on session boundaries (cheap enough for start/stop)
-    if matches!(event.canonical, "session-start" | "stop" | "prompt") {
-        if let Some(addr) = pane_addr.as_ref() {
-            if let Ok(Some(pane)) = babel::kitty::get_window(addr.id).await {
-                if let Some(ws) = pane.workspace() {
-                    if let Ok(conn) = init_db() {
-                        let _ = set_last_workspace(&conn, session, ws);
-                    }
+    // Persist workspace on every hook event so resume can restore placement
+    if let Some(addr) = pane_addr.as_ref() {
+        if let Ok(Some(pane)) = babel::kitty::get_window(addr.id).await {
+            if let Some(ws) = pane.workspace() {
+                if let Ok(conn) = init_db() {
+                    let _ = set_last_workspace(&conn, session, ws);
                 }
             }
         }
