@@ -1311,7 +1311,6 @@ pub async fn cmd_ls_sessions(
         let text_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
         let state_style = if row.interactive { row.state_style() } else { Style::new().dim() };
 
-        print!(" {:>w_idx$}", dim.apply_to(idx));
         print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
         if w_ws > 0 {
@@ -1320,6 +1319,7 @@ pub async fn cmd_ls_sessions(
         print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
         print!("  {:>w_time$}", dim.apply_to(&row.time));
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
+        print!("  {:>w_idx$}", dim.apply_to(idx));
         let tpad = w_title - row.title.chars().count();
         print!("  {}{}", text_style.apply_to(&row.title), " ".repeat(tpad));
         if w_prompt > 0 {
