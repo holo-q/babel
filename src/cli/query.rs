@@ -1300,7 +1300,7 @@ pub async fn cmd_ls_sessions(
         print!("  {}{}", harness_style.apply_to(&row.title), " ".repeat(tpad));
         if w_prompt > 0 {
             let ppad = w_prompt - row.last_prompt.chars().count();
-            print!("  {}{}", dim.apply_to(&row.last_prompt), " ".repeat(ppad));
+            print!("  {}{}", harness_style.apply_to(&row.last_prompt), " ".repeat(ppad));
         }
         if let Some(ref cmd) = row.resume_cmd {
             println!("  {}", dim.apply_to(cmd));
