@@ -20,7 +20,7 @@ This spec proposes exposing pane geometry through the RC protocol to enable prec
   "columns": 136,
   "lines": 30,
   "title": "~ — fish",
-  "cwd": "/home/nuck",
+  "cwd": "~",
   ...
 }
 ```

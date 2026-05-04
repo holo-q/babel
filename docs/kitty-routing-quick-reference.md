@@ -219,6 +219,6 @@ remote_control_password "secret" launch close-window
 
 ## References
 
-- Full documentation: `/home/nuck/Workspace/Daemons/babel/docs/kitty-cross-instance-spawning.md`
-- Test script: `/home/nuck/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh`
+- Full documentation: `~/Workspace/Daemons/babel/docs/kitty-cross-instance-spawning.md`
+- Test script: `~/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh`
 - Kitty docs: https://sw.kovidgoyal.net/kitty/remote-control/

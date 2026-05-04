@@ -88,9 +88,9 @@ This module provides the foundation for:
 
 ## Files Modified
 
-- `/home/nuck/Workspace/Plugins/babel/src/claude_storage.rs` - Complete rewrite
-- `/home/nuck/Workspace/Plugins/babel/src/discovery.rs` - Updated to use `SessionInfo` instead of old SQLite types
-- `/home/nuck/Workspace/Plugins/babel/examples/test_storage.rs` - Integration test
+- `~/Workspace/Plugins/babel/src/claude_storage.rs` - Complete rewrite
+- `~/Workspace/Plugins/babel/src/discovery.rs` - Updated to use `SessionInfo` instead of old SQLite types
+- `~/Workspace/Plugins/babel/examples/test_storage.rs` - Integration test
 
 ## Future Enhancements
 

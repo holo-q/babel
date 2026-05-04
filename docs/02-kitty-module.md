@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implemented a complete Rust wrapper for kitty's remote control protocol in `/home/nuck/Workspace/Plugins/babel/src/kitty.rs`.
+Implemented a complete Rust wrapper for kitty's remote control protocol in `~/Workspace/Plugins/babel/src/kitty.rs`.
 
 ## Architecture
 

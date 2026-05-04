@@ -4,7 +4,7 @@
 
 The `events.rs` module has been successfully created and provides a complete pub/sub event notification system for babel. The module compiles cleanly and includes comprehensive tests.
 
-**Location**: `/home/nuck/Workspace/Plugins/babel/src/events.rs`
+**Location**: `~/Workspace/Plugins/babel/src/events.rs`
 
 ## Status
 
@@ -289,10 +289,10 @@ pub struct EventMetrics {
 
 ## Related Files
 
-- `/home/nuck/Workspace/Plugins/babel/src/events.rs` - This module
-- `/home/nuck/Workspace/Plugins/babel/src/daemon.rs` - Already imports events
-- `/home/nuck/Workspace/Plugins/babel/src/ipc.rs` - Already imports EventMessage
-- `/home/nuck/Workspace/Plugins/babel/src/lib.rs` - Module registered
+- `~/Workspace/Plugins/babel/src/events.rs` - This module
+- `~/Workspace/Plugins/babel/src/daemon.rs` - Already imports events
+- `~/Workspace/Plugins/babel/src/ipc.rs` - Already imports EventMessage
+- `~/Workspace/Plugins/babel/src/lib.rs` - Module registered
 - `Cargo.toml` - Dependencies satisfied (chrono, tokio, serde)
 
 ## Notes

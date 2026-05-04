@@ -64,7 +64,7 @@
 ### List all kitty instances
 
 ```bash
-/home/nuck/Workspace/Daemons/babel/tools/kitty-instances.sh list
+~/Workspace/Daemons/babel/tools/kitty-instances.sh list
 ```
 
 ### Spawn window in specific instance
@@ -76,13 +76,13 @@ kitty @ --to unix:/run/user/1000/kitty.sock-{PID} launch --title "Test" bash
 ### Test cross-instance spawning
 
 ```bash
-/home/nuck/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh
+~/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh
 ```
 
 ### Read the quick reference
 
 ```bash
-cat /home/nuck/Workspace/Daemons/babel/docs/kitty-routing-quick-reference.md
+cat ~/Workspace/Daemons/babel/docs/kitty-routing-quick-reference.md
 ```
 
 ## Integration Roadmap
@@ -105,7 +105,7 @@ See **`RESEARCH-FINDINGS.md`** section "Next Steps for babel" for detailed integ
 ## File Tree
 
 ```
-/home/nuck/Workspace/Daemons/babel/
+~/Workspace/Daemons/babel/
 ├── RESEARCH-FINDINGS.md          # Executive summary
 ├── docs/
 │   ├── INDEX.md                  # This file

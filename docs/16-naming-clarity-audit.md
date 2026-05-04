@@ -1,7 +1,7 @@
 # Claude-Babel Naming & Clarity Audit
 
 **Date:** 2025-12-15
-**Scope:** Source code in `/home/nuck/Workspace/Plugins/claude-babel/src/`
+**Scope:** Source code in `~/Workspace/Plugins/claude-babel/src/`
 **Focus:** Function/struct/field names, documentation, API clarity, consistency
 
 ## Executive Summary

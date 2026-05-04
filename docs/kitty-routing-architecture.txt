@@ -249,7 +249,7 @@
 │                           Tools Provided                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    /home/nuck/Workspace/Daemons/babel/tools/
+    ~/Workspace/Daemons/babel/tools/
 
     • test-cross-instance-spawn.sh
       Automated test suite for cross-instance spawning
@@ -263,7 +263,7 @@
 │                         Documentation Files                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    /home/nuck/Workspace/Daemons/babel/docs/
+    ~/Workspace/Daemons/babel/docs/
 
     • kitty-cross-instance-spawning.md
       Comprehensive research report with examples and edge cases
