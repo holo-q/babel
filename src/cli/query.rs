@@ -1237,22 +1237,45 @@ pub async fn cmd_ls_sessions(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    for entry in &entries {
-        print_session_index_entry(entry, &conn, now)?;
+    // Pass 1: compute display cells for each row
+    let rows: Vec<SessionRow> = entries
+        .iter()
+        .map(|e| session_row(e, &conn, now))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Pass 2: measure column widths
+    let w_harness = rows.iter().map(|r| r.harness.len()).max().unwrap_or(0);
+    let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
+    let w_time = rows.iter().map(|r| r.time.len()).max().unwrap_or(0);
+    let w_title = rows.iter().map(|r| r.title.chars().count()).max().unwrap_or(0);
+
+    // Pass 3: print
+    for row in &rows {
+        let harness_style = Style::new().color256(closest_ansi256_from_hex(row.accent));
+        let state_style = row.state_style();
+
+        print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
+        print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
+        print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
+        print!("  {:>w_time$}", dim.apply_to(&row.time));
+        let pad = w_title - row.title.chars().count();
+        print!("  {}{}", harness_style.apply_to(&row.title), " ".repeat(pad));
+        if let Some(ref cmd) = row.resume_cmd {
+            println!("  {}", dim.apply_to(cmd));
+        } else {
+            println!();
+        }
     }
 
     println!();
+    let n_kinds = count_distinct_kinds(&entries);
     println!(
         "{}",
         dim.apply_to(format!(
             "  {} total across {} harness{}",
             db.session_index_count(None)?,
-            count_distinct_kinds(&entries),
-            if count_distinct_kinds(&entries) == 1 {
-                ""
-            } else {
-                "es"
-            }
+            n_kinds,
+            if n_kinds == 1 { "" } else { "es" }
         ))
     );
 
@@ -1315,35 +1338,59 @@ fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-/// Print one session index row with harness-colored accent.
-fn print_session_index_entry(
+/// Precomputed display cells for one session row.
+struct SessionRow {
+    marker: String,
+    state_icon: &'static str,
+    state_kind: StateKind,
+    harness: String,
+    cwd: String,
+    time: String,
+    title: String,
+    resume_cmd: Option<String>,
+    accent: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum StateKind {
+    Idle,
+    Working,
+    ToolRunning,
+    Unknown,
+}
+
+impl SessionRow {
+    fn state_style(&self) -> Style {
+        match self.state_kind {
+            StateKind::Idle => Style::new().dim(),
+            StateKind::Working => Style::new().yellow(),
+            StateKind::ToolRunning => Style::new().cyan().bold(),
+            StateKind::Unknown => Style::new().dim(),
+        }
+    }
+}
+
+fn session_row(
     entry: &babel::babel_storage::SessionIndexEntry,
     conn: &rusqlite::Connection,
     now: i64,
-) -> Result<()> {
+) -> Result<SessionRow> {
     use babel::babel_storage::{get_metadata, HookState};
     use babel::AgentKind;
 
-    let dim = Style::new().dim();
-
     let agent_kind = AgentKind::from_slug(&entry.agent_kind);
     let accent = agent_kind.map(|k| k.accent_color()).unwrap_or("#666666");
-    let (r, g, b) = hex_to_rgb(accent).unwrap_or((102, 102, 102));
-
-    let harness_style = Style::new().color256(
-        closest_ansi256(r, g, b),
-    );
 
     let meta = get_metadata(conn, &entry.session_key).ok().flatten();
     let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
     let hook_state = meta.as_ref().map(|m| m.hook_state);
 
-    let (state_icon, state_style) = match hook_state {
-        Some(HookState::Idle) => ("○", Style::new().dim()),
-        Some(HookState::Working) => ("●", Style::new().yellow()),
-        Some(HookState::ToolRunning) => ("⚙", Style::new().cyan().bold()),
-        None => (" ", Style::new().dim()),
+    let (state_icon, state_kind) = match hook_state {
+        Some(HookState::Idle) => ("○", StateKind::Idle),
+        Some(HookState::Working) => ("●", StateKind::Working),
+        Some(HookState::ToolRunning) => ("⚙", StateKind::ToolRunning),
+        None => (" ", StateKind::Unknown),
     };
 
     let marker = if let Some(icon) = custom_icon {
@@ -1354,9 +1401,7 @@ fn print_session_index_entry(
         "  ".to_string()
     };
 
-    let harness_name = format!("{:<8}", entry.agent_kind);
-
-    let cwd_display = entry
+    let cwd = entry
         .project_path
         .as_deref()
         .and_then(|p| {
@@ -1368,45 +1413,37 @@ fn print_session_index_entry(
                 .or_else(|| Some(p.to_string()))
         })
         .unwrap_or_default();
-    let cwd_short = if cwd_display.len() > 30 {
-        format!("…{}", &cwd_display[cwd_display.len() - 28..])
-    } else {
-        cwd_display
-    };
 
     let raw_title = entry.display_name.as_deref().unwrap_or("");
-    let title = &raw_title.replace('\n', "↵").replace('\r', "");
-    let title_short: String = title.chars().take(40).collect();
-    let title_display = if title.chars().count() > 40 {
-        format!("{}…", title_short)
+    let sanitized = raw_title.replace('\n', "↵").replace('\r', "");
+    let title: String = if sanitized.chars().count() > 40 {
+        let short: String = sanitized.chars().take(40).collect();
+        format!("{}…", short)
     } else {
-        title_short
+        sanitized
     };
 
     let elapsed = now - entry.last_seen_at;
-    let time_str = format!("{:>7}", relative_time(elapsed));
+    let time = relative_time(elapsed);
 
-    print!(
-        " {}{}",
+    let resume_cmd = agent_kind.and_then(|k| k.spec().resume_command(&entry.native_id));
+
+    Ok(SessionRow {
         marker,
-        state_style.apply_to(state_icon),
-    );
-    print!(" {}", harness_style.apply_to(&harness_name));
-    print!(" {}  ", dim.apply_to(format!("{:<30}", cwd_short)));
-    print!("{} ", dim.apply_to(&time_str));
-    print!("{}", harness_style.apply_to(&title_display));
-
-    if let Some(cmd) = agent_kind.and_then(|k| k.spec().resume_command(&entry.native_id)) {
-        println!("  {}", dim.apply_to(&cmd));
-    } else {
-        println!();
-    }
-
-    Ok(())
+        state_icon,
+        state_kind,
+        harness: entry.agent_kind.clone(),
+        cwd,
+        time,
+        title,
+        resume_cmd,
+        accent,
+    })
 }
 
-/// Map RGB to closest ANSI 256-color index (216-color cube).
-fn closest_ansi256(r: u8, g: u8, b: u8) -> u8 {
+/// Map hex accent string to closest ANSI 256-color index.
+fn closest_ansi256_from_hex(hex: &str) -> u8 {
+    let (r, g, b) = hex_to_rgb(hex).unwrap_or((102, 102, 102));
     let ri = ((r as u16) * 5 / 255) as u8;
     let gi = ((g as u16) * 5 / 255) as u8;
     let bi = ((b as u16) * 5 / 255) as u8;
