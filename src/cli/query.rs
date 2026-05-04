@@ -1592,7 +1592,11 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
         .collect())
 }
 
-/// Scan Codex CLI's ~/.codex/history.jsonl + session_index.jsonl
+/// Scan Codex CLI sessions.
+///
+/// Primary: state_*.sqlite `threads` table (has cwd, title, timestamps).
+/// Enrichment: history.jsonl for turn counts and last_prompt text.
+/// Fallback: history.jsonl alone if no state DB found.
 fn scan_codex() -> Result<Vec<NativeSession>> {
     use std::io::{BufRead, BufReader};
 
@@ -1601,95 +1605,127 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
         return Ok(Vec::new());
     }
 
-    // Thread names from session_index.jsonl
-    #[derive(serde::Deserialize)]
-    struct ThreadEntry {
-        id: String,
-        thread_name: String,
+    // Accumulator for history.jsonl prompt data (turn count + last prompt)
+    struct PromptAcc {
+        first_text: String,
+        last_text: String,
+        turns: u32,
     }
-    let mut thread_names: std::collections::HashMap<String, String> =
+    let mut prompt_data: std::collections::HashMap<String, PromptAcc> =
         std::collections::HashMap::new();
-    let idx_path = codex_home.join("session_index.jsonl");
-    if idx_path.exists() {
-        if let Ok(file) = std::fs::File::open(&idx_path) {
-            for line in BufReader::new(file).lines().flatten() {
-                if let Ok(e) = serde_json::from_str::<ThreadEntry>(&line) {
-                    if !e.thread_name.is_empty() {
-                        thread_names.insert(e.id, e.thread_name);
-                    }
-                }
-            }
-        }
-    }
 
-    // Per-prompt entries from history.jsonl
     #[derive(serde::Deserialize)]
     struct HistEntry { session_id: String, ts: i64, text: String }
 
-    struct Acc {
-        first_text: String,
-        last_text: String,
-        first_ts: i64,
-        last_ts: i64,
-        turns: u32,
-    }
-
     let hist_path = codex_home.join("history.jsonl");
-    if !hist_path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut sessions: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
-
-    if let Ok(file) = std::fs::File::open(&hist_path) {
-        for line in BufReader::new(file).lines().flatten() {
-            if let Ok(e) = serde_json::from_str::<HistEntry>(&line) {
-                if e.session_id.is_empty() {
-                    continue;
-                }
-                sessions
-                    .entry(e.session_id)
-                    .and_modify(|acc| {
-                        if e.ts < acc.first_ts {
-                            acc.first_ts = e.ts;
-                            acc.first_text = truncate_str(&e.text, 100);
-                        }
-                        if e.ts >= acc.last_ts {
-                            acc.last_ts = e.ts;
+    if hist_path.exists() {
+        if let Ok(file) = std::fs::File::open(&hist_path) {
+            for line in BufReader::new(file).lines().flatten() {
+                if let Ok(e) = serde_json::from_str::<HistEntry>(&line) {
+                    if e.session_id.is_empty() {
+                        continue;
+                    }
+                    prompt_data
+                        .entry(e.session_id)
+                        .and_modify(|acc| {
                             acc.last_text = truncate_str(&e.text, 100);
-                        }
-                        acc.turns += 1;
-                    })
-                    .or_insert(Acc {
-                        first_text: truncate_str(&e.text, 100),
-                        last_text: truncate_str(&e.text, 100),
-                        first_ts: e.ts,
-                        last_ts: e.ts,
-                        turns: 1,
-                    });
+                            acc.turns += 1;
+                        })
+                        .or_insert(PromptAcc {
+                            first_text: truncate_str(&e.text, 100),
+                            last_text: truncate_str(&e.text, 100),
+                            turns: 1,
+                        });
+                }
             }
         }
     }
 
-    Ok(sessions
-        .into_iter()
-        .map(|(sid, acc)| {
-            let display = thread_names.get(&sid).cloned().unwrap_or(acc.first_text);
-            NativeSession {
-                agent_kind: babel::AgentKind::Codex,
-                native_id: sid,
-                project_path: None,
-                display_name: Some(display),
-                last_prompt: if acc.turns > 1 {
-                    Some(acc.last_text)
-                } else {
-                    None
-                },
-                turn_count: acc.turns,
-                last_seen_at: acc.last_ts,
+    // Try state DB (has cwd, title, timestamps for all threads)
+    let state_db = find_codex_state_db(&codex_home);
+    if let Some(db_path) = state_db {
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            let mut stmt = conn.prepare(
+                "SELECT id, cwd, title, first_user_message, updated_at
+                 FROM threads
+                 WHERE archived = 0
+                 ORDER BY updated_at DESC",
+            )?;
+
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+
+            let mut out = Vec::new();
+            for row in rows.flatten() {
+                let (id, cwd, title, first_msg, updated_at) = row;
+                let prompts = prompt_data.remove(&id);
+                let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
+
+                let display_name = title
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| first_msg.filter(|m| !m.is_empty()))
+                    .or_else(|| prompts.as_ref().map(|p| p.first_text.clone()));
+
+                let last_prompt = prompts.and_then(|p| {
+                    if p.turns > 1 { Some(p.last_text) } else { None }
+                });
+
+                out.push(NativeSession {
+                    agent_kind: babel::AgentKind::Codex,
+                    native_id: id,
+                    project_path: cwd,
+                    display_name,
+                    last_prompt,
+                    turn_count,
+                    last_seen_at: updated_at,
+                });
             }
+            return Ok(out);
+        }
+    }
+
+    // Fallback: history.jsonl only (no cwd, but at least we show something)
+    Ok(prompt_data
+        .into_iter()
+        .map(|(sid, acc)| NativeSession {
+            agent_kind: babel::AgentKind::Codex,
+            native_id: sid,
+            project_path: None,
+            display_name: Some(acc.first_text),
+            last_prompt: if acc.turns > 1 { Some(acc.last_text) } else { None },
+            turn_count: acc.turns,
+            last_seen_at: 0,
         })
         .collect())
+}
+
+/// Find the most recent Codex state DB (state_*.sqlite).
+fn find_codex_state_db(codex_home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(codex_home)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?;
+            if name.starts_with("state_") && name.ends_with(".sqlite") {
+                Some(e.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort();
+    candidates.pop()
 }
 
 /// Scan Gemini CLI's ~/.gemini/tmp/<project>/chats/
