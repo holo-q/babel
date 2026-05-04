@@ -196,7 +196,7 @@ These harnesses do not meet the orchestration bar. Babel should not contort itse
 
 These projects are prior art and reference material. Babel's direction is to consume the useful jutsus into one harness-aware system: move, resume, handoff, search, archive, migration, bridge contracts, and verification. Once absorbed, they are deprecated as standalone answers for this stack, not dismissed as bad work.
 
-Local clones live under ignored `references/` when doing adapter work. The clones are a research board, not vendored code; durable conclusions belong in `Docs/18-harness-operations-board.md`, the harness roster, tests, or adapter comments.
+Local clones live under ignored `references/` when doing adapter work. The clones are a research board, not vendored code; durable conclusions belong in `docs/18-harness-operations-board.md`, the harness roster, tests, or adapter comments.
 
 | Project | Link | Jutsus to consume |
 | --- | --- | --- |
@@ -260,7 +260,7 @@ Parses Claude's JSONL conversation format:
 
 ### In Progress
 - [ ] Simplified prompt representations via Haiku summarization (40%)
-- [ ] Conversation pager TUI (spec in Docs/17-conversation-pager-spec.md)
+- [ ] Conversation pager TUI (spec in docs/17-conversation-pager-spec.md)
 
 ### Planned
 - [ ] Launch agents with workspace context (ambient awareness)

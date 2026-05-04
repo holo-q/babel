@@ -218,7 +218,7 @@ Your task: optimize Claude's ability to work, not the project itself.
 
 1. **Flow friction** - Where did the worker struggle, loop, or lose momentum?
 2. **Pattern emergence** - What recurring operations could be hotwired into tooling?
-3. **Missing scaffolding** - Should this workflow be documented in `Docs/`?
+3. **Missing scaffolding** - Should this workflow be documented in `docs/`?
 4. **CLAUDE.md gaps** - What should the worker have known but didn't?
 5. **Cognitive waste** - Repeated reasoning that could become instant field transmission
 

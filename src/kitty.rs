@@ -7,7 +7,7 @@
 //!
 //! Kitty creates sockets at `$XDG_RUNTIME_DIR/kitty.sock-$PID` (NOT `kitty.sock` despite config).
 //! Each socket is a gateway to a tower of vessels, each capable of holding a working mind.
-//! See `Docs/15-kitty-single-instance-protocol.md` for details.
+//! See `docs/15-kitty-single-instance-protocol.md` for details.
 //!
 //! ## Multi-Instance Support
 //!

@@ -1,7 +1,7 @@
 # Harness Operations Board
 
 This is the entry point for Babel's harness-operation research and migration
-contract. The detailed pages live in `Docs/18-harness-operations/` so ripmap,
+contract. The detailed pages live in `docs/18-harness-operations/` so ripmap,
 grep, and future report indexing can land on a narrow document instead of one
 long mixed board.
 

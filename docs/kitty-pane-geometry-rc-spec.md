@@ -73,7 +73,7 @@ Only captures OS window geometry via `xdotool`. Split layouts inside the window 
 
 **Desired**: Save individual pane positions to restore exact split configurations.
 
-### 3. Conversation Pager Overlay (Docs/17-conversation-pager-spec.md)
+### 3. Conversation Pager Overlay (docs/17-conversation-pager-spec.md)
 
 The planned babel pager needs to draw overlays at exact pane locations. Without pixel coordinates, can't position overlays correctly.
 
