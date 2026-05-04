@@ -359,4 +359,4 @@ pub async fn cmd_pager(core: &BabelCore, window_id: u64, select: bool) -> Result
 - [OpenAI Codex CLI](https://github.com/openai/codex) - TUI patterns, MIT license
 - [ratatui](https://github.com/ratatui-org/ratatui) - TUI framework
 - scrollparse existing code at `/home/nuck/Workspace/Tools/scrollparse/`
-- babel TUI at `/home/nuck/Workspace/Daemons/claude-babel/src/tui/`
+- babel TUI at `/home/nuck/Workspace/Daemons/babel/src/tui/`

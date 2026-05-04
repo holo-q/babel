@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implemented a complete Rust wrapper for kitty's remote control protocol in `/home/nuck/Workspace/Plugins/claude-babel/src/kitty.rs`.
+Implemented a complete Rust wrapper for kitty's remote control protocol in `/home/nuck/Workspace/Plugins/babel/src/kitty.rs`.
 
 ## Architecture
 
@@ -106,7 +106,7 @@ Tests verify:
 ## Example Usage
 
 ```rust
-use claude_babel::kitty;
+use babel::kitty;
 
 // Find all claude sessions
 let sessions = kitty::find_claude_windows()?;

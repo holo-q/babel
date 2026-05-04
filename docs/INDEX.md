@@ -1,4 +1,4 @@
-# claude-babel Documentation Index
+# babel Documentation Index
 
 ## Research Reports
 
@@ -64,7 +64,7 @@
 ### List all kitty instances
 
 ```bash
-/home/nuck/Workspace/Daemons/claude-babel/tools/kitty-instances.sh list
+/home/nuck/Workspace/Daemons/babel/tools/kitty-instances.sh list
 ```
 
 ### Spawn window in specific instance
@@ -76,22 +76,22 @@ kitty @ --to unix:/run/user/1000/kitty.sock-{PID} launch --title "Test" bash
 ### Test cross-instance spawning
 
 ```bash
-/home/nuck/Workspace/Daemons/claude-babel/tools/test-cross-instance-spawn.sh
+/home/nuck/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh
 ```
 
 ### Read the quick reference
 
 ```bash
-cat /home/nuck/Workspace/Daemons/claude-babel/docs/kitty-routing-quick-reference.md
+cat /home/nuck/Workspace/Daemons/babel/docs/kitty-routing-quick-reference.md
 ```
 
 ## Integration Roadmap
 
-See **`RESEARCH-FINDINGS.md`** section "Next Steps for claude-babel" for detailed integration phases.
+See **`RESEARCH-FINDINGS.md`** section "Next Steps for babel" for detailed integration phases.
 
 ### Phase 1: Socket Storage
 - Store daemon's `KITTY_LISTEN_ON` on startup
-- Write to `/run/user/1000/claude-babel-kitty.sock`
+- Write to `/run/user/1000/babel-kitty.sock`
 
 ### Phase 2: Routing Module
 - Create `src/utility/kitty.rs`
@@ -105,7 +105,7 @@ See **`RESEARCH-FINDINGS.md`** section "Next Steps for claude-babel" for detaile
 ## File Tree
 
 ```
-/home/nuck/Workspace/Daemons/claude-babel/
+/home/nuck/Workspace/Daemons/babel/
 ├── RESEARCH-FINDINGS.md          # Executive summary
 ├── docs/
 │   ├── INDEX.md                  # This file
@@ -149,14 +149,14 @@ Or started with: `kitty -o allow_remote_control=yes`
 ### Spawn window in daemon's instance
 
 ```bash
-daemon_sock=$(cat /run/user/1000/claude-babel-kitty.sock)
+daemon_sock=$(cat /run/user/1000/babel-kitty.sock)
 kitty @ --to "$daemon_sock" launch --title "Output" tail -f log.txt
 ```
 
 ### Check if daemon socket is alive
 
 ```bash
-daemon_sock=$(cat /run/user/1000/claude-babel-kitty.sock)
+daemon_sock=$(cat /run/user/1000/babel-kitty.sock)
 if kitty @ --to "$daemon_sock" ls &>/dev/null; then
     echo "Daemon kitty is alive"
 fi
@@ -165,8 +165,8 @@ fi
 ### Fallback to local instance
 
 ```bash
-if [[ -f /run/user/1000/claude-babel-kitty.sock ]]; then
-    sock=$(cat /run/user/1000/claude-babel-kitty.sock)
+if [[ -f /run/user/1000/babel-kitty.sock ]]; then
+    sock=$(cat /run/user/1000/babel-kitty.sock)
     kitty @ --to "$sock" launch ...
 else
     kitty @ launch ...  # Local fallback

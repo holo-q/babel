@@ -2,7 +2,7 @@
 
 > **Status**: Design
 > **Target**: kitty fork patch
-> **Requester**: claude-babel
+> **Requester**: babel
 
 ## Executive Summary
 
@@ -44,7 +44,7 @@ self.geometry: WindowGeometry = WindowGeometry(0, 0, 0, 0, 0, 0)
 
 The gap: `as_dict()` at line 1946 only returns `lines`/`columns`, not the geometry.
 
-## Use Cases from claude-babel
+## Use Cases from babel
 
 ### 1. Screen Position Sorting
 
@@ -209,7 +209,7 @@ This should be computed in Python (not C) to avoid platform-specific code in the
 2. Compute `screen` by combining OS window pos + pane geometry
 3. Handle multi-monitor coordinate systems
 
-### Phase 3: Update claude-babel
+### Phase 3: Update babel
 
 1. Update `RawWindow` struct to parse new geometry fields
 2. Use `screen.x`, `screen.y` for sorting instead of xdotool calls
@@ -240,5 +240,5 @@ kitten @ ls | jq '.[0].tabs[0].windows[].geometry'
 - kitty/window.py:732 - geometry storage
 - kitty/window.py:947 - set_geometry()
 - kitty/window.py:1946 - as_dict() to modify
-- claude-babel/src/kitty.rs - consumer code
-- claude-babel/src/daemon.rs:1989 - sort_by_screen_position
+- babel/src/kitty.rs - consumer code
+- babel/src/daemon.rs:1989 - sort_by_screen_position

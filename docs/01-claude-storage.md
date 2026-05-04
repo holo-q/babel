@@ -78,7 +78,7 @@ Integration test (`examples/test_storage.rs`) successfully:
 - **Recent sessions**: O(m) where m = history.jsonl size (deduplicated)
 - **Summary search**: O(p×s) where p=projects, s=sessions (but fast due to early termination)
 
-## Integration with claude-babel
+## Integration with babel
 
 This module provides the foundation for:
 1. **Session discovery** - Match kitty windows to Claude sessions
@@ -88,9 +88,9 @@ This module provides the foundation for:
 
 ## Files Modified
 
-- `/home/nuck/Workspace/Plugins/claude-babel/src/claude_storage.rs` - Complete rewrite
-- `/home/nuck/Workspace/Plugins/claude-babel/src/discovery.rs` - Updated to use `SessionInfo` instead of old SQLite types
-- `/home/nuck/Workspace/Plugins/claude-babel/examples/test_storage.rs` - Integration test
+- `/home/nuck/Workspace/Plugins/babel/src/claude_storage.rs` - Complete rewrite
+- `/home/nuck/Workspace/Plugins/babel/src/discovery.rs` - Updated to use `SessionInfo` instead of old SQLite types
+- `/home/nuck/Workspace/Plugins/babel/examples/test_storage.rs` - Integration test
 
 ## Future Enhancements
 

@@ -2,9 +2,9 @@
 
 ## Summary
 
-The `events.rs` module has been successfully created and provides a complete pub/sub event notification system for claude-babel. The module compiles cleanly and includes comprehensive tests.
+The `events.rs` module has been successfully created and provides a complete pub/sub event notification system for babel. The module compiles cleanly and includes comprehensive tests.
 
-**Location**: `/home/nuck/Workspace/Plugins/claude-babel/src/events.rs`
+**Location**: `/home/nuck/Workspace/Plugins/babel/src/events.rs`
 
 ## Status
 
@@ -76,7 +76,7 @@ async fn handle_subscribe(state: Arc<DaemonState>) -> Result<()> {
 ### Usage in GUI Clients (treasure-panel)
 
 ```rust
-use claude_babel::events::{EventMessage, EventFilter};
+use babel::events::{EventMessage, EventFilter};
 
 // Connect to daemon and request event stream
 let stream = connect_to_daemon().await?;
@@ -289,10 +289,10 @@ pub struct EventMetrics {
 
 ## Related Files
 
-- `/home/nuck/Workspace/Plugins/claude-babel/src/events.rs` - This module
-- `/home/nuck/Workspace/Plugins/claude-babel/src/daemon.rs` - Already imports events
-- `/home/nuck/Workspace/Plugins/claude-babel/src/ipc.rs` - Already imports EventMessage
-- `/home/nuck/Workspace/Plugins/claude-babel/src/lib.rs` - Module registered
+- `/home/nuck/Workspace/Plugins/babel/src/events.rs` - This module
+- `/home/nuck/Workspace/Plugins/babel/src/daemon.rs` - Already imports events
+- `/home/nuck/Workspace/Plugins/babel/src/ipc.rs` - Already imports EventMessage
+- `/home/nuck/Workspace/Plugins/babel/src/lib.rs` - Module registered
 - `Cargo.toml` - Dependencies satisfied (chrono, tokio, serde)
 
 ## Notes

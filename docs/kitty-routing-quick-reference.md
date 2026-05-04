@@ -68,21 +68,21 @@ When `kitty @` resolves which instance to target:
 2. **`KITTY_LISTEN_ON` env var** ← set by parent instance
 3. **Controlling terminal** ← only works inside kitty window
 
-## claude-babel Integration Pattern
+## babel Integration Pattern
 
 ### 1. Store Daemon's Kitty Socket on Startup
 
 ```rust
 // On daemon startup (inside kitty window)
 let socket = std::env::var("KITTY_LISTEN_ON")?;
-std::fs::write("/run/user/1000/claude-babel-kitty.sock", socket)?;
+std::fs::write("/run/user/1000/babel-kitty.sock", socket)?;
 ```
 
 ### 2. Route Windows to Daemon's Instance
 
 ```rust
 fn spawn_in_daemon_kitty(cmd: &str) -> Result<()> {
-    let socket = std::fs::read_to_string("/run/user/1000/claude-babel-kitty.sock")?;
+    let socket = std::fs::read_to_string("/run/user/1000/babel-kitty.sock")?;
 
     Command::new("kitty")
         .args(&["@", "--to", &socket, "launch"])
@@ -98,7 +98,7 @@ fn spawn_in_daemon_kitty(cmd: &str) -> Result<()> {
 
 ```rust
 fn spawn_window_with_fallback(cmd: &str) -> Result<()> {
-    let daemon_socket = std::fs::read_to_string("/run/user/1000/claude-babel-kitty.sock")
+    let daemon_socket = std::fs::read_to_string("/run/user/1000/babel-kitty.sock")
         .ok();
 
     let mut launch = Command::new("kitty");
@@ -219,6 +219,6 @@ remote_control_password "secret" launch close-window
 
 ## References
 
-- Full documentation: `/home/nuck/Workspace/Daemons/claude-babel/docs/kitty-cross-instance-spawning.md`
-- Test script: `/home/nuck/Workspace/Daemons/claude-babel/tools/test-cross-instance-spawn.sh`
+- Full documentation: `/home/nuck/Workspace/Daemons/babel/docs/kitty-cross-instance-spawning.md`
+- Test script: `/home/nuck/Workspace/Daemons/babel/tools/test-cross-instance-spawn.sh`
 - Kitty docs: https://sw.kovidgoyal.net/kitty/remote-control/

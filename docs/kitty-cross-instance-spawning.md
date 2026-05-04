@@ -218,7 +218,7 @@ kitty @ --to unix:/run/user/1000/kitty.sock-5678 launch bash
 
 This is correct behavior—nested `kitty @` calls target the parent instance.
 
-## Integration with claude-babel
+## Integration with babel
 
 ### Routing Windows to Daemon's Kitty Instance
 
@@ -240,10 +240,10 @@ Store the daemon's PID and derive the socket:
 
 ```bash
 # On daemon startup
-echo $KITTY_PID > /run/user/1000/claude-babel-kitty.pid
+echo $KITTY_PID > /run/user/1000/babel-kitty.pid
 
 # When routing
-daemon_pid=$(cat /run/user/1000/claude-babel-kitty.pid)
+daemon_pid=$(cat /run/user/1000/babel-kitty.pid)
 daemon_sock="unix:/run/user/1000/kitty.sock-$daemon_pid"
 kitty @ --to "$daemon_sock" launch ...
 ```

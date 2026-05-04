@@ -65,19 +65,19 @@
 
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    claude-babel Integration Pattern                         │
+│                    babel Integration Pattern                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 
     Daemon Startup                      Window Spawn Request
     ┌──────────────┐                    ┌──────────────────┐
-    │ claude-babel │                    │  CLI Client      │
+    │ babel │                    │  CLI Client      │
     │   daemon     │                    │  (any terminal)  │
     └──────┬───────┘                    └────────┬─────────┘
            │                                     │
            │ Store socket path                  │ Read socket path
            ▼                                     ▼
     /run/user/1000/                      /run/user/1000/
-    claude-babel-kitty.sock              claude-babel-kitty.sock
+    babel-kitty.sock              babel-kitty.sock
     ────────────────────────             ────────────────────────
     unix:/run/user/1000/                 unix:/run/user/1000/
     kitty.sock-9999                      kitty.sock-9999
@@ -225,7 +225,7 @@
 
     Phase 1: Storage
     ☐ Store daemon's KITTY_LISTEN_ON on startup
-    ☐ Write to /run/user/1000/claude-babel-kitty.sock
+    ☐ Write to /run/user/1000/babel-kitty.sock
 
     Phase 2: Routing
     ☐ Create src/utility/kitty.rs module
@@ -249,7 +249,7 @@
 │                           Tools Provided                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    /home/nuck/Workspace/Daemons/claude-babel/tools/
+    /home/nuck/Workspace/Daemons/babel/tools/
 
     • test-cross-instance-spawn.sh
       Automated test suite for cross-instance spawning
@@ -263,7 +263,7 @@
 │                         Documentation Files                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-    /home/nuck/Workspace/Daemons/claude-babel/docs/
+    /home/nuck/Workspace/Daemons/babel/docs/
 
     • kitty-cross-instance-spawning.md
       Comprehensive research report with examples and edge cases
