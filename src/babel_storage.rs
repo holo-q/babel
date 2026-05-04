@@ -94,6 +94,9 @@ pub struct SessionMetadata {
     /// When the last hook fired (unix timestamp)
     /// The pulse of the neural link—when did we last hear from this worker?
     pub last_hook_at: Option<i64>,
+
+    /// Last workspace number where this session's pane was seen.
+    pub last_workspace: Option<i32>,
 }
 
 /// Cross-harness session registry entry.
@@ -324,6 +327,18 @@ impl BabelStorage {
             tracing::info!("Migrated session_metadata: added hook_state and last_hook_at columns");
         }
 
+        let has_workspace: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_metadata') WHERE name='last_workspace'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+        if !has_workspace {
+            self.conn.execute(
+                "ALTER TABLE session_metadata ADD COLUMN last_workspace INTEGER",
+                [],
+            ).context("Failed to add last_workspace column")?;
+        }
+
         Ok(())
     }
 
@@ -334,7 +349,7 @@ impl BabelStorage {
     /// the user hasn't interacted with overlay features yet.
     pub fn get_metadata(&self, session_id: &str) -> Result<Option<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
              FROM session_metadata
              WHERE session_id = ?1",
         )?;
@@ -357,11 +372,12 @@ impl BabelStorage {
             Ok(Some(SessionMetadata {
                 session_id: row.get(0)?,
                 icon: row.get(1)?,
-                is_read: row.get::<_, i32>(2)? != 0, // SQLite INTEGER to bool
+                is_read: row.get::<_, i32>(2)? != 0,
                 chapter_history,
                 notes: row.get(4)?,
                 hook_state,
                 last_hook_at: row.get(6)?,
+                last_workspace: row.get(7)?,
             }))
         } else {
             Ok(None)
@@ -772,7 +788,7 @@ impl BabelStorage {
     /// - Backup/export of the tower's institutional knowledge
     pub fn list_all(&self) -> Result<Vec<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
              FROM session_metadata
              ORDER BY session_id",
         )?;
@@ -798,6 +814,7 @@ impl BabelStorage {
                 notes: row.get(4)?,
                 hook_state,
                 last_hook_at: row.get(6)?,
+                last_workspace: row.get(7)?,
             })
         })?;
 
@@ -833,7 +850,7 @@ pub fn init_db() -> Result<Connection> {
 /// Get metadata for a session (standalone function)
 pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<SessionMetadata>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at
+        "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
          FROM session_metadata
          WHERE session_id = ?1",
     )?;
@@ -861,6 +878,7 @@ pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<Sessio
             notes: row.get(4)?,
             hook_state,
             last_hook_at: row.get(6)?,
+            last_workspace: row.get(7)?,
         }))
     } else {
         Ok(None)
@@ -900,6 +918,18 @@ pub fn mark_unread(conn: &Connection, session_id: &str) -> Result<()> {
         params![session_id],
     )
     .context("Failed to mark session as unread")?;
+    Ok(())
+}
+
+/// Record the workspace where this session's pane was last seen.
+pub fn set_last_workspace(conn: &Connection, session_id: &str, workspace: i32) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_metadata (session_id, last_workspace)
+         VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET last_workspace = ?2",
+        params![session_id, workspace],
+    )
+    .context("Failed to set last workspace")?;
     Ok(())
 }
 

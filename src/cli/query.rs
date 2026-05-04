@@ -1280,6 +1280,7 @@ pub async fn cmd_ls_sessions(
 
     // Pass 2: measure column widths
     let w_harness = rows.iter().map(|r| r.harness.len()).max().unwrap_or(0);
+    let w_ws = rows.iter().map(|r| r.workspace.len()).max().unwrap_or(0);
     let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
     let w_time = rows.iter().map(|r| r.time.len()).max().unwrap_or(0);
     let w_turns = rows.iter().map(|r| r.turns.len()).max().unwrap_or(0);
@@ -1293,6 +1294,9 @@ pub async fn cmd_ls_sessions(
 
         print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
+        if w_ws > 0 {
+            print!("  {:>w_ws$}", dim.apply_to(&row.workspace));
+        }
         print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
         print!("  {:>w_time$}", dim.apply_to(&row.time));
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
@@ -1397,6 +1401,7 @@ struct SessionRow {
     state_icon: &'static str,
     state_kind: StateKind,
     harness: String,
+    workspace: String,
     cwd: String,
     time: String,
     turns: String,
@@ -1477,6 +1482,12 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         String::new()
     };
 
+    let workspace = meta
+        .as_ref()
+        .and_then(|m| m.last_workspace)
+        .map(|ws| format!("{}", ws + 1)) // 0-indexed → 1-indexed
+        .unwrap_or_default();
+
     let elapsed = now - s.last_seen_at;
     let time = relative_time(elapsed);
     let resume_cmd = s.agent_kind.spec().resume_command(&s.native_id);
@@ -1486,6 +1497,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         state_icon,
         state_kind,
         harness: s.agent_kind.slug().to_string(),
+        workspace,
         cwd,
         time,
         turns,

@@ -14,7 +14,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tracing::{debug, info, warn};
 
-use babel::babel_storage::{init_db, mark_read, mark_unread, set_hook_state, HookState};
+use babel::babel_storage::{
+    init_db, mark_read, mark_unread, set_hook_state, set_last_workspace, HookState,
+};
 use babel::ipc::Request;
 use babel::kitty::{
     default_socket, reset_border_color_on_socket, set_border_color_on_socket, PaneAddr,
@@ -179,6 +181,19 @@ async fn execute_hook_flow(
         if let Ok(conn) = init_db() {
             if let Err(e) = set_hook_state(&conn, session, state) {
                 warn!(session, error = %e, "Failed to set hook state");
+            }
+        }
+    }
+
+    // Persist workspace on session boundaries (cheap enough for start/stop)
+    if matches!(event.canonical, "session-start" | "stop" | "prompt") {
+        if let Some(addr) = pane_addr.as_ref() {
+            if let Ok(Some(pane)) = babel::kitty::get_window(addr.id).await {
+                if let Some(ws) = pane.workspace() {
+                    if let Ok(conn) = init_db() {
+                        let _ = set_last_workspace(&conn, session, ws);
+                    }
+                }
             }
         }
     }
