@@ -1172,10 +1172,29 @@ async fn resolve_plan_target(core: &BabelCore, target: &str) -> Result<String> {
 // Session Index — Cross-Harness Session Listing
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ls-sessions — Direct-Read Cross-Harness Session Listing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A session discovered from native harness storage.
+///
+/// This is a read-through view — no caching, no DB. Each harness scanner reads
+/// its native storage and returns these. The overlay DB (session_metadata) is
+/// only consulted for babel's own runtime state (hook_state, icon, is_read).
+struct NativeSession {
+    agent_kind: babel::AgentKind,
+    native_id: String,
+    project_path: Option<String>,
+    display_name: Option<String>,
+    last_prompt: Option<String>,
+    turn_count: u32,
+    last_seen_at: i64,
+}
+
 /// List all known sessions across all harnesses.
 ///
-/// Queries the session_index table, triggering a lazy backfill from native
-/// harness storage on first invocation (when the index is empty).
+/// Reads native storage directly per harness, merges, sorts by recency,
+/// and joins with session_metadata for overlay enrichment (hook_state, icon, is_read).
 #[instrument(level = "debug", skip(_core))]
 pub async fn cmd_ls_sessions(
     _core: &BabelCore,
@@ -1183,40 +1202,56 @@ pub async fn cmd_ls_sessions(
     kind: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    use babel::babel_storage::BabelStorage;
+    let mut sessions = Vec::new();
 
-    let db = BabelStorage::open().context("Failed to open babel storage")?;
+    let kind_filter = kind.and_then(babel::AgentKind::from_slug);
 
-    if db.session_index_count(None)? == 0 {
-        backfill_session_index(&db)?;
+    if kind_filter.is_none() || kind_filter == Some(babel::AgentKind::Claude) {
+        sessions.extend(scan_claude().unwrap_or_default());
+    }
+    if kind_filter.is_none() || kind_filter == Some(babel::AgentKind::Codex) {
+        sessions.extend(scan_codex().unwrap_or_default());
+    }
+    if kind_filter.is_none() || kind_filter == Some(babel::AgentKind::Gemini) {
+        sessions.extend(scan_gemini().unwrap_or_default());
+    }
+    if kind_filter.is_none() || kind_filter == Some(babel::AgentKind::Kimi) {
+        sessions.extend(scan_kimi().unwrap_or_default());
     }
 
-    let entries = db.query_session_index(count, kind)?;
+    sessions.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+    let total = sessions.len();
+    sessions.truncate(count);
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        let json_out: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "agent_kind": s.agent_kind.slug(),
+                    "native_id": s.native_id,
+                    "project_path": s.project_path,
+                    "display_name": s.display_name,
+                    "last_prompt": s.last_prompt,
+                    "turn_count": s.turn_count,
+                    "last_seen_at": s.last_seen_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
         return Ok(());
     }
 
-    if entries.is_empty() {
+    if sessions.is_empty() {
         if kind.is_some() {
             println!("No sessions found for harness {:?}", kind.unwrap());
         } else {
             println!("No sessions found");
         }
-        println!();
-        println!(
-            "{}",
-            Style::new().dim().apply_to(
-                "Sessions appear here via hooks (live) or backfill (historical).\n\
-                 Run `babel hook install` to set up hooks for your harnesses."
-            )
-        );
         return Ok(());
     }
 
-    let total = db.session_index_count(kind)?;
-    let showing = entries.len();
+    let showing = sessions.len();
     let dim = Style::new().dim();
 
     if let Some(k) = kind {
@@ -1237,17 +1272,19 @@ pub async fn cmd_ls_sessions(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // Pass 1: compute display cells for each row
-    let rows: Vec<SessionRow> = entries
+    // Pass 1: compute display cells
+    let rows: Vec<SessionRow> = sessions
         .iter()
-        .map(|e| session_row(e, &conn, now))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|s| session_row(s, &conn, now))
+        .collect();
 
     // Pass 2: measure column widths
     let w_harness = rows.iter().map(|r| r.harness.len()).max().unwrap_or(0);
     let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
     let w_time = rows.iter().map(|r| r.time.len()).max().unwrap_or(0);
+    let w_turns = rows.iter().map(|r| r.turns.len()).max().unwrap_or(0);
     let w_title = rows.iter().map(|r| r.title.chars().count()).max().unwrap_or(0);
+    let w_prompt = rows.iter().map(|r| r.last_prompt.chars().count()).max().unwrap_or(0);
 
     // Pass 3: print
     for row in &rows {
@@ -1258,8 +1295,13 @@ pub async fn cmd_ls_sessions(
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
         print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
         print!("  {:>w_time$}", dim.apply_to(&row.time));
-        let pad = w_title - row.title.chars().count();
-        print!("  {}{}", harness_style.apply_to(&row.title), " ".repeat(pad));
+        print!("  {:>w_turns$}", dim.apply_to(&row.turns));
+        let tpad = w_title - row.title.chars().count();
+        print!("  {}{}", harness_style.apply_to(&row.title), " ".repeat(tpad));
+        if w_prompt > 0 {
+            let ppad = w_prompt - row.last_prompt.chars().count();
+            print!("  {}{}", dim.apply_to(&row.last_prompt), " ".repeat(ppad));
+        }
         if let Some(ref cmd) = row.resume_cmd {
             println!("  {}", dim.apply_to(cmd));
         } else {
@@ -1268,26 +1310,21 @@ pub async fn cmd_ls_sessions(
     }
 
     println!();
-    let n_kinds = count_distinct_kinds(&entries);
+    let mut kinds = std::collections::HashSet::new();
+    for s in &sessions {
+        kinds.insert(s.agent_kind);
+    }
     println!(
         "{}",
         dim.apply_to(format!(
             "  {} total across {} harness{}",
-            db.session_index_count(None)?,
-            n_kinds,
-            if n_kinds == 1 { "" } else { "es" }
+            total,
+            kinds.len(),
+            if kinds.len() == 1 { "" } else { "es" }
         ))
     );
 
     Ok(())
-}
-
-fn count_distinct_kinds(entries: &[babel::babel_storage::SessionIndexEntry]) -> usize {
-    let mut kinds = std::collections::HashSet::new();
-    for e in entries {
-        kinds.insert(&e.agent_kind);
-    }
-    kinds.len()
 }
 
 /// Truncate a string at a char boundary.
@@ -1302,31 +1339,39 @@ fn truncate_str(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// Format relative time from seconds ago.
+fn sanitize_display(s: &str, max_chars: usize) -> String {
+    let clean = s.replace('\n', "↵").replace('\r', "");
+    if clean.chars().count() > max_chars {
+        let short: String = clean.chars().take(max_chars).collect();
+        format!("{}…", short)
+    } else {
+        clean
+    }
+}
+
 fn relative_time(seconds_ago: i64) -> String {
     if seconds_ago < 0 {
-        return "just now".to_string();
+        return "now".to_string();
     }
     if seconds_ago < 60 {
-        return format!("{}s ago", seconds_ago);
+        return format!("{}s", seconds_ago);
     }
     let minutes = seconds_ago / 60;
     if minutes < 60 {
-        return format!("{}m ago", minutes);
+        return format!("{}m", minutes);
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return format!("{}h ago", hours);
+        return format!("{}h", hours);
     }
     let days = hours / 24;
     if days < 30 {
-        return format!("{}d ago", days);
+        return format!("{}d", days);
     }
     let months = days / 30;
-    format!("{}mo ago", months)
+    format!("{}mo", months)
 }
 
-/// Parse a hex accent color to RGB.
 fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let hex = hex.strip_prefix('#')?;
     if hex.len() != 6 {
@@ -1338,6 +1383,14 @@ fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+fn closest_ansi256_from_hex(hex: &str) -> u8 {
+    let (r, g, b) = hex_to_rgb(hex).unwrap_or((102, 102, 102));
+    let ri = ((r as u16) * 5 / 255) as u8;
+    let gi = ((g as u16) * 5 / 255) as u8;
+    let bi = ((b as u16) * 5 / 255) as u8;
+    16 + 36 * ri + 6 * gi + bi
+}
+
 /// Precomputed display cells for one session row.
 struct SessionRow {
     marker: String,
@@ -1346,18 +1399,15 @@ struct SessionRow {
     harness: String,
     cwd: String,
     time: String,
+    turns: String,
     title: String,
+    last_prompt: String,
     resume_cmd: Option<String>,
     accent: &'static str,
 }
 
 #[derive(Clone, Copy)]
-enum StateKind {
-    Idle,
-    Working,
-    ToolRunning,
-    Unknown,
-}
+enum StateKind { Idle, Working, ToolRunning, Unknown }
 
 impl SessionRow {
     fn state_style(&self) -> Style {
@@ -1370,18 +1420,13 @@ impl SessionRow {
     }
 }
 
-fn session_row(
-    entry: &babel::babel_storage::SessionIndexEntry,
-    conn: &rusqlite::Connection,
-    now: i64,
-) -> Result<SessionRow> {
+fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> SessionRow {
     use babel::babel_storage::{get_metadata, HookState};
-    use babel::AgentKind;
 
-    let agent_kind = AgentKind::from_slug(&entry.agent_kind);
-    let accent = agent_kind.map(|k| k.accent_color()).unwrap_or("#666666");
+    let accent = s.agent_kind.accent_color();
+    let session_key = s.agent_kind.session_key(&s.native_id);
 
-    let meta = get_metadata(conn, &entry.session_key).ok().flatten();
+    let meta = get_metadata(conn, &session_key).ok().flatten();
     let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
     let hook_state = meta.as_ref().map(|m| m.hook_state);
@@ -1401,101 +1446,76 @@ fn session_row(
         "  ".to_string()
     };
 
-    let cwd = entry
+    let cwd = s
         .project_path
         .as_deref()
         .and_then(|p| {
             let home = dirs::home_dir()?;
-            let path = std::path::Path::new(p);
-            path.strip_prefix(&home)
+            std::path::Path::new(p)
+                .strip_prefix(&home)
                 .ok()
                 .map(|rel| format!("~/{}", rel.display()))
                 .or_else(|| Some(p.to_string()))
         })
         .unwrap_or_default();
 
-    let raw_title = entry.display_name.as_deref().unwrap_or("");
-    let sanitized = raw_title.replace('\n', "↵").replace('\r', "");
-    let title: String = if sanitized.chars().count() > 40 {
-        let short: String = sanitized.chars().take(40).collect();
-        format!("{}…", short)
+    let title = s
+        .display_name
+        .as_deref()
+        .map(|t| sanitize_display(t, 40))
+        .unwrap_or_default();
+
+    let last_prompt = s
+        .last_prompt
+        .as_deref()
+        .map(|t| sanitize_display(t, 40))
+        .unwrap_or_default();
+
+    let turns = if s.turn_count > 0 {
+        format!("{}t", s.turn_count)
     } else {
-        sanitized
+        String::new()
     };
 
-    let elapsed = now - entry.last_seen_at;
+    let elapsed = now - s.last_seen_at;
     let time = relative_time(elapsed);
+    let resume_cmd = s.agent_kind.spec().resume_command(&s.native_id);
 
-    let resume_cmd = agent_kind.and_then(|k| k.spec().resume_command(&entry.native_id));
-
-    Ok(SessionRow {
+    SessionRow {
         marker,
         state_icon,
         state_kind,
-        harness: entry.agent_kind.clone(),
+        harness: s.agent_kind.slug().to_string(),
         cwd,
         time,
+        turns,
         title,
+        last_prompt,
         resume_cmd,
         accent,
-    })
-}
-
-/// Map hex accent string to closest ANSI 256-color index.
-fn closest_ansi256_from_hex(hex: &str) -> u8 {
-    let (r, g, b) = hex_to_rgb(hex).unwrap_or((102, 102, 102));
-    let ri = ((r as u16) * 5 / 255) as u8;
-    let gi = ((g as u16) * 5 / 255) as u8;
-    let bi = ((b as u16) * 5 / 255) as u8;
-    16 + 36 * ri + 6 * gi + bi
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Session Index Backfill — Populate from Native Harness Storage
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Backfill session index from all harnesses with discoverable native storage.
-///
-/// Called lazily on first `ls-sessions` when the index is empty. Each harness
-/// adapter scans its native storage layout and upserts entries. Harnesses
-/// without central storage are hook-only (no backfill).
-fn backfill_session_index(db: &babel::babel_storage::BabelStorage) -> Result<()> {
-    let mut total = 0usize;
-
-    total += backfill_claude(db).unwrap_or(0);
-    total += backfill_codex(db).unwrap_or(0);
-    total += backfill_gemini(db).unwrap_or(0);
-    total += backfill_kimi(db).unwrap_or(0);
-    // Factory Droid and Qwen use Claude-fork storage with different base dirs.
-    // Their sessions appear via hooks; no known stable storage path for backfill.
-
-    if total > 0 {
-        eprintln!(
-            "{}",
-            Style::new()
-                .dim()
-                .apply_to(format!("Backfilled {} sessions from native storage", total))
-        );
     }
-
-    Ok(())
 }
 
-/// Backfill from Claude Code's ~/.claude/history.jsonl
+// ═══════════════════════════════════════════════════════════════════════════════
+// Per-Harness Native Storage Scanners
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Scan Claude Code's ~/.claude/history.jsonl
 ///
-/// Reads history.jsonl directly for display names and timestamps rather than
-/// parsing each session JSONL file (which would be O(n * file_size)).
-fn backfill_claude(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+/// Each line is a user prompt: {display, sessionId, project, timestamp}.
+/// We accumulate per session: first display as title, last display as last_prompt,
+/// min/max timestamps, and turn count.
+fn scan_claude() -> Result<Vec<NativeSession>> {
     use babel::utility::claude_storage::claude_base;
     use std::io::{BufRead, BufReader};
 
     let history_path = claude_base().join("history.jsonl");
     if !history_path.exists() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     #[derive(serde::Deserialize)]
-    struct HistEntry {
+    struct Entry {
         display: String,
         #[serde(rename = "sessionId", default)]
         session_id: Option<String>,
@@ -1503,80 +1523,90 @@ fn backfill_claude(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
         timestamp: i64,
     }
 
+    struct Acc {
+        project: String,
+        first_display: String,
+        last_display: String,
+        first_ts: i64,
+        last_ts: i64,
+        turns: u32,
+    }
+
     let file = std::fs::File::open(&history_path)?;
-    let reader = BufReader::new(file);
+    let mut sessions: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
 
-    let mut seen = std::collections::HashSet::new();
-    let mut count = 0;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for line in BufReader::new(file).lines().flatten() {
         if line.trim().is_empty() {
             continue;
         }
-        let entry: HistEntry = match serde_json::from_str(&line) {
+        let e: Entry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let session_id = match entry.session_id {
+        let sid = match e.session_id {
             Some(id) if !id.is_empty() => id,
             _ => continue,
         };
-        if !seen.insert(session_id.clone()) {
-            continue;
-        }
+        let ts = e.timestamp / 1000; // millis → secs
+        let project = e.project.to_string_lossy().into_owned();
 
-        let key = babel::AgentKind::Claude.session_key(&session_id);
-        let project_str = entry.project.to_string_lossy().into_owned();
-        let display = if entry.display.is_empty() {
-            None
-        } else {
-            Some(entry.display)
-        };
-
-        // Claude history.jsonl timestamps are milliseconds
-        let ts_secs = entry.timestamp / 1000;
-
-        let idx = babel::babel_storage::SessionIndexEntry {
-            session_key: key,
-            agent_kind: "claude".to_string(),
-            native_id: session_id,
-            project_path: Some(project_str),
-            display_name: display,
-            first_seen_at: ts_secs,
-            last_seen_at: ts_secs,
-        };
-        if db.upsert_session_index(&idx).is_ok() {
-            count += 1;
-        }
+        sessions
+            .entry(sid)
+            .and_modify(|acc| {
+                if ts < acc.first_ts {
+                    acc.first_ts = ts;
+                    acc.first_display = e.display.clone();
+                }
+                if ts >= acc.last_ts {
+                    acc.last_ts = ts;
+                    acc.last_display = e.display.clone();
+                    acc.project = project.clone();
+                }
+                acc.turns += 1;
+            })
+            .or_insert(Acc {
+                project,
+                first_display: e.display.clone(),
+                last_display: e.display,
+                first_ts: ts,
+                last_ts: ts,
+                turns: 1,
+            });
     }
 
-    Ok(count)
+    Ok(sessions
+        .into_iter()
+        .map(|(sid, acc)| NativeSession {
+            agent_kind: babel::AgentKind::Claude,
+            native_id: sid,
+            project_path: Some(acc.project),
+            display_name: Some(acc.first_display),
+            last_prompt: if acc.turns > 1 {
+                Some(acc.last_display)
+            } else {
+                None
+            },
+            turn_count: acc.turns,
+            last_seen_at: acc.last_ts,
+        })
+        .collect())
 }
 
-/// Backfill from Codex CLI's ~/.codex/history.jsonl + session_index.jsonl
-///
-/// history.jsonl has per-prompt entries: {session_id, ts, text}
-/// session_index.jsonl has thread names: {id, thread_name, updated_at}
-/// We merge both to get session_id → (display_name, first/last timestamps).
-fn backfill_codex(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
+/// Scan Codex CLI's ~/.codex/history.jsonl + session_index.jsonl
+fn scan_codex() -> Result<Vec<NativeSession>> {
     use std::io::{BufRead, BufReader};
 
     let codex_home = dirs::home_dir().context("no home dir")?.join(".codex");
     if !codex_home.exists() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    // Phase 1: Read thread names from session_index.jsonl
+    // Thread names from session_index.jsonl
     #[derive(serde::Deserialize)]
     struct ThreadEntry {
         id: String,
         thread_name: String,
     }
-
     let mut thread_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let idx_path = codex_home.join("session_index.jsonl");
@@ -1592,27 +1622,24 @@ fn backfill_codex(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
         }
     }
 
-    // Phase 2: Read history.jsonl to discover sessions with timestamps
+    // Per-prompt entries from history.jsonl
     #[derive(serde::Deserialize)]
-    struct HistEntry {
-        session_id: String,
-        ts: i64,
-        text: String,
-    }
+    struct HistEntry { session_id: String, ts: i64, text: String }
 
-    struct SessionAcc {
+    struct Acc {
+        first_text: String,
+        last_text: String,
         first_ts: i64,
         last_ts: i64,
-        first_text: String,
+        turns: u32,
     }
 
     let hist_path = codex_home.join("history.jsonl");
     if !hist_path.exists() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let mut sessions: std::collections::HashMap<String, SessionAcc> =
-        std::collections::HashMap::new();
+    let mut sessions: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
 
     if let Ok(file) = std::fs::File::open(&hist_path) {
         for line in BufReader::new(file).lines().flatten() {
@@ -1621,194 +1648,134 @@ fn backfill_codex(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
                     continue;
                 }
                 sessions
-                    .entry(e.session_id.clone())
+                    .entry(e.session_id)
                     .and_modify(|acc| {
-                        acc.first_ts = acc.first_ts.min(e.ts);
-                        acc.last_ts = acc.last_ts.max(e.ts);
+                        if e.ts < acc.first_ts {
+                            acc.first_ts = e.ts;
+                            acc.first_text = truncate_str(&e.text, 100);
+                        }
+                        if e.ts >= acc.last_ts {
+                            acc.last_ts = e.ts;
+                            acc.last_text = truncate_str(&e.text, 100);
+                        }
+                        acc.turns += 1;
                     })
-                    .or_insert(SessionAcc {
+                    .or_insert(Acc {
+                        first_text: truncate_str(&e.text, 100),
+                        last_text: truncate_str(&e.text, 100),
                         first_ts: e.ts,
                         last_ts: e.ts,
-                        first_text: truncate_str(&e.text, 100),
+                        turns: 1,
                     });
             }
         }
     }
 
-    let mut count = 0;
-    for (session_id, acc) in &sessions {
-        let key = babel::AgentKind::Codex.session_key(session_id);
-        let display = thread_names
-            .get(session_id)
-            .cloned()
-            .or_else(|| {
-                if acc.first_text.is_empty() {
-                    None
+    Ok(sessions
+        .into_iter()
+        .map(|(sid, acc)| {
+            let display = thread_names.get(&sid).cloned().unwrap_or(acc.first_text);
+            NativeSession {
+                agent_kind: babel::AgentKind::Codex,
+                native_id: sid,
+                project_path: None,
+                display_name: Some(display),
+                last_prompt: if acc.turns > 1 {
+                    Some(acc.last_text)
                 } else {
-                    Some(acc.first_text.clone())
-                }
-            });
-
-        let entry = babel::babel_storage::SessionIndexEntry {
-            session_key: key,
-            agent_kind: "codex".to_string(),
-            native_id: session_id.clone(),
-            project_path: None,
-            display_name: display,
-            first_seen_at: acc.first_ts,
-            last_seen_at: acc.last_ts,
-        };
-        if db.upsert_session_index(&entry).is_ok() {
-            count += 1;
-        }
-    }
-
-    Ok(count)
+                    None
+                },
+                turn_count: acc.turns,
+                last_seen_at: acc.last_ts,
+            }
+        })
+        .collect())
 }
 
-/// Backfill from Gemini CLI's ~/.gemini/
-fn backfill_gemini(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
-    let gemini_dir = dirs::home_dir()
+/// Scan Gemini CLI's ~/.gemini/tmp/<project>/chats/
+fn scan_gemini() -> Result<Vec<NativeSession>> {
+    let tmp_dir = dirs::home_dir()
         .context("no home dir")?
-        .join(".gemini");
-
-    if !gemini_dir.exists() {
-        return Ok(0);
+        .join(".gemini")
+        .join("tmp");
+    if !tmp_dir.exists() {
+        return Ok(Vec::new());
     }
 
-    let mut count = 0;
-
-    // Gemini stores sessions in tmp/<project-id>/chats/ (JSON/JSONL files)
-    let tmp_dir = gemini_dir.join("tmp");
-    if tmp_dir.exists() {
-        for project_entry in std::fs::read_dir(&tmp_dir).into_iter().flatten() {
-            let project_entry = match project_entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let project_path = project_entry.path();
-            if !project_path.is_dir() {
-                continue;
-            }
-            let chats_dir = project_path.join("chats");
-            if !chats_dir.exists() {
-                continue;
-            }
-            for chat_entry in std::fs::read_dir(&chats_dir).into_iter().flatten() {
-                let chat_entry = match chat_entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let chat_path = chat_entry.path();
-                let ext = chat_path.extension().and_then(|e| e.to_str());
-                if !matches!(ext, Some("json" | "jsonl")) {
-                    continue;
-                }
-
-                let session_id = chat_path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if session_id.is_empty() {
-                    continue;
-                }
-
-                let mtime = chat_entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-
-                let key = babel::AgentKind::Gemini.session_key(&session_id);
-                let entry = babel::babel_storage::SessionIndexEntry {
-                    session_key: key,
-                    agent_kind: "gemini".to_string(),
-                    native_id: session_id,
-                    project_path: None,
-                    display_name: None,
-                    first_seen_at: mtime,
-                    last_seen_at: mtime,
-                };
-                if db.upsert_session_index(&entry).is_ok() {
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    Ok(count)
-}
-
-/// Backfill from Kimi CLI's ~/.local/share/kimi-cli/sessions/
-fn backfill_kimi(db: &babel::babel_storage::BabelStorage) -> Result<usize> {
-    let kimi_dir = dirs::data_dir()
-        .context("no data dir")?
-        .join("kimi-cli")
-        .join("sessions");
-
-    if !kimi_dir.exists() {
-        return Ok(0);
-    }
-
-    let mut count = 0;
-
-    // Kimi stores sessions in sessions/<workdir-hash>/<session-id>/
-    for workdir_entry in std::fs::read_dir(&kimi_dir).into_iter().flatten() {
-        let workdir_entry = match workdir_entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let workdir_path = workdir_entry.path();
-        if !workdir_path.is_dir() {
+    let mut out = Vec::new();
+    for proj in std::fs::read_dir(&tmp_dir).into_iter().flatten().flatten() {
+        let chats = proj.path().join("chats");
+        if !chats.is_dir() {
             continue;
         }
-        for session_entry in std::fs::read_dir(&workdir_path).into_iter().flatten() {
-            let session_entry = match session_entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let session_path = session_entry.path();
-            if !session_path.is_dir() {
+        for chat in std::fs::read_dir(&chats).into_iter().flatten().flatten() {
+            let p = chat.path();
+            if !matches!(p.extension().and_then(|e| e.to_str()), Some("json" | "jsonl")) {
                 continue;
             }
-
-            let session_id = session_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if session_id.is_empty() {
+            let sid = p.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            if sid.is_empty() {
                 continue;
             }
-
-            let mtime = session_entry
-                .metadata()
-                .ok()
+            let mtime = chat.metadata().ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-
-            let key = babel::AgentKind::Kimi.session_key(&session_id);
-            let entry = babel::babel_storage::SessionIndexEntry {
-                session_key: key,
-                agent_kind: "kimi".to_string(),
-                native_id: session_id,
+            out.push(NativeSession {
+                agent_kind: babel::AgentKind::Gemini,
+                native_id: sid,
                 project_path: None,
                 display_name: None,
-                first_seen_at: mtime,
+                last_prompt: None,
+                turn_count: 0,
                 last_seen_at: mtime,
-            };
-            if db.upsert_session_index(&entry).is_ok() {
-                count += 1;
-            }
+            });
         }
     }
+    Ok(out)
+}
 
-    Ok(count)
+/// Scan Kimi CLI's ~/.local/share/kimi-cli/sessions/
+fn scan_kimi() -> Result<Vec<NativeSession>> {
+    let kimi_dir = dirs::data_dir()
+        .context("no data dir")?
+        .join("kimi-cli")
+        .join("sessions");
+    if !kimi_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for workdir in std::fs::read_dir(&kimi_dir).into_iter().flatten().flatten() {
+        if !workdir.path().is_dir() {
+            continue;
+        }
+        for sess in std::fs::read_dir(workdir.path()).into_iter().flatten().flatten() {
+            if !sess.path().is_dir() {
+                continue;
+            }
+            let sid = sess.path().file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            if sid.is_empty() {
+                continue;
+            }
+            let mtime = sess.metadata().ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            out.push(NativeSession {
+                agent_kind: babel::AgentKind::Kimi,
+                native_id: sid,
+                project_path: None,
+                display_name: None,
+                last_prompt: None,
+                turn_count: 0,
+                last_seen_at: mtime,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Pretty print a todo list
