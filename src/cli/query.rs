@@ -1231,10 +1231,27 @@ pub async fn cmd_ls_sessions(
     _core: &BabelCore,
     count: usize,
     kind: Option<&str>,
+    show_sub: bool,
     show_all: bool,
     json: bool,
 ) -> Result<()> {
-    let mut sessions = scan_all_sessions(kind, show_all);
+    let include_non_interactive = show_sub || show_all;
+    let mut sessions = scan_all_sessions(kind, include_non_interactive);
+
+    // Filter hidden sessions unless --all
+    if !show_all {
+        let conn = init_db().ok();
+        sessions.retain(|s| {
+            let key = s.agent_kind.session_key(&s.native_id);
+            let hidden = conn
+                .as_ref()
+                .and_then(|c| babel::babel_storage::get_metadata(c, &key).ok().flatten())
+                .map(|m| m.hidden)
+                .unwrap_or(false);
+            !hidden
+        });
+    }
+
     let total = sessions.len();
     sessions.truncate(count);
 
@@ -1306,10 +1323,11 @@ pub async fn cmd_ls_sessions(
     // Pass 3: print
     for (i, row) in rows.iter().enumerate() {
         let idx = i + 1; // 1-based
+        let bright = row.interactive && !row.hidden;
         let accent_c = closest_ansi256_from_hex(row.accent);
-        let harness_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
-        let text_style = if row.interactive { Style::new().color256(accent_c) } else { Style::new().dim() };
-        let state_style = if row.interactive { row.state_style() } else { Style::new().dim() };
+        let harness_style = if bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let text_style = if bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let state_style = if bright { row.state_style() } else { Style::new().dim() };
 
         print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
         print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
@@ -1425,6 +1443,7 @@ struct SessionRow {
     last_prompt: String,
     accent: &'static str,
     interactive: bool,
+    hidden: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1520,6 +1539,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         last_prompt,
         accent,
         interactive: s.interactive,
+        hidden: meta.as_ref().map(|m| m.hidden).unwrap_or(false),
     }
 }
 

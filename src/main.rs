@@ -130,9 +130,16 @@ async fn main() -> Result<()> {
 
         Commands::LsSockets => cli::query::cmd_ls_sockets(&core, cli.json).await,
 
-        Commands::LsSessions { count, kind, all } => {
-            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), all, cli.json).await
-        }
+        Commands::LsSessions {
+            count,
+            kind,
+            sub,
+            all,
+        } => cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), sub, all, cli.json).await,
+
+        Commands::Hide { indices } => cli::action::cmd_hide(&indices, false).await,
+
+        Commands::Unhide { indices } => cli::action::cmd_hide(&indices, true).await,
 
         Commands::GetWindow { pane_id } => {
             cli::query::cmd_check_agent_pane(&core, pane_id, cli.json).await

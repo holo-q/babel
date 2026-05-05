@@ -909,3 +909,69 @@ pub async fn cmd_reboot(core: &mut BabelCore, target: &Target) -> Result<()> {
     );
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hide / Unhide
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hide or unhide sessions by ls-sessions index.
+///
+/// When `unhide` is true, clears the hidden flag instead of setting it.
+/// Indices resolve against `scan_all_sessions` with `show_all=true` so that
+/// unhide can reference hidden sessions visible via `--all`.
+pub async fn cmd_hide(indices: &[usize], unhide: bool) -> Result<()> {
+    use babel::babel_storage::{init_db, set_hidden};
+    use console::style;
+
+    // For hide: resolve against default view. For unhide: resolve against --all view.
+    let sessions = super::query::scan_all_sessions(None, unhide);
+
+    if sessions.is_empty() {
+        return Err(anyhow::anyhow!("No sessions found"));
+    }
+
+    let conn = init_db()?;
+    let verb = if unhide { "unhid" } else { "hid" };
+
+    for &idx in indices {
+        if idx == 0 || idx > sessions.len() {
+            eprintln!(
+                "{} index {} out of range (1-{})",
+                style("✗").red(),
+                idx,
+                sessions.len()
+            );
+            continue;
+        }
+
+        let session = &sessions[idx - 1];
+        let key = session.agent_kind.session_key(&session.native_id);
+        let title = session
+            .display_name
+            .as_deref()
+            .map(|t| super::query::sanitize_display(t, 40))
+            .unwrap_or_default();
+
+        match set_hidden(&conn, &key, !unhide) {
+            Ok(()) => {
+                eprintln!(
+                    " {} {:>2} {} {}",
+                    if unhide {
+                        style("↑").green()
+                    } else {
+                        style("↓").dim()
+                    },
+                    style(idx).dim(),
+                    style(session.agent_kind.slug()).bold(),
+                    title,
+                );
+            }
+            Err(e) => {
+                eprintln!("{} index {}: {}", style("✗").red(), idx, e);
+            }
+        }
+    }
+
+    eprintln!("{} {} session(s)", style("✓").green(), verb);
+    Ok(())
+}

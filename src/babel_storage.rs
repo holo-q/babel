@@ -97,6 +97,9 @@ pub struct SessionMetadata {
 
     /// Last workspace number where this session's pane was seen.
     pub last_workspace: Option<i32>,
+
+    /// Whether this session is hidden from default ls-sessions view.
+    pub hidden: bool,
 }
 
 /// Cross-harness session registry entry.
@@ -339,6 +342,18 @@ impl BabelStorage {
             ).context("Failed to add last_workspace column")?;
         }
 
+        let has_hidden: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_metadata') WHERE name='hidden'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(0) > 0;
+        if !has_hidden {
+            self.conn.execute(
+                "ALTER TABLE session_metadata ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+                [],
+            ).context("Failed to add hidden column")?;
+        }
+
         Ok(())
     }
 
@@ -349,7 +364,7 @@ impl BabelStorage {
     /// the user hasn't interacted with overlay features yet.
     pub fn get_metadata(&self, session_id: &str) -> Result<Option<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace, hidden
              FROM session_metadata
              WHERE session_id = ?1",
         )?;
@@ -376,6 +391,7 @@ impl BabelStorage {
                 hook_state,
                 last_hook_at: row.get(6)?,
                 last_workspace: row.get(7)?,
+                hidden: row.get::<_, i32>(8).unwrap_or(0) != 0,
             }))
         } else {
             Ok(None)
@@ -786,7 +802,7 @@ impl BabelStorage {
     /// - Backup/export of the tower's institutional knowledge
     pub fn list_all(&self) -> Result<Vec<SessionMetadata>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
+            "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace, hidden
              FROM session_metadata
              ORDER BY session_id",
         )?;
@@ -811,6 +827,7 @@ impl BabelStorage {
                 hook_state,
                 last_hook_at: row.get(6)?,
                 last_workspace: row.get(7)?,
+                hidden: row.get::<_, i32>(8).unwrap_or(0) != 0,
             })
         })?;
 
@@ -846,7 +863,7 @@ pub fn init_db() -> Result<Connection> {
 /// Get metadata for a session (standalone function)
 pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<SessionMetadata>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace
+        "SELECT session_id, icon, is_read, chapter_history, notes, hook_state, last_hook_at, last_workspace, hidden
          FROM session_metadata
          WHERE session_id = ?1",
     )?;
@@ -873,6 +890,7 @@ pub fn get_metadata(conn: &Connection, session_id: &str) -> Result<Option<Sessio
             hook_state,
             last_hook_at: row.get(6)?,
             last_workspace: row.get(7)?,
+            hidden: row.get::<_, i32>(8).unwrap_or(0) != 0,
         }))
     } else {
         Ok(None)
@@ -912,6 +930,18 @@ pub fn mark_unread(conn: &Connection, session_id: &str) -> Result<()> {
         params![session_id],
     )
     .context("Failed to mark session as unread")?;
+    Ok(())
+}
+
+/// Mark a session as hidden/visible in ls-sessions.
+pub fn set_hidden(conn: &Connection, session_id: &str, hidden: bool) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_metadata (session_id, hidden)
+         VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET hidden = ?2",
+        params![session_id, hidden as i32],
+    )
+    .context("Failed to set hidden")?;
     Ok(())
 }
 

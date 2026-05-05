@@ -281,7 +281,8 @@ pub enum Commands {
     ///   babel ls-sessions          # Last 50 sessions
     ///   babel ls-sessions 20       # Last 20 sessions
     ///   babel ls-sessions --kind claude  # Only Claude sessions
-    ///   babel ls-sessions --all         # Include non-interactive spawns
+    ///   babel ls-sessions --sub         # Include non-interactive spawns
+    ///   babel ls-sessions --all         # Include hidden + non-interactive
     #[command()]
     LsSessions {
         /// Maximum number of sessions to show (default: 50)
@@ -294,7 +295,37 @@ pub enum Commands {
 
         /// Include non-interactive sessions (subagent spawns, system prompts)
         #[arg(short, long)]
+        sub: bool,
+
+        /// Include everything: hidden sessions + non-interactive spawns
+        #[arg(short, long)]
         all: bool,
+    },
+
+    /// Hide sessions from ls-sessions by index
+    ///
+    /// Marks sessions so they don't appear in the default view.
+    /// Use `babel ls-sessions --all` to see hidden sessions.
+    /// Use `babel unhide` to restore them.
+    ///
+    /// Examples:
+    ///   babel hide 3 6 9           # Hide sessions at indices 3, 6, 9
+    #[command()]
+    Hide {
+        /// Session indices from `babel ls-sessions` (1-based)
+        #[arg(required = true, value_name = "INDEX")]
+        indices: Vec<usize>,
+    },
+
+    /// Unhide sessions previously hidden with `babel hide`
+    ///
+    /// Examples:
+    ///   babel unhide 3 6 9         # Unhide sessions at indices 3, 6, 9
+    #[command()]
+    Unhide {
+        /// Session indices from `babel ls-sessions --all` (1-based)
+        #[arg(required = true, value_name = "INDEX")]
+        indices: Vec<usize>,
     },
 
     /// Get status of a kitty window
