@@ -1363,7 +1363,7 @@ pub async fn cmd_ls_sessions(
         print!("  {}", dim.apply_to(row.filter_tag));
         print!(" {:>w_time$}", dim.apply_to(&row.time));
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
-        print!("  {:>w_idx$}", dim.apply_to(idx));
+        print!("  {:>w_idx$}", idx);
         let tpad = w_title - row.title.chars().count();
         print!("  {}{}", text_style.apply_to(&row.title), " ".repeat(tpad));
         if w_prompt > 0 {
