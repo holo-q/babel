@@ -297,7 +297,15 @@ pub enum Commands {
         #[arg(short, long)]
         sub: bool,
 
-        /// Include everything: hidden sessions + non-interactive spawns
+        /// Include one-shot sessions (single user prompt)
+        #[arg(long)]
+        oneshot: bool,
+
+        /// Include command-only sessions (all prompts are slash commands)
+        #[arg(long)]
+        commands: bool,
+
+        /// Include everything: hidden + non-interactive + oneshot + command-only
         #[arg(short, long)]
         all: bool,
     },

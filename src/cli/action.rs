@@ -924,7 +924,12 @@ pub async fn cmd_hide(indices: &[usize], unhide: bool) -> Result<()> {
     use console::style;
 
     // For hide: resolve against default view. For unhide: resolve against --all view.
-    let sessions = super::query::scan_all_sessions(None, unhide);
+    let filters = if unhide {
+        super::query::SessionFilters { all: true, ..Default::default() }
+    } else {
+        Default::default()
+    };
+    let sessions = super::query::scan_all_sessions(None, &filters);
 
     if sessions.is_empty() {
         return Err(anyhow::anyhow!("No sessions found"));

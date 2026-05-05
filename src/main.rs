@@ -134,8 +134,13 @@ async fn main() -> Result<()> {
             count,
             kind,
             sub,
+            oneshot,
+            commands,
             all,
-        } => cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), sub, all, cli.json).await,
+        } => {
+            let filters = cli::query::SessionFilters { sub, oneshot, commands, all };
+            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), filters, cli.json).await
+        }
 
         Commands::Hide { indices } => cli::action::cmd_hide(&indices, false).await,
 

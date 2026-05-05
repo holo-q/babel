@@ -46,7 +46,7 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
     use babel::babel_storage::{get_metadata, init_db};
     use babel::AgentKind;
 
-    let sessions = super::query::scan_all_sessions(None, false);
+    let sessions = super::query::scan_all_sessions(None, &Default::default());
 
     if sessions.is_empty() {
         return Err(anyhow!("No sessions found"));

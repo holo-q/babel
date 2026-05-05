@@ -1190,14 +1190,32 @@ pub(super) struct NativeSession {
     pub(super) turn_count: u32,
     pub(super) last_seen_at: i64,
     pub(super) interactive: bool,
+    /// Every user prompt was a slash command (/model, /usage, etc.)
+    pub(super) command_only: bool,
 }
 
-/// Scan all harnesses and return interactive sessions sorted by recency.
+/// Filter flags for ls-sessions.
+#[derive(Debug)]
+pub struct SessionFilters {
+    pub sub: bool,
+    pub oneshot: bool,
+    pub commands: bool,
+    pub all: bool,
+}
+
+impl Default for SessionFilters {
+    fn default() -> Self {
+        Self { sub: false, oneshot: false, commands: false, all: false }
+    }
+}
+
+/// Scan all harnesses and return sessions sorted by recency.
 ///
 /// This is the shared pipeline for `ls-sessions` and `resume <index>`.
+/// `resume` calls with default filters (no oneshot/command-only/non-interactive).
 pub(super) fn scan_all_sessions(
     kind: Option<&str>,
-    show_all: bool,
+    filters: &SessionFilters,
 ) -> Vec<NativeSession> {
     let mut sessions = Vec::new();
     let kind_filter = kind.and_then(babel::AgentKind::from_slug);
@@ -1216,8 +1234,16 @@ pub(super) fn scan_all_sessions(
     }
 
     sessions.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
-    if !show_all {
-        sessions.retain(|s| s.interactive);
+    if !filters.all {
+        if !filters.sub {
+            sessions.retain(|s| s.interactive);
+        }
+        if !filters.oneshot {
+            sessions.retain(|s| s.turn_count != 1);
+        }
+        if !filters.commands {
+            sessions.retain(|s| !s.command_only);
+        }
     }
     sessions
 }
@@ -1231,15 +1257,13 @@ pub async fn cmd_ls_sessions(
     _core: &BabelCore,
     count: usize,
     kind: Option<&str>,
-    show_sub: bool,
-    show_all: bool,
+    filters: SessionFilters,
     json: bool,
 ) -> Result<()> {
-    let include_non_interactive = show_sub || show_all;
-    let mut sessions = scan_all_sessions(kind, include_non_interactive);
+    let mut sessions = scan_all_sessions(kind, &filters);
 
     // Filter hidden sessions unless --all
-    if !show_all {
+    if !filters.all {
         let conn = init_db().ok();
         sessions.retain(|s| {
             let key = s.agent_kind.session_key(&s.native_id);
@@ -1322,20 +1346,22 @@ pub async fn cmd_ls_sessions(
 
     // Pass 3: print
     for (i, row) in rows.iter().enumerate() {
-        let idx = i + 1; // 1-based
-        let bright = row.interactive && !row.hidden;
+        let idx = i + 1;
         let accent_c = closest_ansi256_from_hex(row.accent);
-        let harness_style = if bright { Style::new().color256(accent_c) } else { Style::new().dim() };
-        let text_style = if bright { Style::new().color256(accent_c) } else { Style::new().dim() };
-        let state_style = if bright { row.state_style() } else { Style::new().dim() };
+        let harness_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let text_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let state_style = if row.bright { row.state_style() } else { Style::new().dim() };
 
-        print!(" {}{}", row.marker, state_style.apply_to(row.state_icon));
-        print!(" {:<w_harness$}", harness_style.apply_to(&row.harness));
+        // markers | harness | state | ws | cwd | filter_tag | time | turns | idx | title | prompt
+        print!(" {}", row.marker);
+        print!("{:<w_harness$}", harness_style.apply_to(&row.harness));
+        print!(" {}", state_style.apply_to(row.state_icon));
         if w_ws > 0 {
             print!("  {:>w_ws$}", dim.apply_to(&row.workspace));
         }
         print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
-        print!("  {:>w_time$}", dim.apply_to(&row.time));
+        print!("  {}", dim.apply_to(row.filter_tag));
+        print!(" {:>w_time$}", dim.apply_to(&row.time));
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
         print!("  {:>w_idx$}", dim.apply_to(idx));
         let tpad = w_title - row.title.chars().count();
@@ -1375,6 +1401,12 @@ fn truncate_str(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// A user prompt that is a slash command (not a real conversation turn).
+fn is_slash_command(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with('/') && !trimmed.contains('\n')
 }
 
 pub(super) fn sanitize_display(s: &str, max_chars: usize) -> String {
@@ -1435,6 +1467,8 @@ struct SessionRow {
     state_icon: &'static str,
     state_kind: StateKind,
     harness: String,
+    /// Filter category sigil: ◇ oneshot, / command-only, ⊞ subagent, ▪ hidden
+    filter_tag: &'static str,
     workspace: String,
     cwd: String,
     time: String,
@@ -1442,8 +1476,7 @@ struct SessionRow {
     title: String,
     last_prompt: String,
     accent: &'static str,
-    interactive: bool,
-    hidden: bool,
+    bright: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1526,11 +1559,27 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
     let elapsed = now - s.last_seen_at;
     let time = relative_time(elapsed);
 
+    let is_hidden = meta.as_ref().map(|m| m.hidden).unwrap_or(false);
+    let filter_tag = if is_hidden {
+        "▪"
+    } else if !s.interactive {
+        "⊞"
+    } else if s.command_only {
+        "/"
+    } else if s.turn_count == 1 {
+        "◇"
+    } else {
+        " "
+    };
+
+    let bright = s.interactive && !is_hidden && !s.command_only && s.turn_count > 1;
+
     SessionRow {
         marker,
         state_icon,
         state_kind,
         harness: s.agent_kind.slug().to_string(),
+        filter_tag,
         workspace,
         cwd,
         time,
@@ -1538,8 +1587,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         title,
         last_prompt,
         accent,
-        interactive: s.interactive,
-        hidden: meta.as_ref().map(|m| m.hidden).unwrap_or(false),
+        bright,
     }
 }
 
@@ -1577,6 +1625,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
         first_ts: i64,
         last_ts: i64,
         turns: u32,
+        all_commands: bool,
     }
 
     let file = std::fs::File::open(&history_path)?;
@@ -1597,6 +1646,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
         let ts = e.timestamp / 1000; // millis → secs
         let project = e.project.to_string_lossy().into_owned();
 
+        let is_cmd = is_slash_command(&e.display);
         sessions
             .entry(sid)
             .and_modify(|acc| {
@@ -1609,6 +1659,9 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
                     acc.last_display = e.display.clone();
                     acc.project = project.clone();
                 }
+                if !is_cmd {
+                    acc.all_commands = false;
+                }
                 acc.turns += 1;
             })
             .or_insert(Acc {
@@ -1618,6 +1671,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
                 first_ts: ts,
                 last_ts: ts,
                 turns: 1,
+                all_commands: is_cmd,
             });
     }
 
@@ -1636,6 +1690,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
             turn_count: acc.turns,
             last_seen_at: acc.last_ts,
             interactive: true,
+            command_only: acc.all_commands,
         })
         .collect())
 }
@@ -1658,6 +1713,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
         first_text: String,
         last_text: String,
         turns: u32,
+        all_commands: bool,
     }
     let mut prompt_data: std::collections::HashMap<String, PromptAcc> =
         std::collections::HashMap::new();
@@ -1673,16 +1729,21 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     if e.session_id.is_empty() {
                         continue;
                     }
+                    let is_cmd = is_slash_command(&e.text);
                     prompt_data
                         .entry(e.session_id)
                         .and_modify(|acc| {
                             acc.last_text = truncate_str(&e.text, 100);
+                            if !is_cmd {
+                                acc.all_commands = false;
+                            }
                             acc.turns += 1;
                         })
                         .or_insert(PromptAcc {
                             first_text: truncate_str(&e.text, 100),
                             last_text: truncate_str(&e.text, 100),
                             turns: 1,
+                            all_commands: is_cmd,
                         });
                 }
             }
@@ -1719,6 +1780,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                 let (id, cwd, title, first_msg, updated_at, has_user_event) = row;
                 let prompts = prompt_data.remove(&id);
                 let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
+                let cmd_only = prompts.as_ref().map(|p| p.all_commands).unwrap_or(false);
 
                 let display_name = title
                     .filter(|t| !t.is_empty())
@@ -1738,6 +1800,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     turn_count,
                     last_seen_at: updated_at,
                     interactive: has_user_event || turn_count > 0,
+                    command_only: cmd_only,
                 });
             }
             return Ok(out);
@@ -1756,6 +1819,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             turn_count: acc.turns,
             last_seen_at: 0,
             interactive: true,
+            command_only: acc.all_commands,
         })
         .collect())
 }
@@ -1818,6 +1882,7 @@ fn scan_gemini() -> Result<Vec<NativeSession>> {
                 turn_count: 0,
                 last_seen_at: mtime,
                 interactive: true,
+                command_only: false,
             });
         }
     }
@@ -1861,6 +1926,7 @@ fn scan_kimi() -> Result<Vec<NativeSession>> {
                 turn_count: 0,
                 last_seen_at: mtime,
                 interactive: true,
+                command_only: false,
             });
         }
     }
