@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -66,6 +66,7 @@ enum TranscriptLoadResult {
 
 struct PendingTranscriptLoad {
     seq: u64,
+    agent_kind: AgentKind,
     session_id: String,
     requested_at: Instant,
 }
@@ -422,6 +423,7 @@ where
                 }
                 active_transcript_load = Some(spawn_transcript_load(
                     pending.seq,
+                    pending.agent_kind,
                     pending.session_id,
                     transcript_tx.clone(),
                 ));
@@ -484,7 +486,7 @@ fn sync_selected_transcript_target(
     *desired_key = Some(target.session_key.clone());
     *pending = None;
 
-    if target.agent_kind != AgentKind::Claude {
+    if !matches!(target.agent_kind, AgentKind::Claude | AgentKind::Codex) {
         app.transcript.notice(
             target.native_id,
             format!(
@@ -501,6 +503,7 @@ fn sync_selected_transcript_target(
     );
     *pending = Some(PendingTranscriptLoad {
         seq: *seq,
+        agent_kind: target.agent_kind,
         session_id: target.native_id,
         requested_at: Instant::now(),
     });
@@ -508,40 +511,60 @@ fn sync_selected_transcript_target(
 
 fn spawn_transcript_load(
     seq: u64,
+    agent_kind: AgentKind,
     session_id: String,
     tx: mpsc::Sender<TranscriptLoadResult>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let loader_session_id = session_id.clone();
-        let result =
-            tokio::task::spawn_blocking(move || load_claude_transcript(seq, loader_session_id))
-                .await
-                .unwrap_or_else(|e| TranscriptLoadResult::Notice {
-                    seq,
-                    session_id: session_id.clone(),
-                    message: format!("Transcript worker failed: {e}"),
-                });
+        let result = tokio::task::spawn_blocking(move || {
+            load_harness_transcript(seq, agent_kind, loader_session_id)
+        })
+        .await
+        .unwrap_or_else(|e| TranscriptLoadResult::Notice {
+            seq,
+            session_id: session_id.clone(),
+            message: format!("Transcript worker failed: {e}"),
+        });
         let _ = tx.send(result).await;
     })
 }
 
-fn load_claude_transcript(seq: u64, session_id: String) -> TranscriptLoadResult {
-    match crate::utility::claude_storage::find_session_transcript(&session_id) {
-        Ok(Some(path)) => match super::jsonl_parser::parse_transcript(&path) {
-            Ok(messages) => TranscriptLoadResult::Loaded {
-                seq,
-                session_id,
-                messages,
-            },
-            Err(e) => {
-                trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
-                TranscriptLoadResult::Notice {
+fn load_harness_transcript(
+    seq: u64,
+    agent_kind: AgentKind,
+    session_id: String,
+) -> TranscriptLoadResult {
+    let lookup = match agent_kind {
+        AgentKind::Claude => crate::utility::claude_storage::find_session_transcript(&session_id),
+        AgentKind::Codex => crate::harness::codex::transcript::find_session_transcript(&session_id),
+        _ => Ok(None),
+    };
+
+    match lookup {
+        Ok(Some(path)) => {
+            let parsed = match agent_kind {
+                AgentKind::Claude => super::jsonl_parser::parse_transcript(&path),
+                AgentKind::Codex => crate::harness::codex::transcript::parse_transcript(&path),
+                _ => Ok(Vec::new()),
+            };
+
+            match parsed {
+                Ok(messages) => TranscriptLoadResult::Loaded {
                     seq,
                     session_id,
-                    message: "Transcript parse failed".to_string(),
+                    messages,
+                },
+                Err(e) => {
+                    trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
+                    TranscriptLoadResult::Notice {
+                        seq,
+                        session_id,
+                        message: "Transcript parse failed".to_string(),
+                    }
                 }
             }
-        },
+        }
         Ok(None) => {
             trace_error!("transcript not found", session_id = session_id.as_str());
             TranscriptLoadResult::Notice {

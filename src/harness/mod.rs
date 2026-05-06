@@ -18,8 +18,7 @@ mod antigravity;
 mod claude;
 #[path = "cline/spec.rs"]
 mod cline;
-#[path = "codex/spec.rs"]
-mod codex;
+pub(crate) mod codex;
 #[path = "crush/spec.rs"]
 mod crush;
 #[path = "cursor/spec.rs"]
@@ -45,7 +44,7 @@ mod roo_code;
 
 pub const HARNESS_SPECS: &[HarnessSpec] = &[
     claude::SPEC,
-    codex::SPEC,
+    codex::spec::SPEC,
     factory_droid::SPEC,
     qwen_code::SPEC,
     kimi::SPEC,

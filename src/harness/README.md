@@ -4,6 +4,8 @@ Harness Protocols
 Each directory owns the protocol knowledge for one native agent harness.
 
 - `sessions.rs` reads native session storage for `babel ls-sessions` and `babel resume`.
+- `transcript.rs` loads native conversation logs for transcript preview when
+  the harness exposes readable turns.
 - `ops.rs` plans provider-native migration/doctor/apply operations.
 - `spec.rs` defines the static roster facts: display name, color, install
   surface, identity fields, cmdline markers, hook dialect, and resume command.
