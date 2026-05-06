@@ -7,22 +7,41 @@ use anyhow::Result;
 
 use crate::AgentKind;
 
+// Harness protocols live together on disk under `src/harness/<kind>/`.
+// This registry only exposes the read-only native session discovery facet.
+#[path = "../harness/aider/sessions.rs"]
 mod aider;
+#[path = "../harness/amp/sessions.rs"]
 mod amp;
+#[path = "../harness/antigravity/sessions.rs"]
 mod antigravity;
+#[path = "../harness/claude/sessions.rs"]
 mod claude;
+#[path = "../harness/cline/sessions.rs"]
 mod cline;
+#[path = "../harness/codex/sessions.rs"]
 mod codex;
+#[path = "../harness/crush/sessions.rs"]
 mod crush;
+#[path = "../harness/cursor/sessions.rs"]
 mod cursor;
+#[path = "../harness/factory_droid/sessions.rs"]
 mod factory_droid;
+#[path = "../harness/gemini/sessions.rs"]
 mod gemini;
+#[path = "../harness/github_copilot/sessions.rs"]
 mod github_copilot;
+#[path = "../harness/kilo_code/sessions.rs"]
 mod kilo_code;
+#[path = "../harness/kimi/sessions.rs"]
 mod kimi;
+#[path = "../harness/kiro/sessions.rs"]
 mod kiro;
+#[path = "../harness/opencode/sessions.rs"]
 mod opencode;
+#[path = "../harness/qwen_code/sessions.rs"]
 mod qwen_code;
+#[path = "../harness/roo_code/sessions.rs"]
 mod roo_code;
 mod shared;
 

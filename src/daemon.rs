@@ -87,8 +87,6 @@ use crate::fingerprint::{
 use crate::indicator::IndicatorEvent;
 use crate::ipc::{Request, Response, TitleTarget};
 use crate::kitty::{
-    default_socket,
-    discover_all_instances,
     focus_pane_any,
     focus_pane_on_socket,
     get_scrollback, // used in fingerprint_match_addr
@@ -481,21 +479,20 @@ impl BabelState {
     /// The periodic poll passes `false` to keep activity states current.
     #[tracing::instrument(skip(self), fields(skip_activity = skip_activity_fetch))]
     pub async fn refresh_panes(&mut self, skip_activity_fetch: bool) -> Result<Vec<i32>> {
-        use crate::kitty::get_all_workspaces;
+        use crate::desktop::get_all_workspaces;
 
-        // ─── Multi-Socket Discovery ─────────────────────────────────────────────────
-        // Query all kitty instances, update socket_status
-        // IMPORTANT: We extract panes from instances to avoid a second round of kitten @ ls calls
-        let instances = discover_all_instances().await;
-        let current_socket = default_socket();
+        // ─── Multi-Backend Discovery ────────────────────────────────────────────────
+        // Query all registered backends, update socket_status
+        // IMPORTANT: We extract panes from instances to avoid a second round of discovery calls
+        let instances = self.registry.discover_all().await;
 
         self.socket_status = instances
             .iter()
             .map(|i| {
                 (
-                    i.socket.clone(),
+                    i.connection.clone(),
                     SocketStatus {
-                        is_current: i.socket == current_socket,
+                        is_current: i.is_current,
                         is_responsive: i.is_responsive,
                         pane_count: i.panes.len(),
                         last_error: i.error.clone(),
@@ -526,7 +523,7 @@ impl BabelState {
         let cache_misses_pane = !self.workspace_cache_dirty
             && all_panes
                 .iter()
-                .any(|p| !self.workspace_cache.contains_key(&p.platform_window_id));
+                .any(|p| p.platform_window_id.map_or(false, |pid| !self.workspace_cache.contains_key(&pid)));
         if cache_misses_pane {
             self.workspace_cache_dirty = true;
         }
@@ -547,7 +544,7 @@ impl BabelState {
 
         for pane in &all_panes {
             let addr = pane.addr();
-            let workspace = workspaces.get(&pane.platform_window_id).copied();
+            let workspace = pane.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
             let is_agent = detect_agent_signals(pane).is_agent();
 
             new_terminals.insert(
@@ -564,7 +561,7 @@ impl BabelState {
                     workspace,
                     is_agent,
                     is_focused: pane.is_focused,
-                    platform_window_id: pane.platform_window_id,
+                    platform_window_id: pane.platform_window_id.unwrap_or(0),
                 },
             );
         }
@@ -611,7 +608,7 @@ impl BabelState {
 
         for kw in agent_kitty_panes {
             let addr = kw.addr();
-            let workspace = workspaces.get(&kw.platform_window_id).copied();
+            let workspace = kw.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
 
             // Check if we have existing data for this pane (use get, not remove)
             let agent_pane = if let Some(existing) = self.panes.get(&addr) {
@@ -670,13 +667,7 @@ impl BabelState {
                             title_session = %title_sid,
                             "replacing stale kitty session tag from title match"
                         );
-                        let _ = crate::kitty::set_user_var_on_socket(
-                            &addr.socket,
-                            addr.id,
-                            "babel_session_id",
-                            title_sid,
-                        )
-                        .await;
+                        let _ = self.registry.set_meta(&addr, "babel_session_id", title_sid).await;
                         existing_session = Some(title_sid.to_string());
                     }
                 }
@@ -687,11 +678,11 @@ impl BabelState {
                     session_info: None,
                     cwd: kw.cwd.clone(),
                     is_focused: kw.is_focused,
-                    os_window_id: kw.os_window_id,
-                    platform_window_id: kw.platform_window_id,
+                    os_window_id: kw.os_window_id().unwrap_or(0),
+                    platform_window_id: kw.platform_window_id.unwrap_or(0),
                     workspace,
                     agent_kind,
-                    screen: kw.screen.clone(),
+                    screen: kw.screen().cloned(),
                     activity_state: None, // Will be populated from pane_states cache
                     hook_state: None,     // Populated later from babel_storage
                     fingerprint: None,

@@ -11,26 +11,45 @@ use anyhow::Result;
 
 use crate::core::ConflictingPane;
 
+// Harness protocols live together on disk under `src/harness/<kind>/`.
+// This module exposes the migration/doctor/apply facet for those adapters.
+#[path = "harness/aider/ops.rs"]
 mod aider;
+#[path = "harness/amp/ops.rs"]
 mod amp;
+#[path = "harness/antigravity/ops.rs"]
 mod antigravity;
 mod apply;
+#[path = "harness/claude/ops.rs"]
 mod claude;
+#[path = "harness/cline/ops.rs"]
 mod cline;
+#[path = "harness/codex/ops.rs"]
 mod codex;
 mod context;
+#[path = "harness/crush/ops.rs"]
 mod crush;
+#[path = "harness/cursor/ops.rs"]
 mod cursor;
+#[path = "harness/factory_droid/ops.rs"]
 mod factory;
+#[path = "harness/gemini/ops.rs"]
 mod gemini;
+#[path = "harness/github_copilot/ops.rs"]
 mod github_copilot;
+#[path = "harness/kilo_code/ops.rs"]
 mod kilo;
+#[path = "harness/kimi/ops.rs"]
 mod kimi;
+#[path = "harness/kiro/ops.rs"]
 mod kiro;
+#[path = "harness/opencode/ops.rs"]
 mod opencode;
 mod planner;
 mod probes;
+#[path = "harness/qwen_code/ops.rs"]
 mod qwen;
+#[path = "harness/roo_code/ops.rs"]
 mod roo;
 mod types;
 

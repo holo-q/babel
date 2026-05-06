@@ -29,9 +29,10 @@ use vtr::{boundary, checkpoint, effect, trace_error};
 
 use crate::agent_kind::AgentKind;
 use crate::fingerprint::{MatchConfidence, SessionFingerprint};
+use crate::backend::Pane;
 use crate::kitty::{
     close_pane, get_pane, get_recent_scrollback, list_panes, move_window_to_workspace,
-    set_user_var, set_user_var_on_socket, set_window_geometry, KittyPane, PaneAddr,
+    set_user_var, set_user_var_on_socket, set_window_geometry, PaneAddr,
 };
 use crate::utility::claude_storage::{
     find_session_by_summary, get_session_display_name, SessionInfo,
@@ -107,7 +108,7 @@ impl AgentMarkers {
 /// Walks the foreground process list and matches the first agent we recognize.
 /// Title-prefix detection is Claude-specific (the "✳" sigil); codex doesn't
 /// decorate titles, so codex panes are picked up purely via cmdline / babel-tag.
-pub fn detect_agent_signals(window: &KittyPane) -> AgentMarkers {
+pub fn detect_agent_signals(window: &Pane) -> AgentMarkers {
     let mut detected_agent: Option<AgentKind> = None;
     for proc in &window.foreground_processes {
         if let Some(kind) = AgentKind::from_cmdline(&proc.cmdline) {
@@ -245,11 +246,14 @@ pub async fn get_activity_with_scrollback_on_socket(
 ///
 /// This catches sessions that have exited to shell prompt but still have
 /// the ✳ title, or panes that were previously identified and tagged.
-pub async fn find_agent_panes() -> Result<Vec<KittyPane>> {
+pub async fn find_agent_panes() -> Result<Vec<Pane>> {
+    use crate::backend::kitty::kitty_pane_to_pane;
+
     let all_panes = list_panes().await?;
 
     let agent_panes = all_panes
         .into_iter()
+        .map(kitty_pane_to_pane)
         .filter(|pane| detect_agent_signals(pane).is_agent())
         .collect();
 
@@ -288,7 +292,7 @@ pub struct AgentPane {
     pub agent_kind: AgentKind,
     /// Pane screen geometry for spatial sorting (from patched kitty)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub screen: Option<crate::kitty::ScreenGeometry>,
+    pub screen: Option<crate::backend::ScreenGeometry>,
     /// Current activity state (Idle, Thinking, ToolUse, etc.)
     /// Populated from scrollback analysis when available
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -392,7 +396,7 @@ pub async fn discover_agent_panes() -> Result<Vec<AgentPane>> {
                 .cloned();
 
             // Look up workspace for this OS window
-            let workspace = workspaces.get(&pane.platform_window_id).copied();
+            let workspace = pane.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
 
             AgentPane {
                 addr: pane.addr(),
@@ -401,11 +405,11 @@ pub async fn discover_agent_panes() -> Result<Vec<AgentPane>> {
                 session_info: None, // Lazy - only load on demand
                 cwd: pane.cwd.clone(),
                 is_focused: pane.is_focused,
-                os_window_id: pane.os_window_id,
-                platform_window_id: pane.platform_window_id,
+                os_window_id: pane.os_window_id().unwrap_or(0),
+                platform_window_id: pane.platform_window_id.unwrap_or(0),
                 workspace,
                 agent_kind: markers.agent,
-                screen: pane.screen.clone(),
+                screen: pane.screen().cloned(),
                 activity_state: None, // Populated by daemon from cached scrollback analysis
                 hook_state: None,     // Populated by daemon from babel_storage
                 fingerprint: None,    // Only populated in daemon with --details
@@ -445,7 +449,7 @@ pub fn enrich_pane(pane: &mut AgentPane) -> Result<()> {
 ///    - Search ~/.claude/projects/ for matching summaries
 ///    - If found, tag pane with session_id for future lookups
 /// 3. Return the session ID (as SessionInfo) if matched, None otherwise
-pub fn match_pane_to_session(pane: &KittyPane) -> Result<Option<SessionInfo>> {
+pub fn match_pane_to_session(pane: &Pane) -> Result<Option<SessionInfo>> {
     let existing_session_id = pane
         .user_vars
         .get("babel_session_id")

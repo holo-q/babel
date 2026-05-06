@@ -638,7 +638,7 @@ impl TerminalBackend for KittyBackend {
 // =============================================================================
 
 /// Convert a [`KittyPane`] into the backend-agnostic [`Pane`].
-fn kitty_pane_to_pane(kp: KittyPane) -> Pane {
+pub fn kitty_pane_to_pane(kp: KittyPane) -> Pane {
     Pane {
         connection: kp.socket,
         id: kp.id,

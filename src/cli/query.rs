@@ -251,7 +251,8 @@ pub async fn cmd_ls_terminals(_core: &BabelCore, json: bool) -> Result<()> {
 
         // Show windows for this instance
         for win in &instance.panes {
-            let signals = detect_agent_signals(win);
+            let pane = babel::backend::kitty::kitty_pane_to_pane(win.clone());
+            let signals = detect_agent_signals(&pane);
             let cmdline = win
                 .foreground_processes
                 .first()
