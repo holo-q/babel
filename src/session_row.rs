@@ -5,10 +5,17 @@
 //! the semantic cells so the CLI table and TUI browser cannot drift quietly.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
 use crate::ActivityState;
+
+fn cached_home_dir() -> Option<&'static str> {
+    static HOME: OnceLock<Option<String>> = OnceLock::new();
+    HOME.get_or_init(|| dirs::home_dir().map(|p| p.to_string_lossy().into_owned()))
+        .as_deref()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateKind {
@@ -46,6 +53,9 @@ pub struct SessionRowInput<'a> {
     pub hidden: bool,
     pub live: Option<LiveSessionState>,
     pub text_max_chars: usize,
+    /// When true, title/last_prompt are already sanitized — skip
+    /// split_whitespace+join+truncate.
+    pub pre_sanitized: bool,
 }
 
 /// Precomputed display cells for one session row.
@@ -63,6 +73,7 @@ pub struct SessionRow {
     pub title: String,
     pub last_prompt: String,
     pub accent: &'static str,
+    pub ansi256: u8,
     pub bright: bool,
     pub has_title: bool,
 }
@@ -82,15 +93,31 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         .unwrap_or_default();
 
     let (title, has_title) = if let Some(generated) = input.generated_title {
-        (sanitize_display(generated, input.text_max_chars), true)
+        let text = if input.pre_sanitized {
+            generated.to_string()
+        } else {
+            sanitize_display(generated, input.text_max_chars)
+        };
+        (text, true)
     } else {
         let raw = input.display_name.unwrap_or(input.native_id);
-        (sanitize_display(raw, input.text_max_chars), input.has_title)
+        let text = if input.pre_sanitized {
+            raw.to_string()
+        } else {
+            sanitize_display(raw, input.text_max_chars)
+        };
+        (text, input.has_title)
     };
 
     let last_prompt = input
         .last_prompt
-        .map(|text| sanitize_display(text, input.text_max_chars))
+        .map(|text| {
+            if input.pre_sanitized {
+                text.to_string()
+            } else {
+                sanitize_display(text, input.text_max_chars)
+            }
+        })
         .unwrap_or_default();
 
     let turns = if input.turn_count > 0 {
@@ -136,6 +163,7 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         title,
         last_prompt,
         accent: input.agent_kind.accent_color(),
+        ansi256: input.agent_kind.accent_ansi256(),
         bright,
         has_title,
     }
@@ -194,10 +222,9 @@ pub fn relative_time(seconds_ago: i64) -> String {
 pub fn abbreviate_path(path: &Path, max_chars: usize) -> String {
     let path_str = path.to_string_lossy();
 
-    let mut out = if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        if path_str.starts_with(home_str.as_ref()) {
-            format!("~{}", &path_str[home_str.len()..])
+    let mut out = if let Some(home) = cached_home_dir() {
+        if path_str.starts_with(home) {
+            format!("~{}", &path_str[home.len()..])
         } else {
             path_str.to_string()
         }
@@ -231,7 +258,7 @@ pub fn middle_truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
 
-    const MARKER: &str = "… [cut] …";
+    const MARKER: &str = " ⌿ ";
     let marker_len = MARKER.chars().count();
     if max_chars <= marker_len + 2 {
         return truncate_chars(s, max_chars);

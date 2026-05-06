@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "cursor",
     display: "Cursor Agent",
     accent: "#14120B",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#14120B"),
     support: HarnessSupport::Supported,
     install: InstallStrategy::JsonSnippet,
     identity_fields: &["conversation_id"],

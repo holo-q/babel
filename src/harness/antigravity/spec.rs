@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "antigravity",
     display: "Antigravity",
     accent: "#3186FF",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#3186FF"),
     support: HarnessSupport::Unsupported,
     install: InstallStrategy::Unsupported,
     identity_fields: &[],

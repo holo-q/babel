@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "opencode",
     display: "OpenCode",
     accent: "#FAB283",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#FAB283"),
     support: HarnessSupport::BridgeRequired,
     install: InstallStrategy::BridgeContract,
     identity_fields: &[],

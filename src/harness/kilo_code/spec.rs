@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "kilo-code",
     display: "Kilo Code",
     accent: "#FA483A",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#FA483A"),
     support: HarnessSupport::Unsupported,
     install: InstallStrategy::Unsupported,
     identity_fields: &[],

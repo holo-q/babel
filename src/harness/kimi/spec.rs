@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "kimi",
     display: "Kimi CLI",
     accent: "#7F1C10",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#7F1C10"),
     support: HarnessSupport::Supported,
     install: InstallStrategy::TomlSnippet,
     identity_fields: &["session_id"],

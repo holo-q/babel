@@ -236,6 +236,10 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
         })
         .collect();
 
+    for session in &mut enriched {
+        session.pre_sanitize();
+    }
+
     Ok(enriched)
 }
 

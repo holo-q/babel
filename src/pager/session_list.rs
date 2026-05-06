@@ -157,6 +157,21 @@ pub struct EnrichedSession {
 }
 
 impl EnrichedSession {
+    /// Pre-sanitize display strings so per-frame rendering skips
+    /// the split_whitespace+join+truncate dance.
+    pub fn pre_sanitize(&mut self) {
+        const TEXT_MAX: usize = 160;
+        if let Some(ref mut t) = self.generated_title {
+            *t = session_row::sanitize_display(t, TEXT_MAX);
+        }
+        if let Some(ref mut t) = self.display_name {
+            *t = session_row::sanitize_display(t, TEXT_MAX);
+        }
+        if let Some(ref mut t) = self.last_prompt {
+            *t = session_row::sanitize_display(t, TEXT_MAX);
+        }
+    }
+
     pub fn title(&self) -> String {
         self.generated_title
             .as_ref()
@@ -217,6 +232,7 @@ impl EnrichedSession {
                     }),
                 },
                 text_max_chars: 160,
+                pre_sanitized: true,
             },
             now,
         )
@@ -308,27 +324,29 @@ impl SessionListState {
         self.clamp_cursor();
     }
 
-    /// Move cursor down
     pub fn cursor_down(&mut self) {
-        let count = self.visible_count();
-        if count > 0 && self.cursor < count - 1 {
-            self.cursor += 1;
-        }
+        self.cursor_jump(1);
     }
 
-    /// Move cursor up
     pub fn cursor_up(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn cursor_jump(&mut self, n: usize) {
+        let count = self.visible_count();
+        if count > 0 {
+            self.cursor = (self.cursor + n).min(count - 1);
         }
     }
 
-    /// Jump to top
+    pub fn cursor_jump_back(&mut self, n: usize) {
+        self.cursor = self.cursor.saturating_sub(n);
+    }
+
     pub fn cursor_top(&mut self) {
         self.cursor = 0;
     }
 
-    /// Jump to bottom
     pub fn cursor_bottom(&mut self) {
         let count = self.visible_count();
         if count > 0 {

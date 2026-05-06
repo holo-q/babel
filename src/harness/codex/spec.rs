@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "codex",
     display: "Codex CLI",
     accent: "#10A37F",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#10A37F"),
     support: HarnessSupport::Supported,
     install: InstallStrategy::JsonSnippet,
     identity_fields: &["session_id"],

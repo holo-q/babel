@@ -67,6 +67,7 @@ const OTHER_SPEC: HarnessSpec = HarnessSpec {
     slug: "other",
     display: "Other",
     accent: "#666666",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#666666"),
     support: HarnessSupport::Unsupported,
     install: InstallStrategy::Unsupported,
     identity_fields: &[],

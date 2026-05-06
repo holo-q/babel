@@ -249,9 +249,7 @@ impl ResumeApp {
             // Page navigation
             KeyCode::PageDown => {
                 if self.focus == PaneFocus::Sessions {
-                    for _ in 0..10 {
-                        self.sessions.cursor_down();
-                    }
+                    self.sessions.cursor_jump(10);
                 } else {
                     self.transcript.scroll_down(10);
                 }
@@ -259,9 +257,7 @@ impl ResumeApp {
             }
             KeyCode::PageUp => {
                 if self.focus == PaneFocus::Sessions {
-                    for _ in 0..10 {
-                        self.sessions.cursor_up();
-                    }
+                    self.sessions.cursor_jump_back(10);
                 } else {
                     self.transcript.scroll_up(10);
                 }
@@ -496,11 +492,7 @@ where
                                 let tx = launch_tx.clone();
                                 let refocus = refocus_ctx.clone();
                                 tokio::spawn(async move {
-                                    let msg = match crate::cli::resume::launch_harness_resume(
-                                        &selection,
-                                    )
-                                    .await
-                                    {
+                                    let msg = match launch_harness_resume(&selection).await {
                                         Ok(msg) => {
                                             if let Some(ctx) = refocus {
                                                 tokio::time::sleep(Duration::from_millis(150))
@@ -628,6 +620,84 @@ where
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<String> {
+    let spec = selection.agent_kind.spec();
+    let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no resume command",
+            selection.agent_kind.display_name()
+        )
+    })?;
+    let parts: Vec<&str> = resume_cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Empty resume command for {}",
+            selection.agent_kind.display_name()
+        ));
+    }
+
+    let cwd = selection
+        .project_path
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let (backend, conn) = detect_current_backend()?;
+    let launched = backend.launch_pane(&conn, &parts, &cwd).await?;
+
+    if let Some(platform_window_id) = launched.platform_window_id {
+        let target_workspace = crate::babel_storage::init_db()
+            .ok()
+            .and_then(|db| {
+                crate::babel_storage::get_metadata(&db, &selection.session_key)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|m| m.last_workspace);
+        if let Some(workspace) = target_workspace {
+            if let Err(e) = crate::desktop::move_window_to_workspace(platform_window_id, workspace)
+            {
+                tracing::debug!(
+                    error = %e,
+                    workspace,
+                    "workspace move failed for resumed session"
+                );
+            }
+        }
+    }
+
+    let short_id: String = selection.native_id.chars().take(8).collect();
+    Ok(format!(
+        "launched {} {}",
+        selection.agent_kind.slug(),
+        short_id
+    ))
+}
+
+fn detect_current_backend(
+) -> anyhow::Result<(std::sync::Arc<dyn crate::backend::TerminalBackend>, String)> {
+    use crate::backend::{kitty::KittyBackend, tmux::TmuxBackend};
+
+    if std::env::var("KITTY_WINDOW_ID").is_ok() {
+        let backend =
+            std::sync::Arc::new(KittyBackend) as std::sync::Arc<dyn crate::backend::TerminalBackend>;
+        return Ok((backend, crate::kitty::default_socket()));
+    }
+
+    if let Ok(tmux_val) = std::env::var("TMUX") {
+        let backend =
+            std::sync::Arc::new(TmuxBackend) as std::sync::Arc<dyn crate::backend::TerminalBackend>;
+        if let Some(socket) = tmux_val.splitn(3, ',').next() {
+            return Ok((backend, format!("tmux:{socket}")));
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "no supported terminal backend detected (need kitty or tmux)"
+    ))
 }
 
 fn persist_display_options_if_dirty(app: &mut ResumeApp) {
@@ -762,11 +832,14 @@ fn load_harness_transcript(
             };
 
             match parsed {
-                Ok(messages) => TranscriptLoadResult::Loaded {
-                    seq,
-                    session_id,
-                    messages,
-                },
+                Ok(mut messages) => {
+                    super::ui::prepare_transcript_messages(&mut messages);
+                    TranscriptLoadResult::Loaded {
+                        seq,
+                        session_id,
+                        messages,
+                    }
+                }
                 Err(e) => {
                     trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
                     TranscriptLoadResult::Notice {
@@ -869,10 +942,9 @@ fn apply_transcript_result(app: &mut ResumeApp, result: TranscriptLoadResult, cu
         TranscriptLoadResult::Loaded {
             seq,
             session_id,
-            mut messages,
+            messages,
         } => {
             if seq == current_seq {
-                super::ui::prepare_transcript_messages(&mut messages);
                 app.transcript.load(session_id, messages);
             }
         }

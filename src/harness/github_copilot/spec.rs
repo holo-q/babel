@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "github-copilot-cli",
     display: "GitHub Copilot CLI",
     accent: "#8250DF",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#8250DF"),
     support: HarnessSupport::Unsupported,
     install: InstallStrategy::Unsupported,
     identity_fields: &[],

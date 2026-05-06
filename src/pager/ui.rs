@@ -280,7 +280,7 @@ fn render_session_line(
 ) -> Line<'static> {
     let idx = rendered.idx;
     let row = &rendered.row;
-    let accent = session_row::closest_ansi256_from_hex(row.accent);
+    let accent = row.ansi256;
     let running = row.is_running();
     let selected_bg = is_selected.then_some(SELECTION_BG);
     let gap = selected_style(Style::default(), selected_bg);
@@ -1330,15 +1330,28 @@ fn transcript_visible_lines(
 ) -> Vec<Line<'static>> {
     let mut remaining_skip = scroll_offset;
     let mut lines = Vec::new();
+    let mut seen_visible = false;
+    let mut hidden_since_visible = false;
 
     for msg in messages {
-        let row_count = transcript_message_row_count(msg, expand_messages, role_filter);
-        if remaining_skip >= row_count {
-            remaining_skip -= row_count;
+        if !transcript_message_is_visible(&msg.kind, role_filter) {
+            if seen_visible && role_filter == TranscriptRoleFilter::Conversation {
+                hidden_since_visible = true;
+            }
             continue;
         }
 
-        let message_lines = transcript_message_lines(msg, expand_messages, row_width, palette);
+        let row_count = transcript_message_row_count(msg, expand_messages, role_filter);
+        if remaining_skip >= row_count {
+            remaining_skip -= row_count;
+            seen_visible = true;
+            hidden_since_visible = false;
+            continue;
+        }
+
+        let gap_before = hidden_since_visible;
+        let message_lines =
+            transcript_message_lines(msg, expand_messages, row_width, palette, gap_before);
         for line in message_lines.into_iter().skip(remaining_skip) {
             if lines.len() >= height {
                 return lines;
@@ -1346,6 +1359,8 @@ fn transcript_visible_lines(
             lines.push(line);
         }
         remaining_skip = 0;
+        seen_visible = true;
+        hidden_since_visible = false;
     }
 
     lines
@@ -1356,15 +1371,17 @@ fn transcript_message_lines(
     expand_messages: bool,
     row_width: usize,
     palette: TranscriptPalette,
+    gap_before: bool,
 ) -> Vec<Line<'static>> {
     // Content is pre-sanitized at load time by prepare_transcript_messages.
     // ToolCall content holds the pre-computed preview string.
+    let assistant_prefix = if gap_before { "⋮ " } else { "● " };
     match &msg.kind {
         MessageKind::User if expand_messages => {
             expanded_message_lines("> ", &msg.content, palette.user_style(), row_width)
         }
         MessageKind::Assistant if expand_messages => {
-            expanded_message_lines("● ", &msg.content, palette.assistant_style(), row_width)
+            expanded_message_lines(assistant_prefix, &msg.content, palette.assistant_style(), row_width)
         }
         MessageKind::User => vec![collapsed_message_line(
             "> ",
@@ -1373,7 +1390,7 @@ fn transcript_message_lines(
             row_width,
         )],
         MessageKind::Assistant => vec![collapsed_message_line(
-            "● ",
+            assistant_prefix,
             &msg.content,
             palette.assistant_style(),
             row_width,
@@ -1405,16 +1422,17 @@ fn transcript_message_lines(
 struct TranscriptPalette {
     assistant_text: Color,
     user_text: Color,
+    user_highlight_bg: Color,
 }
 
 impl TranscriptPalette {
     fn user_style(self) -> Style {
-        // User prompts need a row highlight, but reverse-video inverts against
-        // the terminal theme instead of the harness swatch. Keep the harness
-        // accent as foreground and derive the background from its RGB inverse.
+        // User prompts need a row highlight, but the highlight is a neutral
+        // inverse of normal text, not an inverse of the harness swatch. The
+        // harness color remains the foreground cue.
         Style::default()
             .fg(self.user_text)
-            .bg(inverted_rgb_color(self.user_text))
+            .bg(self.user_highlight_bg)
     }
 
     fn assistant_style(self) -> Style {
@@ -1423,10 +1441,29 @@ impl TranscriptPalette {
 }
 
 fn inverted_rgb_color(color: Color) -> Color {
+    let (r, g, b) = color_to_rgb(color).unwrap_or((255, 255, 255));
+    Color::Rgb(255 - r, 255 - g, 255 - b)
+}
+
+fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     match color {
-        Color::Rgb(r, g, b) => Color::Rgb(255 - r, 255 - g, 255 - b),
-        _ => color,
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((255, 0, 0)),
+        Color::Green => Some((0, 255, 0)),
+        Color::Yellow => Some((255, 255, 0)),
+        Color::Blue => Some((0, 0, 255)),
+        Color::Magenta => Some((255, 0, 255)),
+        Color::Cyan => Some((0, 255, 255)),
+        Color::Gray => Some((160, 160, 160)),
+        Color::DarkGray => Some((80, 80, 80)),
+        Color::White => Some((255, 255, 255)),
+        _ => None,
     }
+}
+
+fn normal_text_fg() -> Color {
+    Color::White
 }
 
 fn transcript_palette(agent_kind: AgentKind) -> TranscriptPalette {
@@ -1436,6 +1473,7 @@ fn transcript_palette(agent_kind: AgentKind) -> TranscriptPalette {
     TranscriptPalette {
         assistant_text: accent,
         user_text: accent,
+        user_highlight_bg: inverted_rgb_color(normal_text_fg()),
     }
 }
 
@@ -1904,6 +1942,7 @@ mod tests {
             last_prompt: "a very long user prompt that should be clipped to the list pane"
                 .to_string(),
             accent: "#10a37f",
+            ansi256: 36,
             bright: true,
             has_title: true,
         };
@@ -1981,7 +2020,8 @@ mod tests {
             line: 0,
         };
 
-        let lines = transcript_message_lines(&msg, false, 80, transcript_palette(AgentKind::Codex));
+        let lines =
+            transcript_message_lines(&msg, false, 80, transcript_palette(AgentKind::Codex), false);
         let rendered = lines[0]
             .spans
             .iter()
@@ -2061,7 +2101,7 @@ mod tests {
 
         assert_eq!(palette.assistant_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().fg, Some(Color::Rgb(16, 163, 127)));
-        assert_eq!(palette.user_style().bg, Some(Color::Rgb(239, 92, 128)));
+        assert_eq!(palette.user_style().bg, Some(Color::Rgb(0, 0, 0)));
         assert!(!palette
             .user_style()
             .add_modifier
@@ -2069,13 +2109,13 @@ mod tests {
     }
 
     #[test]
-    fn transcript_user_prompt_palette_uses_inverted_harness_background() {
+    fn transcript_user_prompt_palette_uses_inverted_normal_text_background() {
         let palette = transcript_palette(AgentKind::Cursor);
 
         assert_eq!(palette.user_style().fg, Some(palette.user_text));
         assert_eq!(
             palette.user_style().bg,
-            Some(inverted_rgb_color(palette.user_text))
+            Some(inverted_rgb_color(normal_text_fg()))
         );
         assert!(!palette
             .user_style()
@@ -2194,6 +2234,56 @@ mod tests {
         assert!(!text.contains("echo hidden"));
         assert!(!text.contains("tool output"));
         assert!(!text.contains("status"));
+    }
+
+    #[test]
+    fn conversation_transcript_filter_marks_eclipsed_tool_gap_on_next_assistant() {
+        let messages = vec![
+            Message {
+                kind: MessageKind::User,
+                content: "user prompt".to_string(),
+                line: 0,
+            },
+            Message {
+                kind: MessageKind::ToolCall {
+                    name: "Bash".to_string(),
+                    args: "{\"command\":\"echo hidden\"}".to_string(),
+                },
+                content: "ignored".to_string(),
+                line: 1,
+            },
+            Message {
+                kind: MessageKind::ToolOutput,
+                content: "tool output".to_string(),
+                line: 2,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "assistant prose".to_string(),
+                line: 3,
+            },
+        ];
+
+        let lines = transcript_visible_lines(
+            &messages,
+            false,
+            0,
+            5,
+            80,
+            transcript_palette(AgentKind::Claude),
+            TranscriptRoleFilter::Conversation,
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("> user prompt"));
+        assert!(text.contains("⋮ assistant prose"));
+        assert!(!text.contains("● assistant prose"));
+        assert!(!text.contains("echo hidden"));
+        assert!(!text.contains("tool output"));
     }
 
     #[test]

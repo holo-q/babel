@@ -10,6 +10,38 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+/// Const-evaluable hex accent → ANSI-256 index.
+/// Used in HarnessSpec const definitions so the TUI never parses hex at runtime.
+pub const fn accent_to_ansi256(hex: &[u8]) -> u8 {
+    let hex = if hex[0] == b'#' {
+        // skip the '#'
+        let (_, rest) = hex.split_at(1);
+        rest
+    } else {
+        hex
+    };
+    let r = const_hex_byte(hex[0], hex[1]);
+    let g = const_hex_byte(hex[2], hex[3]);
+    let b = const_hex_byte(hex[4], hex[5]);
+    let ri = ((r as u16) * 5 / 255) as u8;
+    let gi = ((g as u16) * 5 / 255) as u8;
+    let bi = ((b as u16) * 5 / 255) as u8;
+    16 + 36 * ri + 6 * gi + bi
+}
+
+const fn const_hex_byte(hi: u8, lo: u8) -> u8 {
+    const_hex_digit(hi) * 16 + const_hex_digit(lo)
+}
+
+const fn const_hex_digit(ch: u8) -> u8 {
+    match ch {
+        b'0'..=b'9' => ch - b'0',
+        b'a'..=b'f' => ch - b'a' + 10,
+        b'A'..=b'F' => ch - b'A' + 10,
+        _ => 0,
+    }
+}
+
 /// Integration tier for a harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessSupport {
@@ -95,6 +127,9 @@ pub struct HarnessSpec {
     pub slug: &'static str,
     pub display: &'static str,
     pub accent: &'static str,
+    /// Pre-computed ANSI-256 index for `accent`. Avoids per-row hex parsing
+    /// in the TUI render loop.
+    pub ansi256: u8,
     pub support: HarnessSupport,
     pub install: InstallStrategy,
     pub identity_fields: &'static [&'static str],
@@ -211,6 +246,10 @@ impl AgentKind {
         self.spec().accent
     }
 
+    pub fn accent_ansi256(self) -> u8 {
+        self.spec().ansi256
+    }
+
     pub fn support(self) -> HarnessSupport {
         self.spec().support
     }
@@ -233,6 +272,25 @@ impl AgentKind {
             .split_once(':')
             .map(|(_, native)| native)
             .unwrap_or(session_key)
+    }
+
+    /// Normalize a pane-reported session claim into Babel's durable session key.
+    ///
+    /// Kitty user vars outlive the process currently running in a pane. When a
+    /// pane is reused from Claude to Codex, the old `claude:<uuid>` tag must not
+    /// be allowed to mark the Claude row as live. Namespaced claims are accepted
+    /// only when they match the detected harness; legacy bare ids are namespaced
+    /// with the detected harness.
+    pub fn normalize_session_claim(self, session_id: &str) -> Option<String> {
+        if let Some((slug, _)) = session_id.split_once(':') {
+            if Self::from_slug(slug) == Some(self) {
+                Some(session_id.to_string())
+            } else {
+                None
+            }
+        } else {
+            Some(self.session_key(session_id))
+        }
     }
 
     pub fn from_slug(s: &str) -> Option<Self> {
@@ -338,6 +396,17 @@ mod tests {
         assert_eq!(AgentKind::Claude.session_key("abc"), "claude:abc");
         assert_eq!(AgentKind::Cursor.session_key("conv"), "cursor:conv");
         assert_eq!(AgentKind::native_session_id("cursor:conv"), "conv");
+        assert_eq!(
+            AgentKind::Codex.normalize_session_claim("abc").as_deref(),
+            Some("codex:abc")
+        );
+        assert_eq!(
+            AgentKind::Codex
+                .normalize_session_claim("codex:abc")
+                .as_deref(),
+            Some("codex:abc")
+        );
+        assert_eq!(AgentKind::Codex.normalize_session_claim("claude:abc"), None);
     }
 
     #[test]

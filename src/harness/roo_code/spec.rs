@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "roo-code",
     display: "Roo Code",
     accent: "#D8F14B",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#D8F14B"),
     support: HarnessSupport::Unsupported,
     install: InstallStrategy::Unsupported,
     identity_fields: &[],

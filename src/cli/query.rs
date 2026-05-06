@@ -11,6 +11,7 @@ use tracing::instrument;
 
 use super::Target;
 use crate::cli::legend::Legend;
+use crate::cli::table::{print_table, Align, ColumnSpec, TableCell, TableOptions, TableRow};
 use babel::babel_storage::{get_generated_title, get_metadata, init_db};
 use babel::core::BabelCore;
 use babel::kitty::discover_all_instances;
@@ -80,31 +81,36 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool, all: bool) -> R
             .then(a.id().cmp(&b.id()))
     });
 
-    // Group and display by workspace
-    let mut current_workspace: Option<i32> = None;
     let dim = Style::new().dim();
-
-    for win in &windows {
-        let ws = win.workspace.unwrap_or(-2); // -2 = unknown
-
-        // Print workspace header when workspace changes
-        if current_workspace != Some(ws) {
-            if current_workspace.is_some() {
-                println!(); // Blank line between workspaces
+    if details {
+        let mut current_workspace: Option<i32> = None;
+        for win in &windows {
+            let ws = win.workspace.unwrap_or(-2); // -2 = unknown
+            if current_workspace != Some(ws) {
+                if current_workspace.is_some() {
+                    println!();
+                }
+                println!("{}", dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws))));
+                current_workspace = Some(ws);
             }
-            let ws_name = match ws {
-                -1 => "Sticky".to_string(),
-                -2 => "?".to_string(),
-                n => format!("{}", n + 1), // 0-indexed to 1-indexed
-            };
-            println!("{}", dim.apply_to(format!("─── Workspace {} ───", ws_name)));
-            current_workspace = Some(ws);
-        }
-
-        if details {
             print_window_detailed(win)?;
-        } else {
-            print_window(win)?;
+        }
+    } else {
+        let mut start = 0;
+        while start < windows.len() {
+            let ws = windows[start].workspace.unwrap_or(-2);
+            let end = windows[start..]
+                .iter()
+                .position(|win| win.workspace.unwrap_or(-2) != ws)
+                .map(|offset| start + offset)
+                .unwrap_or(windows.len());
+            if start > 0 {
+                println!();
+            }
+            println!("{}", dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws))));
+            let group = windows[start..end].iter().collect::<Vec<_>>();
+            print_window_rows(&group)?;
+            start = end;
         }
     }
 
@@ -135,6 +141,14 @@ fn print_unknown_terminal_hint(count: usize) {
             if count == 1 { "" } else { "s" }
         ))
     );
+}
+
+fn workspace_name(ws: i32) -> String {
+    match ws {
+        -1 => "Sticky".to_string(),
+        -2 => "?".to_string(),
+        n => format!("{}", n + 1),
+    }
 }
 
 fn print_unknown_terminals(terminals: &[TerminalInfo], separate: bool) -> Result<()> {
@@ -647,8 +661,44 @@ async fn show_available_windows(core: &BabelCore) -> Result<()> {
 
 /// Print a single window in compact format
 pub fn print_window(wnd: &AgentPane) -> Result<()> {
-    let conn = init_db()?;
+    print_window_rows(&[wnd])
+}
 
+fn print_window_rows(windows: &[&AgentPane]) -> Result<()> {
+    let conn = init_db()?;
+    let current_socket = babel::kitty::default_socket();
+    let show_socket = windows.iter().any(|wnd| wnd.socket() != current_socket);
+    let columns = vec![
+        ColumnSpec::fixed("focus", "", 1, Align::Left),
+        ColumnSpec::fixed("unread", "", 1, Align::Left),
+        ColumnSpec::fixed("state", "s", 1, Align::Left),
+        ColumnSpec::fit("id", "id", 2, 4, Align::Right),
+        ColumnSpec::fit("harness", "harness", 5, 8, Align::Left),
+        ColumnSpec::fit("cwd", "cwd", 3, 36, Align::Left),
+        ColumnSpec::flex("title", "title", 10, 1),
+        ColumnSpec::fit("socket", "socket", 0, 22, Align::Left).hidden(!show_socket),
+    ];
+    let rows = windows
+        .iter()
+        .map(|wnd| live_window_table_row(wnd, &conn, &current_socket))
+        .collect::<Vec<_>>();
+    print_table(
+        &columns,
+        &rows,
+        &TableOptions {
+            headers: false,
+            ..TableOptions::default()
+        },
+    );
+
+    Ok(())
+}
+
+fn live_window_table_row(
+    wnd: &AgentPane,
+    conn: &rusqlite::Connection,
+    current_socket: &str,
+) -> TableRow {
     // Get overlay metadata if we have a session ID
     let meta = wnd
         .session_id
@@ -661,44 +711,14 @@ pub fn print_window(wnd: &AgentPane) -> Result<()> {
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
 
     // Socket indicator - show warning for windows on non-current kitty instance
-    let current_socket = babel::kitty::default_socket();
     let is_current_socket = wnd.socket() == current_socket;
 
-    // The worker's breath — reading their current state
-    // Hook state is ground truth from Claude Code lifecycle (Working/Idle)
-    // Activity state gives granularity when working (Thinking, ToolUse, etc.)
-    //
-    // Icons: ⚡ Thinking, ⚙ ToolUse, 📋 PlanApproval, ◆ AwaitingInput,
-    //        ◐ BackgroundTask, ○ Idle, ● Working (generic), ◌ Unknown
-    use babel::babel_storage::HookState;
-
-    let (state_icon, state_style) = match (wnd.hook_state, wnd.activity_state) {
-        // Hook says Idle → trust it absolutely (worker finished, awaiting the Captain's voice)
-        (Some(HookState::Idle), _) => ("○", Style::new().dim()),
-
-        // Hook says ToolRunning → most precise state from PreToolUse hook
-        (Some(HookState::ToolRunning), _) => ("⚙", Style::new().cyan().bold()),
-
-        // Hook says Working → use activity_state for granularity
-        (Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", Style::new().yellow()),
-        (Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", Style::new().cyan()),
-        (Some(HookState::Working), Some(ActivityState::PlanApproval)) => {
-            ("📋", Style::new().magenta())
-        }
-        (Some(HookState::Working), Some(ActivityState::BackgroundTask)) => {
-            ("◐", Style::new().magenta())
-        }
-        (Some(HookState::Working), _) => ("●", Style::new().yellow()), // working but no granular state
-
-        // No hook state → fall back to activity_state
-        (None, Some(ActivityState::Thinking)) => ("⚡", Style::new().yellow()),
-        (None, Some(ActivityState::ToolUse)) => ("⚙", Style::new().cyan()),
-        (None, Some(ActivityState::PlanApproval)) => ("📋", Style::new().magenta()),
-        (None, Some(ActivityState::AwaitingInput)) => ("◆", Style::new().green()),
-        (None, Some(ActivityState::BackgroundTask)) => ("◐", Style::new().magenta()),
-        (None, Some(ActivityState::Idle)) => ("○", Style::new().dim()),
-        (None, Some(ActivityState::Unknown)) | (None, None) => ("◌", Style::new().blue()), // no data
-    };
+    let (state_icon, state_kind) = session_row::live_state_icon(Some(LiveSessionState {
+        workspace: wnd.workspace,
+        hook_state: wnd.hook_state,
+        activity_state: wnd.activity_state,
+    }));
+    let state_style = state_style(state_kind);
 
     // Title - strip ✳ prefix if present, use summary from session if available
     let raw_title = wnd
@@ -742,65 +762,43 @@ pub fn print_window(wnd: &AgentPane) -> Result<()> {
     let bold = Style::new().bold();
 
     // Build the line
-    let id_str = format!("{:>3}", wnd.id());
-
-    // Unread dot or custom icon
     let marker = if let Some(icon) = custom_icon {
-        format!("{} ", icon)
+        icon.to_string()
     } else if unread {
-        format!("{} ", style("●").yellow())
+        "●".to_string()
     } else {
-        "  ".to_string()
+        " ".to_string()
+    };
+    let marker_style = if custom_icon.is_some() || unread {
+        Style::new().yellow()
+    } else {
+        dim.clone()
     };
 
-    // Compact cwd - just the last component or ~ prefix
-    let cwd_display = wnd
-        .cwd
-        .strip_prefix(dirs::home_dir().unwrap_or_default())
-        .map(|p| format!("~/{}", p.display()))
-        .unwrap_or_else(|_| wnd.cwd.display().to_string());
-
-    // Truncate cwd if too long
-    let cwd_short = if cwd_display.len() > 30 {
-        format!("…{}", &cwd_display[cwd_display.len() - 28..])
+    let cwd = session_row::abbreviate_path(&wnd.cwd, usize::MAX);
+    let socket = if is_current_socket {
+        String::new()
     } else {
-        cwd_display
-    };
-
-    // Format: " ▸●⚡123 ~/path  Title"
-    // Components: focus | unread/icon | state | id | cwd | title [socket]
-    // Socket indicator: nothing for current, ⚠sock-XXXXX for non-current
-    print!(
-        " {}{}{}",
-        focus_indicator,
-        marker,
-        state_style.apply_to(state_icon)
-    );
-    print!(
-        "{} ",
-        if wnd.is_focused {
-            bold.apply_to(&id_str)
-        } else {
-            dim.apply_to(&id_str)
-        }
-    );
-    print!("{}  ", dim.apply_to(&cwd_short));
-    // Title styled by source: haiku=normal, user-rename=italic, procedural=dim+italic
-    // Focus no longer affects title color (▸ marker is sufficient)
-    print!("{}", title_style.apply_to(title));
-
-    // Show socket warning for non-current socket
-    if !is_current_socket {
-        // Extract filename: "unix:/run/user/1000/kitty.sock-74830" → "kitty.sock-74830"
         let sock_name = wnd.socket().rsplit('/').next().unwrap_or("other");
-        print!(
-            " {}",
-            Style::new().red().apply_to(format!("⚠{}", sock_name))
-        );
-    }
-    println!();
-
-    Ok(())
+        format!("⚠{}", sock_name)
+    };
+    let accent = session_row::closest_ansi256_from_hex(wnd.agent_kind.accent_color());
+    TableRow::new(
+        vec![
+            TableCell::new(focus_indicator, Style::new()),
+            TableCell::new(marker, marker_style),
+            TableCell::new(state_icon, state_style),
+            TableCell::new(
+                wnd.id().to_string(),
+                if wnd.is_focused { bold } else { dim.clone() },
+            ),
+            TableCell::new(wnd.agent_kind.slug(), Style::new().color256(accent)),
+            TableCell::new(cwd, dim),
+            TableCell::new(title.to_string(), title_style),
+            TableCell::new(socket, Style::new().red()),
+        ],
+        false,
+    )
 }
 
 /// Print a single window in detailed format with all metadata
@@ -1282,112 +1280,7 @@ pub async fn cmd_ls_sessions(
         })
         .collect();
 
-    // Pass 2: measure column widths
-    let w_idx = format!("{}", rows.len()).len();
-    let w_harness = rows.iter().map(|r| r.harness.len()).max().unwrap_or(0);
-    let w_ws = rows.iter().map(|r| r.workspace.len()).max().unwrap_or(0);
-    let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
-    let w_time = rows.iter().map(|r| r.time.len()).max().unwrap_or(0);
-    let w_turns = rows.iter().map(|r| r.turns.len()).max().unwrap_or(0);
-    let w_title = rows
-        .iter()
-        .map(|r| r.title.chars().count())
-        .max()
-        .unwrap_or(0);
-    let w_prompt = rows
-        .iter()
-        .map(|r| r.last_prompt.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    // Pass 3: print
-    for (i, row) in rows.iter().enumerate() {
-        let idx = i + 1;
-        let accent_c = session_row::closest_ansi256_from_hex(row.accent);
-        let running = row.is_running();
-        let gap = if running {
-            Style::new().underlined().apply_to(" ").to_string()
-        } else {
-            " ".to_string()
-        };
-        let harness_style = if row.bright {
-            Style::new().color256(accent_c)
-        } else {
-            Style::new().dim()
-        };
-        let harness_style = row_style(harness_style, running);
-        let text_style = if row.bright {
-            Style::new().color256(accent_c)
-        } else {
-            Style::new().dim()
-        };
-        let text_style = row_style(text_style, running);
-        let state_style = if row.bright {
-            state_style(row.state_kind)
-        } else {
-            Style::new().dim()
-        };
-        let state_style = row_style(state_style, running);
-        let row_dim = row_style(Style::new().dim(), running);
-
-        // state | harness | ws | cwd | filter_tag | time | turns | idx | title | prompt
-        print!("{}", gap);
-        print!("{}", state_style.apply_to(row.state_icon));
-        print!("{}", gap);
-        print!(
-            "{}",
-            harness_style.apply_to(format!("{:<w_harness$}", row.harness))
-        );
-        if w_ws > 0 {
-            print!("{}", gap);
-            print!("{}", gap);
-            print!("{}", row_dim.apply_to(format!("{:>w_ws$}", row.workspace)));
-        }
-        print!("{}", gap);
-        print!("{}", gap);
-        print!("{}", row_dim.apply_to(format!("{:<w_cwd$}", row.cwd)));
-        print!("{}", gap);
-        print!("{}", gap);
-        print!("{}", row_dim.apply_to(row.filter_tag));
-        print!("{}", gap);
-        print!("{}", row_dim.apply_to(format!("{:>w_time$}", row.time)));
-        print!("{}", gap);
-        print!("{}", gap);
-        print!("{}", row_dim.apply_to(format!("{:>w_turns$}", row.turns)));
-        print!("{}", gap);
-        print!("{}", gap);
-        print!(
-            "{}",
-            row_style(Style::new(), running).apply_to(format!("{:>w_idx$}", idx))
-        );
-        let tpad = w_title - row.title.chars().count();
-        let title_style = if row.has_title && row.bright {
-            Style::new().color256(accent_c).bold().italic()
-        } else if row.has_title {
-            Style::new().dim().bold().italic()
-        } else if row.bright {
-            Style::new().color256(accent_c)
-        } else {
-            Style::new().dim()
-        };
-        let title_style = row_style(title_style, running);
-        print!("{}", gap);
-        print!("{}", gap);
-        print!(
-            "{}",
-            title_style.apply_to(format!("{}{}", row.title, " ".repeat(tpad)))
-        );
-        if w_prompt > 0 {
-            let ppad = w_prompt - row.last_prompt.chars().count();
-            print!("{}", gap);
-            print!("{}", gap);
-            print!(
-                "{}",
-                text_style.apply_to(format!("{}{}", row.last_prompt, " ".repeat(ppad)))
-            );
-        }
-        println!();
-    }
+    print_session_rows(&rows);
 
     println!();
     let mut kinds = std::collections::HashSet::new();
@@ -1429,12 +1322,78 @@ fn state_style(state_kind: StateKind) -> Style {
     }
 }
 
-fn row_style(style: Style, running: bool) -> Style {
-    if running {
-        style.underlined()
+fn print_session_rows(rows: &[SessionRow]) {
+    let show_workspace = rows.iter().any(|row| !row.workspace.is_empty());
+    let show_prompt = rows.iter().any(|row| !row.last_prompt.is_empty());
+    let columns = vec![
+        ColumnSpec::fixed("state", "s", 1, Align::Left),
+        ColumnSpec::fit("harness", "harness", 5, 8, Align::Left),
+        ColumnSpec::fit("workspace", "ws", 1, 3, Align::Right).hidden(!show_workspace),
+        ColumnSpec::fit("cwd", "cwd", 3, 42, Align::Left),
+        ColumnSpec::fixed("filter", "f", 1, Align::Left),
+        ColumnSpec::fit("age", "age", 2, 5, Align::Right),
+        ColumnSpec::fit("turns", "turns", 2, 6, Align::Right),
+        ColumnSpec::fit("#", "#", 1, rows.len().max(1).to_string().len(), Align::Right),
+        ColumnSpec::flex("thread", "thread", 12, 3),
+        ColumnSpec::flex("prompt", "prompt", 12, 2).hidden(!show_prompt),
+    ];
+    let table_rows = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| session_table_row(idx + 1, row))
+        .collect::<Vec<_>>();
+    print_table(
+        &columns,
+        &table_rows,
+        &TableOptions {
+            headers: false,
+            ..TableOptions::default()
+        },
+    );
+}
+
+fn session_table_row(idx: usize, row: &SessionRow) -> TableRow {
+    let accent_c = session_row::closest_ansi256_from_hex(row.accent);
+    let harness_style = if row.bright {
+        Style::new().color256(accent_c)
     } else {
-        style
-    }
+        Style::new().dim()
+    };
+    let text_style = if row.bright {
+        Style::new().color256(accent_c)
+    } else {
+        Style::new().dim()
+    };
+    let state_style = if row.bright {
+        state_style(row.state_kind)
+    } else {
+        Style::new().dim()
+    };
+    let title_style = if row.has_title && row.bright {
+        Style::new().color256(accent_c).bold().italic()
+    } else if row.has_title {
+        Style::new().dim().bold().italic()
+    } else if row.bright {
+        Style::new().color256(accent_c)
+    } else {
+        Style::new().dim()
+    };
+    let dim = Style::new().dim();
+    TableRow::new(
+        vec![
+            TableCell::new(row.state_icon, state_style),
+            TableCell::new(row.harness.clone(), harness_style),
+            TableCell::new(row.workspace.clone(), dim.clone()),
+            TableCell::new(row.cwd.clone(), dim.clone()),
+            TableCell::new(row.filter_tag, dim.clone()),
+            TableCell::new(row.time.clone(), dim.clone()),
+            TableCell::new(row.turns.clone(), dim),
+            TableCell::new(idx.to_string(), Style::new()),
+            TableCell::new(row.title.clone(), title_style),
+            TableCell::new(row.last_prompt.clone(), text_style),
+        ],
+        row.is_running(),
+    )
 }
 
 fn session_row(
@@ -1472,6 +1431,7 @@ fn session_row(
             has_title: s.has_title,
             hidden: is_hidden,
             text_max_chars: 40,
+            pre_sanitized: false,
             live: live.map(|pane| LiveSessionState {
                 workspace: pane.workspace,
                 hook_state: pane.hook_state,
@@ -1509,10 +1469,14 @@ async fn live_session_index(core: &BabelCore) -> Result<HashMap<String, Vec<Live
         let Some(session_id) = pane.session_id.as_deref() else {
             continue;
         };
-        let session_key = if session_id.contains(':') {
-            session_id.to_string()
-        } else {
-            pane.agent_kind.session_key(session_id)
+        let Some(session_key) = pane.agent_kind.normalize_session_claim(session_id) else {
+            tracing::warn!(
+                pane = %pane.addr.short(),
+                detected_harness = %pane.agent_kind,
+                stale_session = %session_id,
+                "ignoring stale cross-harness live session claim"
+            );
+            continue;
         };
         index.entry(session_key).or_default().push(LiveSession {
             addr: pane.addr,

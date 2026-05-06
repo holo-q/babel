@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "crush",
     display: "Crush",
     accent: "#6B50FF",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#6B50FF"),
     support: HarnessSupport::Supported,
     install: InstallStrategy::JsonSnippet,
     identity_fields: &["session_id"],

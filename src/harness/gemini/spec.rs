@@ -6,6 +6,7 @@ pub(crate) const SPEC: HarnessSpec = HarnessSpec {
     slug: "gemini",
     display: "Gemini CLI",
     accent: "#3186FF",
+    ansi256: crate::agent_kind::accent_to_ansi256(b"#3186FF"),
     support: HarnessSupport::Supported,
     install: InstallStrategy::JsonSnippet,
     identity_fields: &["session_id"],
