@@ -76,6 +76,7 @@ pub mod events;
 pub mod file_index;
 pub mod fingerprint;
 pub mod fire;
+pub mod harness;
 pub mod harness_ops;
 pub mod indicator;
 pub mod ipc;
