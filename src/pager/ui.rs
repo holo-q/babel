@@ -53,11 +53,17 @@ pub fn draw(frame: &mut Frame, app: &mut ResumeApp) {
 
 /// Draw the session list panel
 fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
+    let cwd_label = app
+        .sessions
+        .current_cwd
+        .as_deref()
+        .map(|cwd| format!("cwd:{}", session_row::abbreviate_path(cwd, 72)))
+        .unwrap_or_else(|| "cwd:?".to_string());
     let filter_label = match (app.sessions.show_all, app.sessions.show_hidden) {
-        (true, true) => "all+hidden",
-        (true, false) => "all",
-        (false, true) => "cwd+hidden",
-        (false, false) => "cwd",
+        (true, true) => "all+hidden".to_string(),
+        (true, false) => "all".to_string(),
+        (false, true) => format!("{cwd_label}+hidden"),
+        (false, false) => cwd_label,
     };
     let title = if app.is_searching {
         format!("Sessions [{}] /{}", filter_label, app.search_buffer)
