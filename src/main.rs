@@ -11,6 +11,7 @@ mod cli;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
+use console::style;
 
 use babel::core::BabelCore;
 use cli::{Cli, Commands};
@@ -103,7 +104,23 @@ async fn main() -> Result<()> {
                 | Commands::Hook { .. }
         );
     if show_mode && !cli.json {
-        eprintln!("[{}]", core.mode_label());
+        if core.is_connected() {
+            let sock = babel::utility::ipc::socket_path();
+            let name = sock.file_name().unwrap_or(sock.as_os_str());
+            eprintln!(
+                "{} {} {}",
+                style("daemon").dim(),
+                style("->").dim(),
+                style(name.to_string_lossy()).cyan().dim()
+            );
+        } else {
+            eprintln!(
+                "{} {} {}",
+                style("daemon").dim(),
+                style("->").dim(),
+                style("none, running locally").yellow()
+            );
+        }
     }
 
     // Route to appropriate handler based on subcommand
