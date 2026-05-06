@@ -5,15 +5,16 @@
 //! - Optional transcript preview with message rendering
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use scrollparse::MessageKind;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::session_row::{self, SessionRow, StateKind};
 
 use super::app::{PaneFocus, ResumeApp};
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
+const USER_PROMPT_BG: Color = Color::Rgb(30, 52, 42);
 
 /// Draw the pager UI
 pub fn draw(frame: &mut Frame, app: &mut ResumeApp) {
@@ -298,18 +299,22 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         return;
     }
 
-    // Render messages. Transcript scroll is line-based: loading and `G` land at
-    // the bottom, and clamping uses the visible pane height instead of allowing
-    // the last line to drift to the top of the pane.
+    // Render one physical row per turn by default. Session transcripts often
+    // contain pasted blocks, quoted prompts, or command output with many
+    // embedded newlines; expanding those inline makes navigation laggy and turns
+    // the right pane into a wrapping surface. The preview is a collapsed row:
+    // prefix + ABC ... [cut] ... XYZ, with user prompt rows carrying a full-row
+    // background so the conversation rhythm remains visible.
     let mut lines: Vec<Line> = Vec::new();
 
-    let message_count = app.transcript.messages.len();
-    for (message_idx, msg) in app.transcript.messages.iter().enumerate() {
+    for msg in &app.transcript.messages {
         let (prefix, style) = match &msg.kind {
-            MessageKind::User => ("> ", Style::default().fg(Color::Green)),
+            MessageKind::User => (
+                "> ",
+                Style::default().fg(Color::White).bg(USER_PROMPT_BG),
+            ),
             MessageKind::Assistant => ("● ", Style::default().fg(Color::Cyan)),
             MessageKind::ToolCall { name, args } => {
-                // Format tool call header
                 let tool_line = if args.is_empty() {
                     format!("● {}", name)
                 } else {
@@ -330,21 +335,12 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
             ),
         };
 
-        // Split content into lines and add prefix to first
-        let content_lines: Vec<&str> = msg.content.lines().collect();
-        for (i, line) in content_lines.iter().enumerate() {
-            let line_prefix = if i == 0 { prefix } else { "  " };
-            let truncated = truncate_str(line, inner.width as usize - 4);
-            lines.push(Line::from(vec![
-                Span::styled(line_prefix.to_string(), style),
-                Span::styled(truncated, style),
-            ]));
-        }
-
-        // Add blank line between messages for readability
-        if message_idx + 1 < message_count {
-            lines.push(Line::from(""));
-        }
+        lines.push(collapsed_message_line(
+            prefix,
+            &msg.content,
+            style,
+            inner.width as usize,
+        ));
     }
 
     let max_offset = lines.len().saturating_sub(inner.height as usize);
@@ -354,7 +350,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .skip(app.transcript.scroll_offset)
         .collect();
 
-    let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+    let para = Paragraph::new(visible_lines);
     frame.render_widget(para, inner);
 }
 
@@ -522,6 +518,81 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         let short: String = s.chars().take(max_len.saturating_sub(1)).collect();
         format!("{}…", short)
     }
+}
+
+fn collapsed_message_line(
+    prefix: &str,
+    content: &str,
+    style: Style,
+    row_width: usize,
+) -> Line<'static> {
+    if row_width == 0 {
+        return Line::from("");
+    }
+
+    let prefix_width = display_width(prefix);
+    let content_width = row_width.saturating_sub(prefix_width);
+    let clean = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = middle_truncate_str(&clean, content_width);
+
+    let mut spans = Vec::new();
+    let mut line_width = 0;
+    push_span(&mut spans, &mut line_width, prefix.to_string(), style);
+    push_span(&mut spans, &mut line_width, preview, style);
+
+    if line_width < row_width {
+        let pad_width = row_width - line_width;
+        push_span(&mut spans, &mut line_width, " ".repeat(pad_width), style);
+    }
+
+    Line::from(spans)
+}
+
+fn middle_truncate_str(s: &str, max_width: usize) -> String {
+    if display_width(s) <= max_width {
+        return s.to_string();
+    }
+
+    const MARKER: &str = "… [cut] …";
+    let marker_width = display_width(MARKER);
+    if max_width <= marker_width + 2 {
+        return truncate_str(s, max_width);
+    }
+
+    let keep_width = max_width - marker_width;
+    let head_budget = keep_width / 2;
+    let tail_budget = keep_width.saturating_sub(head_budget);
+    let head = take_width_from_start(s, head_budget);
+    let tail = take_width_from_end(s, tail_budget);
+    format!("{head}{MARKER}{tail}")
+}
+
+fn take_width_from_start(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn take_width_from_end(s: &str, max_width: usize) -> String {
+    let mut chars = Vec::new();
+    let mut width = 0;
+    for ch in s.chars().rev() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        chars.push(ch);
+        width += ch_width;
+    }
+    chars.into_iter().rev().collect()
 }
 
 fn row_style(style: Style, running: bool) -> Style {

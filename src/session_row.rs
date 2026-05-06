@@ -211,8 +211,8 @@ pub fn abbreviate_path(path: &Path, max_chars: usize) -> String {
 }
 
 pub fn sanitize_display(s: &str, max_chars: usize) -> String {
-    let clean = s.replace('\n', "↵").replace('\r', "");
-    truncate_chars(&clean, max_chars)
+    let clean = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    middle_truncate_chars(&clean, max_chars)
 }
 
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -222,6 +222,33 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         let short: String = s.chars().take(max_chars).collect();
         format!("{}…", short)
     }
+}
+
+pub fn middle_truncate_chars(s: &str, max_chars: usize) -> String {
+    let len = s.chars().count();
+    if len <= max_chars {
+        return s.to_string();
+    }
+
+    const MARKER: &str = "… [cut] …";
+    let marker_len = MARKER.chars().count();
+    if max_chars <= marker_len + 2 {
+        return truncate_chars(s, max_chars);
+    }
+
+    let keep = max_chars - marker_len;
+    let head_len = keep / 2;
+    let tail_len = keep.saturating_sub(head_len);
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{MARKER}{tail}")
 }
 
 fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
