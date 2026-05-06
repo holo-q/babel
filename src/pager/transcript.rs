@@ -26,7 +26,7 @@ impl TranscriptView {
     pub fn load(&mut self, session_id: String, messages: Vec<Message>) {
         self.session_id = Some(session_id);
         self.messages = messages;
-        self.scroll_offset = 0;
+        self.scroll_bottom();
         self.notice = None;
     }
 
@@ -48,8 +48,7 @@ impl TranscriptView {
 
     /// Scroll down
     pub fn scroll_down(&mut self, lines: usize) {
-        let max = self.messages.len().saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + lines).min(max);
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
     }
 
     /// Scroll up
@@ -64,6 +63,6 @@ impl TranscriptView {
 
     /// Jump to bottom
     pub fn scroll_bottom(&mut self) {
-        self.scroll_offset = self.messages.len().saturating_sub(1);
+        self.scroll_offset = usize::MAX;
     }
 }

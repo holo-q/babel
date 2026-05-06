@@ -258,7 +258,7 @@ fn render_session_item(
 }
 
 /// Draw the transcript preview panel
-fn draw_transcript(frame: &mut Frame, app: &ResumeApp, area: Rect) {
+fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let title = match &app.transcript.session_id {
         Some(id) => format!("Transcript [{}]", &id[..8.min(id.len())]),
         None => "Transcript".to_string(),
@@ -293,15 +293,13 @@ fn draw_transcript(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         return;
     }
 
-    // Render messages
+    // Render messages. Transcript scroll is line-based: loading and `G` land at
+    // the bottom, and clamping uses the visible pane height instead of allowing
+    // the last line to drift to the top of the pane.
     let mut lines: Vec<Line> = Vec::new();
 
-    for msg in app
-        .transcript
-        .messages
-        .iter()
-        .skip(app.transcript.scroll_offset)
-    {
+    let message_count = app.transcript.messages.len();
+    for (message_idx, msg) in app.transcript.messages.iter().enumerate() {
         let (prefix, style) = match &msg.kind {
             MessageKind::User => ("> ", Style::default().fg(Color::Green)),
             MessageKind::Assistant => ("● ", Style::default().fg(Color::Cyan)),
@@ -339,10 +337,19 @@ fn draw_transcript(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         }
 
         // Add blank line between messages for readability
-        lines.push(Line::from(""));
+        if message_idx + 1 < message_count {
+            lines.push(Line::from(""));
+        }
     }
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let max_offset = lines.len().saturating_sub(inner.height as usize);
+    app.transcript.scroll_offset = app.transcript.scroll_offset.min(max_offset);
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(app.transcript.scroll_offset)
+        .collect();
+
+    let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
