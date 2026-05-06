@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -202,6 +202,12 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
+            // Toggle hidden sessions
+            KeyCode::Char('h') => {
+                self.sessions.toggle_show_hidden();
+                ResumeAction::None
+            }
+
             // Toggle transcript preview
             KeyCode::Char('t') => {
                 self.show_transcript = !self.show_transcript;
@@ -224,7 +230,7 @@ impl ResumeApp {
                 }
                 ResumeAction::None
             }
-            KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Left => {
                 self.focus = PaneFocus::Sessions;
                 ResumeAction::None
             }

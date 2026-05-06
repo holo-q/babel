@@ -51,7 +51,12 @@ pub fn draw(frame: &mut Frame, app: &mut ResumeApp) {
 
 /// Draw the session list panel
 fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
-    let filter_label = if app.sessions.show_all { "all" } else { "cwd" };
+    let filter_label = match (app.sessions.show_all, app.sessions.show_hidden) {
+        (true, true) => "all+hidden",
+        (true, false) => "all",
+        (false, true) => "cwd+hidden",
+        (false, false) => "cwd",
+    };
     let title = if app.is_searching {
         format!("Sessions [{}] /{}", filter_label, app.search_buffer)
     } else {
@@ -365,7 +370,7 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let keybinds = if app.is_searching {
         "Enter:confirm  Esc:cancel"
     } else {
-        "Tab:cwd/all  r:refresh  t:transcript  j/k:nav  Enter:launch  /:search  q:quit"
+        "Tab:cwd/all  h:hidden  r:refresh  t:transcript  j/k:nav  Enter:launch  /:search  q:quit"
     };
 
     let left = if app.status_message.is_empty() {

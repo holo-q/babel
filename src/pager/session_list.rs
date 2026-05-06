@@ -152,6 +152,8 @@ pub struct SessionListState {
     pub scroll_offset: usize,
     /// Whether showing all projects or just cwd
     pub show_all: bool,
+    /// Whether hidden sessions are included in the visible list
+    pub show_hidden: bool,
     /// Current working directory for cwd filtering
     pub current_cwd: Option<PathBuf>,
     /// Search/filter query
@@ -165,17 +167,23 @@ impl SessionListState {
             cursor: 0,
             scroll_offset: 0,
             show_all: false,
+            show_hidden: false,
             current_cwd,
             filter_query: String::new(),
         }
     }
 
-    /// Get visible sessions (cwd-filtered + search-filtered)
+    /// Get visible sessions (hidden-filtered + cwd-filtered + search-filtered)
     pub fn visible_sessions(&self) -> Vec<(usize, &EnrichedSession)> {
         self.sessions
             .iter()
             .enumerate()
             .filter(|(_, s)| {
+                // Hidden sessions stay loaded so `h` can expose them instantly.
+                if s.hidden && !self.show_hidden {
+                    return false;
+                }
+
                 // First: cwd filter (unless show_all)
                 if !self.show_all {
                     if let Some(cwd) = &self.current_cwd {
@@ -255,11 +263,13 @@ impl SessionListState {
     /// Toggle show_all filter
     pub fn toggle_show_all(&mut self) {
         self.show_all = !self.show_all;
-        // Reset cursor if out of bounds after filter change
-        let count = self.visible_sessions().len();
-        if self.cursor >= count {
-            self.cursor = count.saturating_sub(1);
-        }
+        self.clamp_cursor();
+    }
+
+    /// Toggle hidden session display.
+    pub fn toggle_show_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.clamp_cursor();
     }
 
     /// Update filter query

@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use console::style;
 use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
@@ -156,18 +156,9 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
 }
 
 async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>> {
-    let mut sessions = super::query::scan_all_sessions(None, &Default::default());
+    let sessions = super::query::scan_all_sessions(None, &Default::default());
 
     let conn = babel::babel_storage::init_db().ok();
-    sessions.retain(|s| {
-        let key = s.agent_kind.session_key(&s.native_id);
-        let hidden = conn
-            .as_ref()
-            .and_then(|c| babel::babel_storage::get_metadata(c, &key).ok().flatten())
-            .map(|m| m.hidden)
-            .unwrap_or(false);
-        !hidden
-    });
 
     let mut panes = core.panes().await.unwrap_or_default();
     panes.sort_by(|a, b| {
