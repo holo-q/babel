@@ -111,9 +111,12 @@ impl BabelCore {
             }
         } else {
             debug!("daemon not available, initializing local state");
-            // Ephemeral mode: construct a registry with kitty backend for direct queries
+            // Ephemeral mode: construct a registry with available backends
             let mut registry = crate::backend::BackendRegistry::new();
             registry.register(std::sync::Arc::new(crate::backend::kitty::KittyBackend));
+            if !crate::backend::tmux::find_all_sockets().is_empty() {
+                registry.register(std::sync::Arc::new(crate::backend::tmux::TmuxBackend));
+            }
             let mut state = BabelState::new(std::sync::Arc::new(registry));
 
             let refresh_result = if let Some(duration) = refresh_timeout {

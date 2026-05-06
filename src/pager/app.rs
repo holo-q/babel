@@ -224,6 +224,13 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
+            // Cycle cwd display label: relative -> absolute -> project name.
+            KeyCode::Char('c') => {
+                let mode = self.sessions.cycle_cwd_display_mode();
+                self.status_message = format!("cwd display: {}", mode.label());
+                ResumeAction::None
+            }
+
             // Toggle transcript preview
             KeyCode::Char('t') => {
                 self.show_transcript = !self.show_transcript;

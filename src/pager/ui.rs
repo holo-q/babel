@@ -4,6 +4,8 @@
 //! - Session list with running indicators
 //! - Optional transcript preview with message rendering
 
+use std::path::Path;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use scrollparse::MessageKind;
@@ -13,6 +15,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::session_row::{self, SessionRow, StateKind};
 
 use super::app::{PaneFocus, ResumeApp};
+use super::session_list::CwdDisplayMode;
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
 const USER_PROMPT_BG: Color = Color::Rgb(30, 52, 42);
@@ -57,7 +60,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .sessions
         .current_cwd
         .as_deref()
-        .map(|cwd| format!("cwd:{}", session_row::abbreviate_path(cwd, 72)))
+        .map(|cwd| cwd_label(cwd, app.sessions.cwd_display_mode))
         .unwrap_or_else(|| "cwd:?".to_string());
     let filter_label = match (app.sessions.show_all, app.sessions.show_hidden) {
         (true, true) => "all+hidden".to_string(),
@@ -385,7 +388,7 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let keybinds = if app.is_searching {
         "Enter:confirm  Esc:cancel"
     } else {
-        "Tab:cwd/all  h:hidden  H:hide  r:refresh  t:transcript  j/k:nav  Enter:launch  /:search  q:quit"
+        "Tab:cwd/all  c:cwd label  h:hidden  H:hide  r:refresh  t:transcript  j/k:nav  Enter:launch  /:search  q:quit"
     };
 
     let left = if app.status_message.is_empty() {
@@ -428,6 +431,31 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
 }
 
 // === Helper functions ===
+
+fn cwd_label(cwd: &Path, mode: CwdDisplayMode) -> String {
+    let value = match mode {
+        CwdDisplayMode::Relative => relative_cwd_label(cwd),
+        CwdDisplayMode::Absolute => cwd.display().to_string(),
+        CwdDisplayMode::Project => cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| cwd.display().to_string()),
+    };
+    format!("cwd:{value}")
+}
+
+fn relative_cwd_label(cwd: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = cwd.strip_prefix(&home) {
+            let text = relative.display().to_string();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    session_row::abbreviate_path(cwd, 72)
+}
 
 #[derive(Clone, Copy, Default)]
 struct RowWidths {
@@ -986,5 +1014,20 @@ mod tests {
         assert!(fitted.total_width() <= 100);
         assert!(fitted.prompt <= widths.prompt);
         assert!(fitted.title <= widths.title);
+    }
+
+    #[test]
+    fn cwd_label_can_show_absolute_path() {
+        let path = Path::new("/home/nuck/holoq/repo-os/babel");
+        assert_eq!(
+            cwd_label(path, CwdDisplayMode::Absolute),
+            "cwd:/home/nuck/holoq/repo-os/babel"
+        );
+    }
+
+    #[test]
+    fn cwd_label_can_show_project_name() {
+        let path = Path::new("/home/nuck/holoq/repo-os/babel");
+        assert_eq!(cwd_label(path, CwdDisplayMode::Project), "cwd:babel");
     }
 }

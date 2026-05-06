@@ -20,6 +20,7 @@
 //! async tasks without lifetime gymnastics.
 
 pub mod kitty;
+pub mod tmux;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

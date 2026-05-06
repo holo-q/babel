@@ -9,6 +9,31 @@ use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
 use crate::ActivityState;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwdDisplayMode {
+    Relative,
+    Absolute,
+    Project,
+}
+
+impl CwdDisplayMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Relative => Self::Absolute,
+            Self::Absolute => Self::Project,
+            Self::Project => Self::Relative,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Relative => "relative",
+            Self::Absolute => "absolute",
+            Self::Project => "project",
+        }
+    }
+}
+
 /// Running status of a session
 #[derive(Debug, Clone, Default)]
 pub enum RunningStatus {
@@ -157,6 +182,8 @@ pub struct SessionListState {
     pub show_hidden: bool,
     /// Current working directory for cwd filtering
     pub current_cwd: Option<PathBuf>,
+    /// How the cwd filter is shown in the header.
+    pub cwd_display_mode: CwdDisplayMode,
     /// Search/filter query
     pub filter_query: String,
 }
@@ -170,6 +197,7 @@ impl SessionListState {
             show_all: false,
             show_hidden: false,
             current_cwd,
+            cwd_display_mode: CwdDisplayMode::Relative,
             filter_query: String::new(),
         }
     }
@@ -297,6 +325,11 @@ impl SessionListState {
     pub fn toggle_show_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
         self.clamp_cursor();
+    }
+
+    pub fn cycle_cwd_display_mode(&mut self) -> CwdDisplayMode {
+        self.cwd_display_mode = self.cwd_display_mode.next();
+        self.cwd_display_mode
     }
 
     /// Update filter query

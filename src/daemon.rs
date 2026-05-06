@@ -1838,8 +1838,11 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
         }
     }
 
-    // TODO: Register TmuxBackend when implemented
-    // if tmux is available, register it alongside kitty
+    // Tmux backend: register if any tmux server sockets exist
+    if !crate::backend::tmux::find_all_sockets().is_empty() {
+        registry.register(Arc::new(crate::backend::tmux::TmuxBackend));
+        checkpoint!("tmux_registered", sockets = crate::backend::tmux::find_all_sockets().len());
+    }
 
     if registry.backends().is_empty() {
         anyhow::bail!("No terminal backends available. Kitty remote control must be enabled, or tmux must be running.");
