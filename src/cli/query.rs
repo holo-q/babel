@@ -1208,7 +1208,12 @@ pub struct SessionFilters {
 
 impl Default for SessionFilters {
     fn default() -> Self {
-        Self { sub: false, oneshot: false, commands: false, all: false }
+        Self {
+            sub: false,
+            oneshot: false,
+            commands: false,
+            all: false,
+        }
     }
 }
 
@@ -1367,8 +1372,16 @@ pub async fn cmd_ls_sessions(
     let w_cwd = rows.iter().map(|r| r.cwd.len()).max().unwrap_or(0);
     let w_time = rows.iter().map(|r| r.time.len()).max().unwrap_or(0);
     let w_turns = rows.iter().map(|r| r.turns.len()).max().unwrap_or(0);
-    let w_title = rows.iter().map(|r| r.title.chars().count()).max().unwrap_or(0);
-    let w_prompt = rows.iter().map(|r| r.last_prompt.chars().count()).max().unwrap_or(0);
+    let w_title = rows
+        .iter()
+        .map(|r| r.title.chars().count())
+        .max()
+        .unwrap_or(0);
+    let w_prompt = rows
+        .iter()
+        .map(|r| r.last_prompt.chars().count())
+        .max()
+        .unwrap_or(0);
 
     // Pass 3: print
     for (i, row) in rows.iter().enumerate() {
@@ -1380,11 +1393,23 @@ pub async fn cmd_ls_sessions(
         } else {
             " ".to_string()
         };
-        let harness_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let harness_style = if row.bright {
+            Style::new().color256(accent_c)
+        } else {
+            Style::new().dim()
+        };
         let harness_style = row_style(harness_style, running);
-        let text_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let text_style = if row.bright {
+            Style::new().color256(accent_c)
+        } else {
+            Style::new().dim()
+        };
         let text_style = row_style(text_style, running);
-        let state_style = if row.bright { state_style(row.state_kind) } else { Style::new().dim() };
+        let state_style = if row.bright {
+            state_style(row.state_kind)
+        } else {
+            Style::new().dim()
+        };
         let state_style = row_style(state_style, running);
         let row_dim = row_style(Style::new().dim(), running);
 
@@ -1392,7 +1417,10 @@ pub async fn cmd_ls_sessions(
         print!("{}", gap);
         print!("{}", state_style.apply_to(row.state_icon));
         print!("{}", gap);
-        print!("{}", harness_style.apply_to(format!("{:<w_harness$}", row.harness)));
+        print!(
+            "{}",
+            harness_style.apply_to(format!("{:<w_harness$}", row.harness))
+        );
         if w_ws > 0 {
             print!("{}", gap);
             print!("{}", gap);
@@ -1411,7 +1439,10 @@ pub async fn cmd_ls_sessions(
         print!("{}", row_dim.apply_to(format!("{:>w_turns$}", row.turns)));
         print!("{}", gap);
         print!("{}", gap);
-        print!("{}", row_style(Style::new(), running).apply_to(format!("{:>w_idx$}", idx)));
+        print!(
+            "{}",
+            row_style(Style::new(), running).apply_to(format!("{:>w_idx$}", idx))
+        );
         let tpad = w_title - row.title.chars().count();
         let title_style = if row.has_title && row.bright {
             Style::new().color256(accent_c).bold().italic()
@@ -1425,12 +1456,18 @@ pub async fn cmd_ls_sessions(
         let title_style = row_style(title_style, running);
         print!("{}", gap);
         print!("{}", gap);
-        print!("{}", title_style.apply_to(format!("{}{}", row.title, " ".repeat(tpad))));
+        print!(
+            "{}",
+            title_style.apply_to(format!("{}{}", row.title, " ".repeat(tpad)))
+        );
         if w_prompt > 0 {
             let ppad = w_prompt - row.last_prompt.chars().count();
             print!("{}", gap);
             print!("{}", gap);
-            print!("{}", text_style.apply_to(format!("{}{}", row.last_prompt, " ".repeat(ppad))));
+            print!(
+                "{}",
+                text_style.apply_to(format!("{}{}", row.last_prompt, " ".repeat(ppad)))
+            );
         }
         println!();
     }
@@ -1494,7 +1531,11 @@ fn state_style(state_kind: StateKind) -> Style {
 }
 
 fn row_style(style: Style, running: bool) -> Style {
-    if running { style.underlined() } else { style }
+    if running {
+        style.underlined()
+    } else {
+        style
+    }
 }
 
 fn session_row(
@@ -1555,7 +1596,11 @@ async fn live_session_index(core: &BabelCore) -> Result<HashMap<String, Vec<Live
     panes.sort_by(|a, b| {
         b.is_focused
             .cmp(&a.is_focused)
-            .then_with(|| a.workspace.unwrap_or(i32::MAX).cmp(&b.workspace.unwrap_or(i32::MAX)))
+            .then_with(|| {
+                a.workspace
+                    .unwrap_or(i32::MAX)
+                    .cmp(&b.workspace.unwrap_or(i32::MAX))
+            })
             .then_with(|| a.id().cmp(&b.id()))
     });
 
@@ -1638,7 +1683,11 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
         let project = e.project.to_string_lossy().into_owned();
 
         let is_cmd = is_slash_command(&e.display);
-        let real = if is_cmd { None } else { Some(e.display.clone()) };
+        let real = if is_cmd {
+            None
+        } else {
+            Some(e.display.clone())
+        };
         sessions
             .entry(sid)
             .and_modify(|acc| {
@@ -1704,7 +1753,8 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
 fn read_claude_custom_title(project_path: &str, session_id: &str) -> Option<String> {
     use std::io::{BufRead, BufReader};
 
-    let encoded = babel::utility::claude_storage::path_to_encoded(std::path::Path::new(project_path));
+    let encoded =
+        babel::utility::claude_storage::path_to_encoded(std::path::Path::new(project_path));
     let session_path = babel::utility::claude_storage::claude_base()
         .join("projects")
         .join(encoded)
@@ -1745,6 +1795,27 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
         return Ok(Vec::new());
     }
 
+    // Thread names from session_index.jsonl — these are user-set names (via /name)
+    #[derive(serde::Deserialize)]
+    struct ThreadEntry {
+        id: String,
+        thread_name: String,
+    }
+    let mut thread_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let idx_path = codex_home.join("session_index.jsonl");
+    if idx_path.exists() {
+        if let Ok(file) = std::fs::File::open(&idx_path) {
+            for line in std::io::BufReader::new(file).lines().flatten() {
+                if let Ok(e) = serde_json::from_str::<ThreadEntry>(&line) {
+                    if !e.thread_name.is_empty() {
+                        thread_names.insert(e.id, e.thread_name);
+                    }
+                }
+            }
+        }
+    }
+
     // Accumulator for history.jsonl prompt data (turn count + last prompt)
     struct PromptAcc {
         first_real: Option<String>,
@@ -1756,7 +1827,11 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
         std::collections::HashMap::new();
 
     #[derive(serde::Deserialize)]
-    struct HistEntry { session_id: String, ts: i64, text: String }
+    struct HistEntry {
+        session_id: String,
+        ts: i64,
+        text: String,
+    }
 
     let hist_path = codex_home.join("history.jsonl");
     if hist_path.exists() {
@@ -1767,7 +1842,11 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                         continue;
                     }
                     let is_cmd = is_slash_command(&e.text);
-                    let real = if is_cmd { None } else { Some(truncate_str(&e.text, 100)) };
+                    let real = if is_cmd {
+                        None
+                    } else {
+                        Some(truncate_str(&e.text, 100))
+                    };
                     prompt_data
                         .entry(e.session_id)
                         .and_modify(|acc| {
@@ -1799,7 +1878,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, first_user_message, updated_at, has_user_event
+                "SELECT id, cwd, title, first_user_message, updated_at, has_user_event, agent_nickname
                  FROM threads
                  WHERE archived = 0
                  ORDER BY updated_at DESC",
@@ -1813,25 +1892,33 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, bool>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?;
 
             let mut out = Vec::new();
             for row in rows.flatten() {
-                let (id, cwd, title, first_msg, updated_at, has_user_event) = row;
+                let (id, cwd, title, first_msg, updated_at, has_user_event, thread_name) = row;
                 let prompts = prompt_data.remove(&id);
                 let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
                 let cmd_only = prompts.as_ref().map(|p| p.all_commands).unwrap_or(false);
 
-                let has_title = title.as_ref().is_some_and(|t| !t.is_empty());
-                let display_name = title
-                    .filter(|t| !t.is_empty())
+                // Explicit names outrank generated titles. session_index.jsonl
+                // carries user-set names; spawned agents may also carry a DB
+                // nickname before the normal thread title fallback.
+                let thread_name = thread_names
+                    .remove(&id)
+                    .or(thread_name)
+                    .filter(|t| !t.is_empty());
+                let has_title =
+                    thread_name.is_some() || title.as_ref().is_some_and(|t| !t.is_empty());
+                let display_name = thread_name
+                    .or(title.filter(|t| !t.is_empty()))
                     .or_else(|| first_msg.filter(|m| !m.is_empty() && !is_slash_command(m)))
                     .or_else(|| prompts.as_ref().and_then(|p| p.first_real.clone()));
 
-                let last_prompt = prompts.and_then(|p| {
-                    if p.turns > 1 { p.last_real } else { None }
-                });
+                let last_prompt =
+                    prompts.and_then(|p| if p.turns > 1 { p.last_real } else { None });
 
                 out.push(NativeSession {
                     agent_kind: babel::AgentKind::Codex,
@@ -1905,14 +1992,23 @@ fn scan_gemini() -> Result<Vec<NativeSession>> {
         }
         for chat in std::fs::read_dir(&chats).into_iter().flatten().flatten() {
             let p = chat.path();
-            if !matches!(p.extension().and_then(|e| e.to_str()), Some("json" | "jsonl")) {
+            if !matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("json" | "jsonl")
+            ) {
                 continue;
             }
-            let sid = p.file_stem().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            let sid = p
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
             if sid.is_empty() {
                 continue;
             }
-            let mtime = chat.metadata().ok()
+            let mtime = chat
+                .metadata()
+                .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
@@ -1949,15 +2045,26 @@ fn scan_kimi() -> Result<Vec<NativeSession>> {
         if !workdir.path().is_dir() {
             continue;
         }
-        for sess in std::fs::read_dir(workdir.path()).into_iter().flatten().flatten() {
+        for sess in std::fs::read_dir(workdir.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             if !sess.path().is_dir() {
                 continue;
             }
-            let sid = sess.path().file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            let sid = sess
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
             if sid.is_empty() {
                 continue;
             }
-            let mtime = sess.metadata().ok()
+            let mtime = sess
+                .metadata()
+                .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
