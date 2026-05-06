@@ -106,6 +106,7 @@ async fn push_to_daemon(
         session: session.to_string(),
         kitty_id: pane_addr.map(|addr| addr.id),
         pane_addr: pane_addr.cloned(),
+        tmux_pane: std::env::var("TMUX_PANE").ok(),
         agent_kind,
         hook_state,
         pulse,

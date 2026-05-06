@@ -1841,7 +1841,10 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
     // Tmux backend: register if any tmux server sockets exist
     if !crate::backend::tmux::find_all_sockets().is_empty() {
         registry.register(Arc::new(crate::backend::tmux::TmuxBackend));
-        checkpoint!("tmux_registered", sockets = crate::backend::tmux::find_all_sockets().len());
+        checkpoint!(
+            "tmux_registered",
+            sockets = crate::backend::tmux::find_all_sockets().len()
+        );
     }
 
     if registry.backends().is_empty() {
@@ -3717,12 +3720,31 @@ async fn process_request(
             session,
             kitty_id,
             pane_addr,
+            tmux_pane,
             agent_kind,
             hook_state,
             pulse,
             read,
             hook_type,
         } => {
+            // If tmux_pane is present but pane_addr is not, resolve the tmux
+            // pane identity into a PaneAddr so the daemon can bind the session
+            // to the correct tmux pane (same role as kitty_id for kitty).
+            let pane_addr = pane_addr.or_else(|| {
+                tmux_pane.as_ref().and_then(|tp| {
+                    let id: u64 = tp.strip_prefix('%')?.parse().ok()?;
+                    // Find the tmux connection for this pane by checking registered backends
+                    let s = state.try_read().ok()?;
+                    let conn = s
+                        .registry
+                        .backends()
+                        .iter()
+                        .filter(|b| b.backend_name() == "tmux")
+                        .flat_map(|b| b.find_all_connections())
+                        .next()?;
+                    Some(PaneAddr::new(conn, id))
+                })
+            });
             handlers::hook_event(
                 state, &session, kitty_id, pane_addr, agent_kind, hook_state, pulse, read,
                 &hook_type,

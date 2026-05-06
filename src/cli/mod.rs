@@ -20,6 +20,7 @@ pub mod mmdc;
 pub mod mv;
 pub mod query;
 pub mod resume;
+pub mod tmux;
 pub mod wset;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -945,6 +946,45 @@ pub enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommands,
+    },
+
+    // ─── Tmux Integration ──────────────────────────────────────────────────────
+    /// Start live tmux bridge — pushes @babel_* options into tmux
+    ///
+    /// Subscribes to the daemon's paint stream and continuously updates
+    /// tmux user options (@babel_status, @babel_pane, etc.) so format
+    /// strings like #{@babel_status} render live data.
+    ///
+    /// Designed to be started via `run-shell -b "babel tmux-bridge"` in
+    /// tmux.conf. See `babel tmux-setup` for the full config snippet.
+    #[command(name = "tmux-bridge")]
+    TmuxBridge,
+
+    /// Print tmux.conf integration snippet
+    ///
+    /// Outputs a ready-to-paste tmux configuration that wires up:
+    /// - Per-pane header bar with agent state
+    /// - Global status bar with session summary
+    /// - Live bridge process
+    #[command(name = "tmux-setup")]
+    TmuxSetup,
+
+    /// One-shot tmux status string (fallback/debug)
+    ///
+    /// Prints a formatted status summary for use in tmux's #() polling.
+    /// Prefer tmux-bridge for live updates; this is for debugging or
+    /// environments where the bridge can't run.
+    #[command(name = "tmux-status")]
+    TmuxStatus,
+
+    /// One-shot tmux pane info (fallback/debug)
+    ///
+    /// Prints agent info for a specific tmux pane.
+    /// Example: `babel tmux-pane %5`
+    #[command(name = "tmux-pane")]
+    TmuxPane {
+        /// Tmux pane ID (e.g., "%5" or "5")
+        pane_id: String,
     },
 
     /// Check system health and kitty patch status

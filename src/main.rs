@@ -102,6 +102,10 @@ async fn main() -> Result<()> {
                 | Commands::Monitor { .. }
                 | Commands::Mcp
                 | Commands::Hook { .. }
+                | Commands::TmuxBridge
+                | Commands::TmuxSetup
+                | Commands::TmuxStatus
+                | Commands::TmuxPane { .. }
         );
     if show_mode && !cli.json {
         if core.is_connected() {
@@ -320,6 +324,15 @@ async fn main() -> Result<()> {
 
         // ─── MCP Server ─────────────────────────────────────────────────────────
         Commands::Mcp => cli::mcp::run_mcp().await,
+
+        // ─── Tmux Integration ──────────────────────────────────────────────────
+        Commands::TmuxBridge => cli::tmux::cmd_tmux_bridge().await,
+        Commands::TmuxSetup => {
+            cli::tmux::cmd_tmux_setup();
+            Ok(())
+        }
+        Commands::TmuxStatus => cli::tmux::cmd_tmux_status().await,
+        Commands::TmuxPane { pane_id } => cli::tmux::cmd_tmux_pane(&pane_id).await,
 
         // ─── Hook Handlers ──────────────────────────────────────────────────────
         // All 8 Claude Code lifecycle hooks wired here

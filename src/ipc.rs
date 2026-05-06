@@ -171,6 +171,11 @@ pub enum Request {
         /// Prefer this over kitty_id whenever present.
         #[serde(default)]
         pane_addr: Option<PaneAddr>,
+        /// Tmux pane ID (from $TMUX_PANE env var, e.g. "%5"). When present,
+        /// daemon binds this tmux pane to the session — same role as kitty_id
+        /// but for the tmux backend.
+        #[serde(default)]
+        tmux_pane: Option<String>,
         /// Harness that emitted the hook.
         #[serde(default)]
         agent_kind: AgentKind,
