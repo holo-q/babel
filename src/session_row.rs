@@ -6,9 +6,9 @@
 
 use std::path::Path;
 
-use crate::ActivityState;
 use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
+use crate::ActivityState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateKind {
@@ -119,7 +119,9 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         " "
     };
 
-    let bright = input.interactive && !input.hidden && !input.command_only && input.turn_count > 1;
+    // `0t` means this harness scanner does not know turn counts yet. Only an
+    // explicit single turn is treated as low-signal/oneshot and dimmed.
+    let bright = input.interactive && !input.hidden && !input.command_only && input.turn_count != 1;
 
     SessionRow {
         state_icon,

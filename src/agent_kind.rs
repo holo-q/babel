@@ -109,8 +109,7 @@ pub struct HarnessSpec {
 impl HarnessSpec {
     /// Format a copy-pasteable resume command for the given native session id.
     pub fn resume_command(&self, native_id: &str) -> Option<String> {
-        self.resume_cmd
-            .map(|tpl| tpl.replace("{}", native_id))
+        self.resume_cmd.map(|tpl| tpl.replace("{}", native_id))
     }
 
     pub fn event(&self, name: &str) -> Option<&'static HookEventSpec> {
@@ -542,7 +541,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         kind: AgentKind::Gemini,
         slug: "gemini",
         display: "Gemini CLI",
-        accent: "#4285F4",
+        accent: "#3186FF",
         support: HarnessSupport::Supported,
         install: InstallStrategy::JsonSnippet,
         identity_fields: &["session_id"],
