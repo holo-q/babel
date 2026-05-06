@@ -144,7 +144,7 @@ fn render_session_item(
     let accent = session_row::closest_ansi256_from_hex(row.accent);
     let running = row.is_running();
     let selected_bg = is_selected.then_some(SELECTION_BG);
-    let gap = selected_style(row_style(Style::default(), running), selected_bg);
+    let gap = selected_style(Style::default(), selected_bg);
     let harness_style = if row.bright {
         Style::default().fg(Color::Indexed(accent))
     } else {
@@ -167,6 +167,7 @@ fn render_session_item(
         row_style(Style::default().fg(Color::DarkGray), running),
         selected_bg,
     );
+    let pad_style = selected_style(Style::default(), selected_bg);
     let raw_idx_style = if is_selected {
         Style::default()
             .fg(Color::White)
@@ -196,62 +197,78 @@ fn render_session_item(
     push_span(&mut spans, &mut line_width, " ", gap);
     push_span(&mut spans, &mut line_width, row.state_icon, state_style);
     push_span(&mut spans, &mut line_width, " ", gap);
-    push_span(
+    push_right_cell(
         &mut spans,
         &mut line_width,
-        pad_right(&row.harness, widths.harness),
+        &row.harness,
+        widths.harness,
         harness_style,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_left_cell(
         &mut spans,
         &mut line_width,
-        pad_left(&row.workspace, widths.workspace),
+        &row.workspace,
+        widths.workspace,
         row_dim,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_right_cell(
         &mut spans,
         &mut line_width,
-        pad_right(&row.cwd, widths.cwd),
+        &row.cwd,
+        widths.cwd,
         row_dim,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
     push_span(&mut spans, &mut line_width, row.filter_tag, row_dim);
     push_span(&mut spans, &mut line_width, " ", gap);
-    push_span(
+    push_left_cell(
         &mut spans,
         &mut line_width,
-        pad_left(&row.time, widths.time),
+        &row.time,
+        widths.time,
         row_dim,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_left_cell(
         &mut spans,
         &mut line_width,
-        pad_left(&row.turns, widths.turns),
+        &row.turns,
+        widths.turns,
         row_dim,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_left_cell(
         &mut spans,
         &mut line_width,
-        pad_left(&(idx + 1).to_string(), widths.index),
+        &(idx + 1).to_string(),
+        widths.index,
         idx_style,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_right_cell(
         &mut spans,
         &mut line_width,
-        pad_right(&row.title, widths.title),
+        &row.title,
+        widths.title,
         title_style,
+        pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(
+    push_right_cell(
         &mut spans,
         &mut line_width,
-        pad_right(&row.last_prompt, widths.prompt),
+        &row.last_prompt,
+        widths.prompt,
         text_style,
+        pad_style,
     );
     if line_width < row_width {
         let trailing = " ".repeat(row_width - line_width);
@@ -309,10 +326,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
 
     for msg in &app.transcript.messages {
         let (prefix, style) = match &msg.kind {
-            MessageKind::User => (
-                "> ",
-                Style::default().fg(Color::White).bg(USER_PROMPT_BG),
-            ),
+            MessageKind::User => ("> ", Style::default().fg(Color::White).bg(USER_PROMPT_BG)),
             MessageKind::Assistant => ("● ", Style::default().fg(Color::Cyan)),
             MessageKind::ToolCall { name, args } => {
                 let tool_line = if args.is_empty() {
@@ -453,21 +467,33 @@ fn push_span(
     spans.push(Span::styled(text, style));
 }
 
-fn pad_left(text: &str, width: usize) -> String {
+fn push_left_cell(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: &str,
+    width: usize,
+    text_style: Style,
+    pad_style: Style,
+) {
     let text_width = display_width(text);
-    if text_width >= width {
-        text.to_string()
-    } else {
-        format!("{}{}", " ".repeat(width - text_width), text)
+    if text_width < width {
+        push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
     }
+    push_span(spans, line_width, text.to_string(), text_style);
 }
 
-fn pad_right(text: &str, width: usize) -> String {
+fn push_right_cell(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: &str,
+    width: usize,
+    text_style: Style,
+    pad_style: Style,
+) {
+    push_span(spans, line_width, text.to_string(), text_style);
     let text_width = display_width(text);
-    if text_width >= width {
-        text.to_string()
-    } else {
-        format!("{}{}", text, " ".repeat(width - text_width))
+    if text_width < width {
+        push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
     }
 }
 
