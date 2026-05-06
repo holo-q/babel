@@ -357,6 +357,10 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
 fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let session_count = app.sessions.visible_sessions().len();
     let total = app.sessions.sessions.len();
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
 
     let keybinds = if app.is_searching {
         "Enter:confirm  Esc:cancel"
@@ -374,17 +378,32 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     };
     let right = format!("{} ", keybinds);
 
-    let left_len = left.len();
-    let right_len = right.len();
-    let padding = (area.width as usize).saturating_sub(left_len + right_len);
+    let left_width = display_width(&left);
+    let right_width = display_width(&right);
+    let (left, right, padding) = if left_width + right_width <= width {
+        (left, right, width.saturating_sub(left_width + right_width))
+    } else if right_width < width {
+        let left_max = width.saturating_sub(right_width + 1);
+        let left = if left_max == 0 {
+            String::new()
+        } else {
+            truncate_str(&left, left_max)
+        };
+        (left, right, 1)
+    } else {
+        (String::new(), truncate_str(&right, width), 0)
+    };
+
+    let status_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let muted_status_style = Style::default().bg(Color::DarkGray).fg(Color::Gray);
 
     let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(Color::DarkGray)),
-        Span::raw(" ".repeat(padding.max(1))),
-        Span::styled(right, Style::default().fg(Color::DarkGray)),
+        Span::styled(left, muted_status_style),
+        Span::styled(" ".repeat(padding), status_style),
+        Span::styled(right, status_style),
     ]);
 
-    let para = Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let para = Paragraph::new(line).style(status_style);
     frame.render_widget(para, area);
 }
 
