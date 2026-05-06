@@ -1234,11 +1234,11 @@ pub(super) fn scan_all_sessions(
     }
 
     sessions.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
-    // Sessions explicitly ended with /end are never interesting to list
     sessions.retain(|s| {
-        !s.last_prompt
-            .as_deref()
-            .is_some_and(|p| p.trim().starts_with("/end"))
+        !s.last_prompt.as_deref().is_some_and(|p| {
+            let t = p.trim();
+            t.starts_with("/end") || t.starts_with(".end")
+        })
     });
     if !filters.all {
         if !filters.sub {
