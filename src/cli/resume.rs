@@ -341,12 +341,12 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
         )
     })?;
     let parts: Vec<&str> = resume_cmd.split_whitespace().collect();
-    let Some((program, args)) = parts.split_first() else {
+    if parts.is_empty() {
         return Err(anyhow!(
             "Empty resume command for {}",
             selection.agent_kind.display_name()
         ));
-    };
+    }
 
     let cwd = selection
         .project_path
@@ -370,48 +370,25 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
         cwd = format!("{:?}", cwd)
     );
 
-    let main_socket = babel::kitty::main_socket();
-    let target_workspace = babel::babel_storage::init_db()
-        .ok()
-        .and_then(|conn| {
-            babel::babel_storage::get_metadata(&conn, &selection.session_key)
-                .ok()
-                .flatten()
-        })
-        .and_then(|m| m.last_workspace);
+    let (backend, conn) = detect_current_backend()?;
 
-    let mut cmd = tokio::process::Command::new("kitten");
-    cmd.arg("@").arg("launch");
-    cmd.args(["--type", "os-window"]);
-    cmd.args(["--cwd", &cwd.to_string_lossy()]);
+    let pane_id = backend.launch_pane(&conn, &parts, &cwd).await?;
 
-    if let Some(ref socket) = main_socket {
-        cmd.args(["--to", socket]);
-    }
+    // Kitty-specific: move the new pane to its last-known workspace.
+    if backend.backend_name() == "kitty" {
+        let target_workspace = babel::babel_storage::init_db()
+            .ok()
+            .and_then(|db| {
+                babel::babel_storage::get_metadata(&db, &selection.session_key)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|m| m.last_workspace);
 
-    cmd.arg("--");
-    cmd.arg(program);
-    cmd.args(args);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = cmd.output().await.context("failed to spawn kitten")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "failed to launch {}: {}",
-            selection.agent_kind.display_name(),
-            stderr.trim()
-        ));
-    }
-
-    if let Some(ws) = target_workspace {
-        let pane_id_str = String::from_utf8_lossy(&output.stdout);
-        if let Ok(pane_id) = pane_id_str.trim().parse::<u64>() {
+        if let Some(ws) = target_workspace {
             if let Ok(Some(pane)) = babel::kitty::get_window(pane_id).await {
                 if let Err(e) = pane.move_to_workspace(ws) {
-                    tracing::debug!(error = %e, ws, "Failed to move resumed session to workspace");
+                    tracing::debug!(error = %e, ws, "workspace move failed for resumed session");
                 }
             }
         }
@@ -423,6 +400,29 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
         selection.agent_kind.slug(),
         short_id
     ))
+}
+
+/// Detect which terminal backend we're running inside and return it with
+/// the connection string for this instance.
+fn detect_current_backend() -> Result<(std::sync::Arc<dyn babel::backend::TerminalBackend>, String)> {
+    use babel::backend::{kitty::KittyBackend, tmux::TmuxBackend};
+
+    // Kitty: KITTY_LISTEN_ON is set inside kitty shells
+    if std::env::var("KITTY_WINDOW_ID").is_ok() {
+        let backend = std::sync::Arc::new(KittyBackend) as std::sync::Arc<dyn babel::backend::TerminalBackend>;
+        let conn = babel::kitty::default_socket();
+        return Ok((backend, conn));
+    }
+
+    // Tmux: $TMUX is set inside tmux sessions
+    if let Ok(tmux_val) = std::env::var("TMUX") {
+        let backend = std::sync::Arc::new(TmuxBackend) as std::sync::Arc<dyn babel::backend::TerminalBackend>;
+        if let Some(socket) = tmux_val.splitn(3, ',').next() {
+            return Ok((backend, format!("tmux:{socket}")));
+        }
+    }
+
+    Err(anyhow!("no supported terminal backend detected (need kitty or tmux)"))
 }
 
 /// Get working directory for a session by searching ~/.claude/projects/

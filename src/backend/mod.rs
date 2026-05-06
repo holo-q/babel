@@ -214,6 +214,20 @@ pub trait TerminalBackend: Send + Sync {
     async fn set_meta(&self, conn: &str, id: u64, key: &str, val: &str) -> Result<()>;
     async fn set_title(&self, conn: &str, id: u64, title: &str) -> Result<()>;
 
+    // === Launch (optional — open a command in a new pane/window) ===
+
+    /// Spawn `cmd` in a new terminal surface (os-window for kitty, window for tmux)
+    /// rooted at `cwd`. Returns the new pane ID on success.
+    async fn launch_pane(
+        &self,
+        conn: &str,
+        cmd: &[&str],
+        cwd: &std::path::Path,
+    ) -> Result<u64> {
+        let _ = (conn, cmd, cwd);
+        anyhow::bail!("{} does not support pane launch", self.backend_name())
+    }
+
     // === Visual (optional — kitty has native border coloring) ===
 
     async fn set_border_color(
@@ -415,6 +429,18 @@ impl BackendRegistry {
         self.resolve(addr)?
             .reset_border_color(&addr.socket, addr.id)
             .await
+    }
+
+    pub async fn launch_pane(
+        &self,
+        conn: &str,
+        cmd: &[&str],
+        cwd: &std::path::Path,
+    ) -> Result<u64> {
+        let backend = self
+            .backend_for(conn)
+            .ok_or_else(|| anyhow::anyhow!("no backend for connection {}", conn))?;
+        backend.launch_pane(conn, cmd, cwd).await
     }
 
     pub async fn list_panes_raw(&self, conn: &str) -> Result<String> {

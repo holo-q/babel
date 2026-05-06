@@ -25,6 +25,7 @@
 //!   - cwd: Current working directory
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -33,11 +34,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::instrument;
-use async_trait::async_trait;
 
-use crate::model::PaneAddr;
+use super::{
+    BackendInstance, ForegroundProcess, Pane, PaneExtras, ScreenGeometry, TerminalBackend,
+};
 use crate::desktop::{disable_focus_prevention, FOCUS_SETTLE_MS};
-use super::{Pane, PaneExtras, ScreenGeometry, ForegroundProcess, BackendInstance, TerminalBackend};
+use crate::model::PaneAddr;
 
 // VTR semantic tracing - boundary markers for kitty IPC crossings
 // - boundary!: External domain crossings (IPC, subprocess calls)
@@ -563,7 +565,10 @@ impl TerminalBackend for KittyBackend {
 
     async fn list_panes(&self, conn: &str) -> Result<Vec<Pane>> {
         let kitty_panes = list_panes_on_socket(conn).await?;
-        Ok(kitty_panes.into_iter().map(|kp| kitty_pane_to_pane(kp)).collect())
+        Ok(kitty_panes
+            .into_iter()
+            .map(|kp| kitty_pane_to_pane(kp))
+            .collect())
     }
 
     async fn discover_instances(&self) -> Vec<BackendInstance> {
@@ -614,6 +619,15 @@ impl TerminalBackend for KittyBackend {
 
     async fn reset_border_color(&self, conn: &str, id: u64) -> Result<()> {
         reset_border_color_on_socket(conn, id).await
+    }
+
+    async fn launch_pane(
+        &self,
+        conn: &str,
+        cmd: &[&str],
+        cwd: &std::path::Path,
+    ) -> Result<u64> {
+        launch_pane_on_socket(conn, cmd, cwd).await
     }
 
     async fn list_panes_raw(&self, conn: &str) -> Result<String> {
@@ -761,6 +775,34 @@ pub(crate) async fn focus_pane_on_socket(socket: &str, id: u64) -> Result<()> {
 
     effect!("pane", "focused", id = id);
     Ok(())
+}
+
+/// Launch a command in a new kitty os-window, returning the new pane ID.
+#[instrument(level = "debug", skip(socket, cmd, cwd))]
+pub(crate) async fn launch_pane_on_socket(
+    socket: &str,
+    cmd: &[&str],
+    cwd: &std::path::Path,
+) -> Result<u64> {
+    let cwd_str = cwd.to_string_lossy();
+    let mut args = vec!["launch", "--type", "os-window", "--cwd", &cwd_str, "--"];
+    args.extend(cmd.iter().copied());
+
+    let output = run_kitten_with_timeout(socket, &args, KITTEN_TIMEOUT_LONG).await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitten @ launch failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pane_id: u64 = stdout
+        .trim()
+        .parse()
+        .context("kitten @ launch returned non-numeric pane id")?;
+
+    effect!("pane", "launched", id = pane_id);
+    Ok(pane_id)
 }
 
 #[instrument(level = "debug", skip(socket, text), fields(kitty_id = id, text_len = text.len()))]

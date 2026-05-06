@@ -465,9 +465,7 @@ where
     let mut last_auto_refresh = Instant::now() - Duration::from_secs(1);
 
     let (launch_tx, mut launch_rx) = mpsc::channel::<LaunchResult>(4);
-    let own_pane_id: Option<u64> = std::env::var("KITTY_WINDOW_ID")
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let refocus_ctx = detect_refocus_context();
 
     let mut needs_redraw = true;
 
@@ -496,7 +494,7 @@ where
                                     selection.agent_kind.slug(),
                                 );
                                 let tx = launch_tx.clone();
-                                let refocus_pane = own_pane_id;
+                                let refocus = refocus_ctx.clone();
                                 tokio::spawn(async move {
                                     let msg = match crate::cli::resume::launch_harness_resume(
                                         &selection,
@@ -504,11 +502,10 @@ where
                                     .await
                                     {
                                         Ok(msg) => {
-                                            if let Some(id) = refocus_pane {
+                                            if let Some(ctx) = refocus {
                                                 tokio::time::sleep(Duration::from_millis(150))
                                                     .await;
-                                                let _ =
-                                                    crate::backend::kitty::focus_pane(id).await;
+                                                let _ = ctx.backend.focus_pane(&ctx.conn, ctx.pane_id).await;
                                             }
                                             LaunchResult::Success(msg)
                                         }
@@ -967,4 +964,41 @@ async fn daemon_refresh_listener(tx: mpsc::Sender<()>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Backend + connection + pane ID for refocusing the pager after launch.
+#[derive(Clone)]
+struct RefocusContext {
+    backend: std::sync::Arc<dyn crate::backend::TerminalBackend>,
+    conn: String,
+    pane_id: u64,
+}
+
+fn detect_refocus_context() -> Option<RefocusContext> {
+    if let Ok(id_str) = std::env::var("KITTY_WINDOW_ID") {
+        if let Ok(pane_id) = id_str.parse::<u64>() {
+            return Some(RefocusContext {
+                backend: std::sync::Arc::new(crate::backend::kitty::KittyBackend),
+                conn: crate::backend::kitty::default_socket(),
+                pane_id,
+            });
+        }
+    }
+
+    if let Ok(pane_str) = std::env::var("TMUX_PANE") {
+        let raw = pane_str.strip_prefix('%').unwrap_or(&pane_str);
+        if let Ok(pane_id) = raw.parse::<u64>() {
+            if let Ok(tmux_val) = std::env::var("TMUX") {
+                if let Some(socket) = tmux_val.splitn(3, ',').next() {
+                    return Some(RefocusContext {
+                        backend: std::sync::Arc::new(crate::backend::tmux::TmuxBackend),
+                        conn: format!("tmux:{socket}"),
+                        pane_id,
+                    });
+                }
+            }
+        }
+    }
+
+    None
 }

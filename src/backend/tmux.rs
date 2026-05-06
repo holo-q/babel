@@ -54,11 +54,7 @@ pub struct TmuxBackend;
 // =============================================================================
 
 /// Run a tmux command targeting a specific server socket, with timeout.
-async fn run_tmux(
-    socket: &str,
-    args: &[&str],
-    duration: Duration,
-) -> Result<std::process::Output> {
+async fn run_tmux(socket: &str, args: &[&str], duration: Duration) -> Result<std::process::Output> {
     let op = args.first().unwrap_or(&"unknown");
     boundary!("tmux", op, socket = socket);
 
@@ -294,8 +290,7 @@ fn read_proc_info(pid: u32) -> Option<ForegroundProcess> {
         return None;
     }
 
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
-        .unwrap_or_default();
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap_or_default();
 
     Some(ForegroundProcess { pid, cmdline, cwd })
 }
@@ -431,12 +426,7 @@ impl TerminalBackend for TmuxBackend {
         let socket = socket_from_conn(conn);
         let target = pane_target(id);
 
-        let output = run_tmux(
-            socket,
-            &["select-pane", "-t", &target],
-            TMUX_TIMEOUT_SHORT,
-        )
-        .await?;
+        let output = run_tmux(socket, &["select-pane", "-t", &target], TMUX_TIMEOUT_SHORT).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -453,6 +443,39 @@ impl TerminalBackend for TmuxBackend {
 
         effect!("tmux", "pane focused", id = id);
         Ok(())
+    }
+
+    async fn launch_pane(
+        &self,
+        conn: &str,
+        cmd: &[&str],
+        cwd: &std::path::Path,
+    ) -> Result<u64> {
+        let socket = socket_from_conn(conn);
+        let cwd_str = cwd.to_string_lossy();
+
+        // new-window -P prints the new pane id (e.g. "%42")
+        // -c sets the working directory, trailing args are the command
+        let mut args = vec!["new-window", "-P", "-F", "#{pane_id}", "-c", &cwd_str];
+        for part in cmd {
+            args.push(part);
+        }
+
+        let output = run_tmux(socket, &args, TMUX_TIMEOUT_SHORT).await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux new-window failed: {stderr}");
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let raw = stdout.trim().strip_prefix('%').unwrap_or(stdout.trim());
+        let pane_id: u64 = raw
+            .parse()
+            .context("tmux new-window returned non-numeric pane id")?;
+
+        effect!("tmux", "pane launched", id = pane_id);
+        Ok(pane_id)
     }
 
     async fn send_text(&self, conn: &str, id: u64, text: &str) -> Result<()> {
@@ -581,12 +604,7 @@ impl TerminalBackend for TmuxBackend {
         let socket = socket_from_conn(conn);
         let target = pane_target(id);
 
-        let output = run_tmux(
-            socket,
-            &["kill-pane", "-t", &target],
-            TMUX_TIMEOUT_SHORT,
-        )
-        .await?;
+        let output = run_tmux(socket, &["kill-pane", "-t", &target], TMUX_TIMEOUT_SHORT).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
