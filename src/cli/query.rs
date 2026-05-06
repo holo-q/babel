@@ -1192,6 +1192,8 @@ pub(super) struct NativeSession {
     pub(super) interactive: bool,
     /// Every user prompt was a slash command (/model, /usage, etc.)
     pub(super) command_only: bool,
+    /// display_name is a proper title (thread name, /rename) not a prompt fallback.
+    pub(super) has_title: bool,
 }
 
 /// Filter flags for ls-sessions.
@@ -1371,7 +1373,16 @@ pub async fn cmd_ls_sessions(
         print!("  {:>w_turns$}", dim.apply_to(&row.turns));
         print!("  {:>w_idx$}", idx);
         let tpad = w_title - row.title.chars().count();
-        print!("  {}{}", text_style.apply_to(&row.title), " ".repeat(tpad));
+        let title_style = if row.has_title && row.bright {
+            Style::new().color256(accent_c).bold().italic()
+        } else if row.has_title {
+            Style::new().dim().bold().italic()
+        } else if row.bright {
+            Style::new().color256(accent_c)
+        } else {
+            Style::new().dim()
+        };
+        print!("  {}{}", title_style.apply_to(&row.title), " ".repeat(tpad));
         if w_prompt > 0 {
             let ppad = w_prompt - row.last_prompt.chars().count();
             print!("  {}{}", text_style.apply_to(&row.last_prompt), " ".repeat(ppad));
@@ -1483,6 +1494,7 @@ struct SessionRow {
     last_prompt: String,
     accent: &'static str,
     bright: bool,
+    has_title: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1538,11 +1550,17 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         })
         .unwrap_or_default();
 
-    let title = s
-        .display_name
-        .as_deref()
-        .map(|t| sanitize_display(t, 40))
-        .unwrap_or_default();
+    // Check for babel-generated haiku title or user /rename (Claude)
+    let session_key_str = &session_key;
+    let generated = babel::babel_storage::get_generated_title(conn, session_key_str)
+        .ok()
+        .flatten();
+    let (title, has_title) = if let Some(ref gen) = generated {
+        (sanitize_display(gen, 40), true)
+    } else {
+        let raw = s.display_name.as_deref().unwrap_or("");
+        (sanitize_display(raw, 40), s.has_title)
+    };
 
     let last_prompt = s
         .last_prompt
@@ -1594,6 +1612,7 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         last_prompt,
         accent,
         bright,
+        has_title: s.has_title,
     }
 }
 
@@ -1697,6 +1716,7 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
             last_seen_at: acc.last_ts,
             interactive: true,
             command_only: acc.all_commands,
+            has_title: false,
         })
         .collect())
 }
@@ -1788,6 +1808,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                 let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
                 let cmd_only = prompts.as_ref().map(|p| p.all_commands).unwrap_or(false);
 
+                let has_title = title.as_ref().is_some_and(|t| !t.is_empty());
                 let display_name = title
                     .filter(|t| !t.is_empty())
                     .or_else(|| first_msg.filter(|m| !m.is_empty()))
@@ -1805,6 +1826,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                     last_prompt,
                     turn_count,
                     last_seen_at: updated_at,
+                    has_title,
                     interactive: has_user_event || turn_count > 0,
                     command_only: cmd_only,
                 });
@@ -1826,6 +1848,7 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             last_seen_at: 0,
             interactive: true,
             command_only: acc.all_commands,
+            has_title: false,
         })
         .collect())
 }
@@ -1889,6 +1912,7 @@ fn scan_gemini() -> Result<Vec<NativeSession>> {
                 last_seen_at: mtime,
                 interactive: true,
                 command_only: false,
+                has_title: false,
             });
         }
     }
@@ -1933,6 +1957,7 @@ fn scan_kimi() -> Result<Vec<NativeSession>> {
                 last_seen_at: mtime,
                 interactive: true,
                 command_only: false,
+                has_title: false,
             });
         }
     }
