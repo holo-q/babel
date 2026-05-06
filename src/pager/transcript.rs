@@ -3,6 +3,35 @@
 //! Displays parsed messages from selected session.
 
 use scrollparse::Message;
+use serde::{Deserialize, Serialize};
+
+/// Which transcript roles are visible in the preview pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRoleFilter {
+    #[default]
+    All,
+    Conversation,
+    UserOnly,
+}
+
+impl TranscriptRoleFilter {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Conversation,
+            Self::Conversation => Self::UserOnly,
+            Self::UserOnly => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Conversation => "conversation",
+            Self::UserOnly => "user prompts",
+        }
+    }
+}
 
 /// State for the transcript preview panel
 #[derive(Debug, Default)]
@@ -15,6 +44,16 @@ pub struct TranscriptView {
     pub session_id: Option<String>,
     /// Why there are no messages for the selected session.
     pub notice: Option<String>,
+    /// Whether user/assistant message bodies should render as full newline rows
+    /// instead of a one-row snip preview. Tool rows stay one-row regardless:
+    /// transcript navigation must never degrade into scrolling through command
+    /// output or JSON arguments by accident.
+    pub expand_messages: bool,
+    /// Role filter for cutting assistant/tool/status rows out of the transcript.
+    pub role_filter: TranscriptRoleFilter,
+    /// Cached total row count keyed by (expand, filter). Self-invalidates when
+    /// settings change; must be cleared on message load/clear.
+    pub cached_row_count: Option<(bool, TranscriptRoleFilter, usize)>,
 }
 
 impl TranscriptView {
@@ -28,6 +67,7 @@ impl TranscriptView {
         self.messages = messages;
         self.scroll_bottom();
         self.notice = None;
+        self.cached_row_count = None;
     }
 
     /// Show an empty-state notice for a selected session
@@ -36,6 +76,7 @@ impl TranscriptView {
         self.messages.clear();
         self.scroll_offset = 0;
         self.notice = Some(notice);
+        self.cached_row_count = None;
     }
 
     /// Clear the transcript
@@ -44,6 +85,19 @@ impl TranscriptView {
         self.messages.clear();
         self.scroll_offset = 0;
         self.notice = None;
+        self.cached_row_count = None;
+    }
+
+    /// Toggle user/assistant message body expansion.
+    pub fn toggle_message_expansion(&mut self) -> bool {
+        self.expand_messages = !self.expand_messages;
+        self.expand_messages
+    }
+
+    /// Cycle between all rows, conversation-only, and user-prompt-only transcript.
+    pub fn toggle_role_filter(&mut self) -> TranscriptRoleFilter {
+        self.role_filter = self.role_filter.cycle();
+        self.role_filter
     }
 
     /// Scroll down

@@ -156,7 +156,11 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
 }
 
 async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>> {
-    let sessions = babel::native_sessions::scan_all(None, &Default::default());
+    let filters = babel::native_sessions::SessionFilters {
+        all: true,
+        ..Default::default()
+    };
+    let sessions = babel::native_sessions::scan_all(None, &filters);
 
     let conn = babel::babel_storage::init_db().ok();
 
@@ -177,10 +181,14 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
         let Some(session_id) = pane.session_id.as_deref() else {
             continue;
         };
-        let session_key = if session_id.contains(':') {
-            session_id.to_string()
-        } else {
-            pane.agent_kind.session_key(session_id)
+        let Some(session_key) = pane.agent_kind.normalize_session_claim(session_id) else {
+            tracing::warn!(
+                pane = %pane.addr.short(),
+                detected_harness = %pane.agent_kind,
+                stale_session = %session_id,
+                "ignoring stale cross-harness resume live session claim"
+            );
+            continue;
         };
         running
             .entry(session_key)
@@ -324,7 +332,7 @@ fn launch_claude_resume(session_id: &str) -> Result<()> {
     Err(anyhow!("Failed to exec claude: {}", err))
 }
 
-async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
+pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
     let spec = selection.agent_kind.spec();
     let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
         anyhow!(
@@ -372,7 +380,7 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
         })
         .and_then(|m| m.last_workspace);
 
-    let mut cmd = Command::new("kitten");
+    let mut cmd = tokio::process::Command::new("kitten");
     cmd.arg("@").arg("launch");
     cmd.args(["--type", "os-window"]);
     cmd.args(["--cwd", &cwd.to_string_lossy()]);
@@ -388,7 +396,7 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = cmd.output().context("failed to spawn kitten")?;
+    let output = cmd.output().await.context("failed to spawn kitten")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
@@ -424,7 +432,7 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
 /// 2. Extract cwd from session metadata if available
 /// 3. Fall back to decoding project directory name
 /// 4. Last resort: current directory
-fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
+pub(crate) fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
     let base = claude_base();
     let projects_dir = base.join("projects");
 

@@ -7,13 +7,16 @@ use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
 use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
 use crate::ActivityState;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CwdDisplayMode {
     Relative,
     Absolute,
     Project,
+    TouchedProjects,
 }
 
 impl CwdDisplayMode {
@@ -21,7 +24,8 @@ impl CwdDisplayMode {
         match self {
             Self::Relative => Self::Absolute,
             Self::Absolute => Self::Project,
-            Self::Project => Self::Relative,
+            Self::Project => Self::TouchedProjects,
+            Self::TouchedProjects => Self::Relative,
         }
     }
 
@@ -30,7 +34,54 @@ impl CwdDisplayMode {
             Self::Relative => "relative",
             Self::Absolute => "absolute",
             Self::Project => "project",
+            Self::TouchedProjects => "touched projects",
         }
+    }
+}
+
+impl Default for CwdDisplayMode {
+    fn default() -> Self {
+        Self::Relative
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HiddenDisplayMode {
+    Normal,
+    Manual,
+    All,
+}
+
+impl HiddenDisplayMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Manual,
+            Self::Manual => Self::All,
+            Self::All => Self::Normal,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Manual => "manual hidden",
+            Self::All => "all hidden",
+        }
+    }
+
+    pub fn suffix(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Manual => Some("+hidden"),
+            Self::All => Some("+all-hidden"),
+        }
+    }
+}
+
+impl Default for HiddenDisplayMode {
+    fn default() -> Self {
+        Self::Normal
     }
 }
 
@@ -132,6 +183,11 @@ impl EnrichedSession {
         }
     }
 
+    /// Hidden by ls-sessions' default signal policy, even without user overlay.
+    pub fn policy_hidden(&self) -> bool {
+        !self.interactive || self.command_only || self.turn_count == 1
+    }
+
     pub fn row(&self, now: i64) -> SessionRow {
         session_row::session_row(
             SessionRowInput {
@@ -178,14 +234,18 @@ pub struct SessionListState {
     pub scroll_offset: usize,
     /// Whether showing all projects or just cwd
     pub show_all: bool,
-    /// Whether hidden sessions are included in the visible list
-    pub show_hidden: bool,
+    /// Which hidden session categories are included in the visible list.
+    pub hidden_display_mode: HiddenDisplayMode,
     /// Current working directory for cwd filtering
     pub current_cwd: Option<PathBuf>,
     /// How the cwd filter is shown in the header.
     pub cwd_display_mode: CwdDisplayMode,
     /// Search/filter query
     pub filter_query: String,
+    /// Cached visible row indices. The full catalog can be large because the
+    /// TUI keeps low-signal sessions loaded for instant hidden-mode tabulation.
+    visible_indices: Vec<usize>,
+    visible_dirty: bool,
 }
 
 impl SessionListState {
@@ -195,70 +255,29 @@ impl SessionListState {
             cursor: 0,
             scroll_offset: 0,
             show_all: false,
-            show_hidden: false,
+            hidden_display_mode: HiddenDisplayMode::Normal,
             current_cwd,
             cwd_display_mode: CwdDisplayMode::Relative,
             filter_query: String::new(),
+            visible_indices: Vec::new(),
+            visible_dirty: true,
         }
     }
 
-    /// Get visible sessions (hidden-filtered + cwd-filtered + search-filtered)
-    pub fn visible_sessions(&self) -> Vec<(usize, &EnrichedSession)> {
-        self.sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                // Hidden sessions stay loaded so `h` can expose them instantly.
-                if s.hidden && !self.show_hidden {
-                    return false;
-                }
+    /// Get visible session indices (hidden-filtered + cwd-filtered + search-filtered).
+    pub fn visible_indices(&mut self) -> &[usize] {
+        self.ensure_visible_indices();
+        &self.visible_indices
+    }
 
-                // First: cwd filter (unless show_all)
-                if !self.show_all {
-                    if let Some(cwd) = &self.current_cwd {
-                        let matches_cwd = s
-                            .project_path
-                            .as_ref()
-                            .map(|project| project.starts_with(cwd))
-                            .unwrap_or(false);
-                        if !matches_cwd {
-                            return false;
-                        }
-                    }
-                }
-
-                // Second: search filter
-                if !self.filter_query.is_empty() {
-                    let matches_query = s.title().to_lowercase().contains(&self.filter_query)
-                        || s.native_id.to_lowercase().contains(&self.filter_query)
-                        || s.session_key.to_lowercase().contains(&self.filter_query)
-                        || s.agent_kind.slug().contains(&self.filter_query)
-                        || s.last_prompt
-                            .as_ref()
-                            .map(|p| p.to_lowercase().contains(&self.filter_query))
-                            .unwrap_or(false)
-                        || s.project_path
-                            .as_ref()
-                            .map(|p| {
-                                p.to_string_lossy()
-                                    .to_lowercase()
-                                    .contains(&self.filter_query)
-                            })
-                            .unwrap_or(false);
-                    if !matches_query {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .collect()
+    pub fn visible_count(&mut self) -> usize {
+        self.visible_indices().len()
     }
 
     /// Get currently selected session
-    pub fn selected(&self) -> Option<&EnrichedSession> {
-        let visible = self.visible_sessions();
-        visible.get(self.cursor).map(|(_, s)| *s)
+    pub fn selected(&mut self) -> Option<&EnrichedSession> {
+        let selected_index = self.selected_index()?;
+        self.sessions.get(selected_index)
     }
 
     /// Toggle the selected session's hidden bit in memory.
@@ -271,6 +290,7 @@ impl SessionListState {
         session.hidden = !session.hidden;
         let session_key = session.session_key.clone();
         let hidden = session.hidden;
+        self.invalidate_visible_indices();
         self.clamp_cursor();
         Some((session_key, hidden))
     }
@@ -283,13 +303,14 @@ impl SessionListState {
             .find(|session| session.session_key == session_key)
         {
             session.hidden = hidden;
+            self.invalidate_visible_indices();
         }
         self.clamp_cursor();
     }
 
     /// Move cursor down
     pub fn cursor_down(&mut self) {
-        let count = self.visible_sessions().len();
+        let count = self.visible_count();
         if count > 0 && self.cursor < count - 1 {
             self.cursor += 1;
         }
@@ -309,7 +330,7 @@ impl SessionListState {
 
     /// Jump to bottom
     pub fn cursor_bottom(&mut self) {
-        let count = self.visible_sessions().len();
+        let count = self.visible_count();
         if count > 0 {
             self.cursor = count - 1;
         }
@@ -318,13 +339,16 @@ impl SessionListState {
     /// Toggle show_all filter
     pub fn toggle_show_all(&mut self) {
         self.show_all = !self.show_all;
+        self.invalidate_visible_indices();
         self.clamp_cursor();
     }
 
     /// Toggle hidden session display.
-    pub fn toggle_show_hidden(&mut self) {
-        self.show_hidden = !self.show_hidden;
+    pub fn cycle_hidden_display_mode(&mut self) -> HiddenDisplayMode {
+        self.hidden_display_mode = self.hidden_display_mode.next();
+        self.invalidate_visible_indices();
         self.clamp_cursor();
+        self.hidden_display_mode
     }
 
     pub fn cycle_cwd_display_mode(&mut self) -> CwdDisplayMode {
@@ -335,20 +359,25 @@ impl SessionListState {
     /// Update filter query
     pub fn set_filter(&mut self, query: String) {
         self.filter_query = query.to_lowercase();
+        self.invalidate_visible_indices();
         // Reset cursor if out of bounds after filter change
         self.clamp_cursor();
     }
 
     /// Replace session data while preserving the current semantic selection.
     pub fn replace_sessions(&mut self, sessions: Vec<EnrichedSession>) {
-        let selected_key = self.selected().map(|s| s.session_key.clone());
+        let selected_key = self
+            .selected_index()
+            .and_then(|idx| self.sessions.get(idx))
+            .map(|s| s.session_key.clone());
         self.sessions = sessions;
+        self.invalidate_visible_indices();
 
         if let Some(selected_key) = selected_key {
-            if let Some(cursor) = self
-                .visible_sessions()
+            let visible = self.visible_indices().to_vec();
+            if let Some(cursor) = visible
                 .iter()
-                .position(|(_, s)| s.session_key == selected_key)
+                .position(|idx| self.sessions[*idx].session_key == selected_key)
             {
                 self.cursor = cursor;
             }
@@ -358,14 +387,86 @@ impl SessionListState {
     }
 
     fn clamp_cursor(&mut self) {
-        let count = self.visible_sessions().len();
+        let count = self.visible_count();
         if self.cursor >= count {
             self.cursor = count.saturating_sub(1);
         }
     }
 
-    fn selected_index(&self) -> Option<usize> {
-        let visible = self.visible_sessions();
-        visible.get(self.cursor).map(|(idx, _)| *idx)
+    fn selected_index(&mut self) -> Option<usize> {
+        let cursor = self.cursor;
+        self.visible_indices().get(cursor).copied()
+    }
+
+    pub(crate) fn invalidate_visible_indices(&mut self) {
+        self.visible_dirty = true;
+    }
+
+    fn ensure_visible_indices(&mut self) {
+        if !self.visible_dirty {
+            return;
+        }
+
+        self.visible_indices.clear();
+        for (idx, session) in self.sessions.iter().enumerate() {
+            if self.session_is_visible(session) {
+                self.visible_indices.push(idx);
+            }
+        }
+        self.visible_dirty = false;
+    }
+
+    fn session_is_visible(&self, session: &EnrichedSession) -> bool {
+        // Resume keeps the full native session catalog loaded so `h` can
+        // tabulate from normal ls-sessions visibility, to manual overlay-hidden
+        // rows, to every low-signal hidden category (subagents, command-only,
+        // oneshots) without rescanning.
+        match self.hidden_display_mode {
+            HiddenDisplayMode::Normal if session.hidden || session.policy_hidden() => return false,
+            HiddenDisplayMode::Manual if session.policy_hidden() => return false,
+            HiddenDisplayMode::Normal | HiddenDisplayMode::Manual | HiddenDisplayMode::All => {}
+        }
+
+        if !self.show_all {
+            if let Some(cwd) = &self.current_cwd {
+                let matches_cwd = session
+                    .project_path
+                    .as_ref()
+                    .map(|project| project.starts_with(cwd))
+                    .unwrap_or(false);
+                if !matches_cwd {
+                    return false;
+                }
+            }
+        }
+
+        if !self.filter_query.is_empty() {
+            return session.title().to_lowercase().contains(&self.filter_query)
+                || session
+                    .native_id
+                    .to_lowercase()
+                    .contains(&self.filter_query)
+                || session
+                    .session_key
+                    .to_lowercase()
+                    .contains(&self.filter_query)
+                || session.agent_kind.slug().contains(&self.filter_query)
+                || session
+                    .last_prompt
+                    .as_ref()
+                    .map(|p| p.to_lowercase().contains(&self.filter_query))
+                    .unwrap_or(false)
+                || session
+                    .project_path
+                    .as_ref()
+                    .map(|p| {
+                        p.to_string_lossy()
+                            .to_lowercase()
+                            .contains(&self.filter_query)
+                    })
+                    .unwrap_or(false);
+        }
+
+        true
     }
 }

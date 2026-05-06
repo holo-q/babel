@@ -2,6 +2,7 @@
 //!
 //! Coordinates session list and transcript view, handles key events.
 
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,11 @@ use crate::events::BabelEvent;
 use crate::ipc::{Request, Response};
 use crate::utility::ipc::socket_path;
 
-use super::session_list::{EnrichedSession, SessionListState};
+use super::preferences::{
+    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
+};
+use super::project_metrics::ProjectTouchMetric;
+use super::session_list::{CwdDisplayMode, EnrichedSession, SessionListState};
 use super::transcript::TranscriptView;
 use std::path::PathBuf;
 
@@ -64,6 +69,22 @@ enum TranscriptLoadResult {
     },
 }
 
+enum ProjectLoadResult {
+    Loaded {
+        session_key: String,
+        projects: Vec<ProjectTouchMetric>,
+    },
+    Notice {
+        session_key: String,
+        message: String,
+    },
+}
+
+enum LaunchResult {
+    Success(String),
+    Error(String),
+}
+
 struct PendingTranscriptLoad {
     seq: u64,
     agent_kind: AgentKind,
@@ -75,6 +96,14 @@ struct TranscriptTarget {
     agent_kind: AgentKind,
     native_id: String,
     session_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum TouchedProjectsState {
+    Empty,
+    Loading,
+    Loaded(Vec<ProjectTouchMetric>),
+    Notice(String),
 }
 
 #[async_trait::async_trait]
@@ -104,6 +133,10 @@ pub struct ResumeApp {
     pub show_transcript: bool,
     /// Last launcher/refresh status shown in the footer
     pub status_message: String,
+    /// Cached/async per-session project-touch metric for cwd-column rendering.
+    pub touched_projects: HashMap<String, TouchedProjectsState>,
+    /// Display preferences changed and should be persisted after the key event.
+    display_options_dirty: bool,
     /// Should exit
     pub should_exit: bool,
 }
@@ -118,8 +151,44 @@ impl ResumeApp {
             search_buffer: String::new(),
             show_transcript: true,
             status_message: "Enter: launch  r: refresh".to_string(),
+            touched_projects: HashMap::new(),
+            display_options_dirty: false,
             should_exit: false,
         }
+    }
+
+    pub fn apply_display_options(&mut self, options: ResumeDisplayOptions) {
+        self.sessions.show_all = options.show_all;
+        self.sessions.hidden_display_mode = options.hidden_display_mode;
+        self.sessions.cwd_display_mode = options.cwd_display_mode;
+        self.sessions.invalidate_visible_indices();
+        self.show_transcript = options.show_transcript;
+        self.transcript.expand_messages = options.expand_messages;
+        self.transcript.role_filter = options.transcript_role_filter;
+        if !self.show_transcript && self.focus == PaneFocus::Transcript {
+            self.focus = PaneFocus::Sessions;
+        }
+    }
+
+    fn display_options(&self) -> ResumeDisplayOptions {
+        ResumeDisplayOptions {
+            show_all: self.sessions.show_all,
+            hidden_display_mode: self.sessions.hidden_display_mode,
+            cwd_display_mode: self.sessions.cwd_display_mode,
+            show_transcript: self.show_transcript,
+            expand_messages: self.transcript.expand_messages,
+            transcript_role_filter: self.transcript.role_filter,
+        }
+    }
+
+    fn mark_display_options_dirty(&mut self) {
+        self.display_options_dirty = true;
+    }
+
+    fn take_display_options_dirty(&mut self) -> bool {
+        let dirty = self.display_options_dirty;
+        self.display_options_dirty = false;
+        dirty
     }
 
     /// Handle key event and return any launcher-level action it requested.
@@ -202,6 +271,7 @@ impl ResumeApp {
             // Tab - toggle cwd/all
             KeyCode::Tab => {
                 self.sessions.toggle_show_all();
+                self.mark_display_options_dirty();
                 ResumeAction::None
             }
 
@@ -220,7 +290,9 @@ impl ResumeApp {
 
             // Toggle hidden sessions
             KeyCode::Char('h') => {
-                self.sessions.toggle_show_hidden();
+                let mode = self.sessions.cycle_hidden_display_mode();
+                self.status_message = format!("hidden display: {}", mode.label());
+                self.mark_display_options_dirty();
                 ResumeAction::None
             }
 
@@ -228,6 +300,7 @@ impl ResumeApp {
             KeyCode::Char('c') => {
                 let mode = self.sessions.cycle_cwd_display_mode();
                 self.status_message = format!("cwd display: {}", mode.label());
+                self.mark_display_options_dirty();
                 ResumeAction::None
             }
 
@@ -237,6 +310,27 @@ impl ResumeApp {
                 if !self.show_transcript && self.focus == PaneFocus::Transcript {
                     self.focus = PaneFocus::Sessions;
                 }
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Toggle transcript message snipping. Tool rows remain clamped.
+            KeyCode::Char('s') => {
+                let expanded = self.transcript.toggle_message_expansion();
+                self.status_message = if expanded {
+                    "transcript messages: full".to_string()
+                } else {
+                    "transcript messages: snip".to_string()
+                };
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Toggle transcript role filter.
+            KeyCode::Char('u') => {
+                self.transcript.toggle_role_filter();
+                self.status_message = "transcript filter changed".to_string();
+                self.mark_display_options_dirty();
                 ResumeAction::None
             }
 
@@ -303,7 +397,7 @@ impl ResumeApp {
         }
     }
 
-    fn selected_transcript_target(&self) -> Option<TranscriptTarget> {
+    fn selected_transcript_target(&mut self) -> Option<TranscriptTarget> {
         self.sessions.selected().map(|session| TranscriptTarget {
             agent_kind: session.agent_kind,
             native_id: session.native_id.clone(),
@@ -338,10 +432,16 @@ where
 
     // Create app with current_cwd for filtering
     let mut app = ResumeApp::new(sessions, current_cwd);
-    // If --all flag passed, start in show_all mode
-    app.sessions.show_all = show_all;
+    let mut display_options = load_resume_display_options();
+    // `--all` is an explicit launch-time request. The saved preference still
+    // seeds ordinary runs, while this flag can force the broader list open.
+    if show_all {
+        display_options.show_all = true;
+    }
+    app.apply_display_options(display_options);
 
     let (transcript_tx, mut transcript_rx) = mpsc::channel(8);
+    let (project_tx, mut project_rx) = mpsc::channel(8);
     let mut transcript_seq = 0;
     let mut desired_transcript_key: Option<String> = None;
     let mut pending_transcript: Option<PendingTranscriptLoad> = None;
@@ -364,63 +464,125 @@ where
     let mut auto_refresh_pending = false;
     let mut last_auto_refresh = Instant::now() - Duration::from_secs(1);
 
-    // Event loop
-    loop {
-        // Draw UI
-        terminal.draw(|f| super::ui::draw(f, &mut app))?;
+    let (launch_tx, mut launch_rx) = mpsc::channel::<LaunchResult>(4);
+    let own_pane_id: Option<u64> = std::env::var("KITTY_WINDOW_ID")
+        .ok()
+        .and_then(|s| s.parse().ok());
 
-        // Poll for events
+    let mut needs_redraw = true;
+
+    // Event loop — dirty-driven: only draw when state actually changed.
+    // Input events are drained in batch before drawing so held-key scrolling
+    // never renders intermediate frames.
+    loop {
+        if needs_redraw {
+            queue_visible_project_metrics(&mut app, &project_tx);
+            terminal.draw(|f| super::ui::draw(f, &mut app))?;
+            needs_redraw = false;
+        }
+
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == event::KeyEventKind::Release {
-                    continue;
-                }
-                match app.handle_key(key) {
-                    ResumeAction::None => {}
-                    ResumeAction::Quit => break,
-                    ResumeAction::Launch(selection) => {
-                        match source.launch_resume(&selection).await {
-                            Ok(message) => app.status_message = message,
-                            Err(e) => app.status_message = format!("launch failed: {e}"),
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind != event::KeyEventKind::Release => {
+                        match app.handle_key(key) {
+                            ResumeAction::None => {}
+                            ResumeAction::Quit => {}
+                            ResumeAction::Launch(selection) => {
+                                let short_id: String =
+                                    selection.native_id.chars().take(8).collect();
+                                app.status_message = format!(
+                                    "launching {} {short_id}...",
+                                    selection.agent_kind.slug(),
+                                );
+                                let tx = launch_tx.clone();
+                                let refocus_pane = own_pane_id;
+                                tokio::spawn(async move {
+                                    let msg = match crate::cli::resume::launch_harness_resume(
+                                        &selection,
+                                    )
+                                    .await
+                                    {
+                                        Ok(msg) => {
+                                            if let Some(id) = refocus_pane {
+                                                tokio::time::sleep(Duration::from_millis(150))
+                                                    .await;
+                                                let _ =
+                                                    crate::backend::kitty::focus_pane(id).await;
+                                            }
+                                            LaunchResult::Success(msg)
+                                        }
+                                        Err(e) => {
+                                            LaunchResult::Error(format!("launch failed: {e}"))
+                                        }
+                                    };
+                                    let _ = tx.send(msg).await;
+                                });
+                            }
+                            ResumeAction::Refresh => {
+                                refresh_app_sessions(&mut app, source, true, "refreshed")
+                                    .await?;
+                                sync_selected_transcript_target(
+                                    &mut app,
+                                    &mut desired_transcript_key,
+                                    &mut pending_transcript,
+                                    &mut transcript_seq,
+                                );
+                            }
+                            ResumeAction::SetHidden {
+                                session_key,
+                                hidden,
+                            } => match source.set_hidden(&session_key, hidden).await {
+                                Ok(()) => {
+                                    app.status_message = if hidden {
+                                        "hid session".to_string()
+                                    } else {
+                                        "unhid session".to_string()
+                                    };
+                                }
+                                Err(e) => {
+                                    app.sessions.set_hidden_by_key(&session_key, !hidden);
+                                    app.status_message = format!("hide failed: {e}");
+                                }
+                            },
                         }
-                    }
-                    ResumeAction::Refresh => {
-                        refresh_app_sessions(&mut app, source, true, "refreshed").await?;
+                        persist_display_options_if_dirty(&mut app);
                         sync_selected_transcript_target(
                             &mut app,
                             &mut desired_transcript_key,
                             &mut pending_transcript,
                             &mut transcript_seq,
                         );
+                        needs_redraw = true;
                     }
-                    ResumeAction::SetHidden {
-                        session_key,
-                        hidden,
-                    } => match source.set_hidden(&session_key, hidden).await {
-                        Ok(()) => {
-                            app.status_message = if hidden {
-                                "hid session".to_string()
-                            } else {
-                                "unhid session".to_string()
-                            };
-                        }
-                        Err(e) => {
-                            app.sessions.set_hidden_by_key(&session_key, !hidden);
-                            app.status_message = format!("hide failed: {e}");
-                        }
-                    },
+                    Event::Resize(..) => {
+                        needs_redraw = true;
+                    }
+                    _ => {}
                 }
-                sync_selected_transcript_target(
-                    &mut app,
-                    &mut desired_transcript_key,
-                    &mut pending_transcript,
-                    &mut transcript_seq,
-                );
+
+                if app.should_exit || !event::poll(std::time::Duration::ZERO)? {
+                    break;
+                }
             }
         }
 
         while let Ok(result) = transcript_rx.try_recv() {
             apply_transcript_result(&mut app, result, transcript_seq);
+            needs_redraw = true;
+        }
+
+        while let Ok(result) = project_rx.try_recv() {
+            apply_project_result(&mut app, result);
+            needs_redraw = true;
+        }
+
+        while let Ok(result) = launch_rx.try_recv() {
+            match result {
+                LaunchResult::Success(msg) => app.status_message = msg,
+                LaunchResult::Error(msg) => app.status_message = msg,
+            }
+            needs_redraw = true;
         }
 
         if let Some(pending) = pending_transcript.take() {
@@ -455,6 +617,7 @@ where
                 &mut pending_transcript,
                 &mut transcript_seq,
             );
+            needs_redraw = true;
         }
 
         if app.should_exit {
@@ -468,6 +631,17 @@ where
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+fn persist_display_options_if_dirty(app: &mut ResumeApp) {
+    if !app.take_display_options_dirty() {
+        return;
+    }
+
+    if let Err(e) = save_resume_display_options(&app.display_options()) {
+        trace_error!("resume display options save failed", error = %e);
+        app.status_message = format!("display options save failed: {e}");
+    }
 }
 
 fn sync_selected_transcript_target(
@@ -514,6 +688,40 @@ fn sync_selected_transcript_target(
         session_id: target.native_id,
         requested_at: Instant::now(),
     });
+}
+
+fn spawn_project_load(
+    agent_kind: AgentKind,
+    native_id: String,
+    session_key: String,
+    tx: mpsc::Sender<ProjectLoadResult>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let worker_native_id = native_id.clone();
+        let worker_session_key = session_key.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            match super::project_metrics::load_cached_session_projects(
+                agent_kind,
+                &worker_native_id,
+                &worker_session_key,
+            ) {
+                Ok(projects) => ProjectLoadResult::Loaded {
+                    session_key: worker_session_key,
+                    projects,
+                },
+                Err(e) => ProjectLoadResult::Notice {
+                    session_key: worker_session_key,
+                    message: format!("project metrics unavailable: {e}"),
+                },
+            }
+        })
+        .await
+        .unwrap_or_else(|e| ProjectLoadResult::Notice {
+            session_key,
+            message: format!("project metric worker failed: {e}"),
+        });
+        let _ = tx.send(result).await;
+    })
 }
 
 fn spawn_transcript_load(
@@ -591,14 +799,83 @@ fn load_harness_transcript(
     }
 }
 
+fn queue_visible_project_metrics(app: &mut ResumeApp, tx: &mpsc::Sender<ProjectLoadResult>) {
+    if app.sessions.cwd_display_mode != CwdDisplayMode::TouchedProjects {
+        return;
+    }
+
+    let scroll_offset = app.sessions.scroll_offset;
+    let indices: Vec<usize> = app
+        .sessions
+        .visible_indices()
+        .iter()
+        .skip(scroll_offset)
+        .take(64)
+        .copied()
+        .collect();
+
+    for idx in indices {
+        let session = &app.sessions.sessions[idx];
+        if !matches!(session.agent_kind, AgentKind::Claude | AgentKind::Codex) {
+            app.touched_projects
+                .entry(session.session_key.clone())
+                .or_insert_with(|| {
+                    TouchedProjectsState::Notice(format!(
+                        "{} project metrics are not wired yet",
+                        session.agent_kind.display_name()
+                    ))
+                });
+            continue;
+        }
+
+        if app.touched_projects.contains_key(&session.session_key) {
+            continue;
+        }
+
+        app.touched_projects
+            .insert(session.session_key.clone(), TouchedProjectsState::Loading);
+        drop(spawn_project_load(
+            session.agent_kind,
+            session.native_id.clone(),
+            session.session_key.clone(),
+            tx.clone(),
+        ));
+    }
+}
+
+fn apply_project_result(app: &mut ResumeApp, result: ProjectLoadResult) {
+    match result {
+        ProjectLoadResult::Loaded {
+            session_key,
+            projects,
+        } => {
+            app.touched_projects
+                .insert(session_key, TouchedProjectsState::Loaded(projects));
+        }
+        ProjectLoadResult::Notice {
+            session_key,
+            message,
+        } => {
+            trace_error!(
+                "project metric load failed",
+                session_key = session_key.as_str(),
+                message = message.as_str()
+            );
+            app.touched_projects
+                .insert(session_key, TouchedProjectsState::Notice(message));
+        }
+    }
+}
+
 fn apply_transcript_result(app: &mut ResumeApp, result: TranscriptLoadResult, current_seq: u64) {
     match result {
         TranscriptLoadResult::Loaded {
             seq,
             session_id,
-            messages,
+            mut messages,
         } => {
             if seq == current_seq {
+                super::ui::prepare_transcript_messages(&mut messages);
                 app.transcript.load(session_id, messages);
             }
         }
@@ -625,6 +902,7 @@ where
 {
     let sessions = source.refresh_sessions(force).await?;
     app.sessions.replace_sessions(sessions);
+    app.touched_projects.clear();
     app.status_message = format!("{label} {} sessions", app.sessions.sessions.len());
     Ok(())
 }

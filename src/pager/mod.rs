@@ -8,6 +8,8 @@
 
 mod app;
 mod jsonl_parser;
+mod preferences;
+mod project_metrics;
 mod session_list;
 mod transcript;
 mod ui;
