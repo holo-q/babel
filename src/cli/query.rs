@@ -1711,7 +1711,9 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
     Ok(sessions
         .into_iter()
         .map(|(sid, acc)| {
-            let display_name = acc.first_real;
+            let custom = read_claude_custom_title(&acc.project, &sid);
+            let has_title = custom.is_some();
+            let display_name = custom.or(acc.first_real);
             let last_prompt = if acc.turns > 1 { acc.last_real } else { None };
 
             NativeSession {
@@ -1724,10 +1726,46 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
                 last_seen_at: acc.last_ts,
                 interactive: true,
                 command_only: acc.all_commands,
-                has_title: false,
+                has_title,
             }
         })
         .collect())
+}
+
+/// Read a Claude session's custom title (/rename) from its JSONL.
+///
+/// Scans for standalone `{"type":"custom-title","customTitle":"..."}` lines.
+/// These are short single-field entries — we match by line prefix to avoid
+/// false-positiving on `custom-title` text embedded inside tool results.
+fn read_claude_custom_title(project_path: &str, session_id: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+
+    let encoded = babel::utility::claude_storage::path_to_encoded(std::path::Path::new(project_path));
+    let session_path = babel::utility::claude_storage::claude_base()
+        .join("projects")
+        .join(encoded)
+        .join(format!("{}.jsonl", session_id));
+
+    let file = std::fs::File::open(&session_path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut title = None;
+    for line in reader.lines().flatten() {
+        // custom-title entries are tiny (~120 bytes). Skip long lines (messages, tool results).
+        if line.len() > 300 {
+            continue;
+        }
+        if line.contains("\"custom-title\"") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("custom-title") {
+                    if let Some(t) = v.get("customTitle").and_then(|v| v.as_str()) {
+                        title = Some(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    title
 }
 
 /// Scan Codex CLI sessions.
