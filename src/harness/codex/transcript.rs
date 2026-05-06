@@ -183,11 +183,31 @@ fn extract_content(blocks: &[ContentBlock]) -> String {
 }
 
 fn output_to_string(output: Option<serde_json::Value>) -> String {
-    match output {
+    let raw = match output {
         Some(serde_json::Value::String(text)) => text,
         Some(value) => serde_json::to_string(&value).unwrap_or_default(),
         None => String::new(),
+    };
+    normalize_tool_output(raw)
+}
+
+fn normalize_tool_output(raw: String) -> String {
+    let Some(output_start) = codex_tool_output_start(&raw) else {
+        return raw;
+    };
+    raw[output_start..].trim_end().to_string()
+}
+
+fn codex_tool_output_start(raw: &str) -> Option<usize> {
+    if !(raw.starts_with("Chunk ID:")
+        || raw.starts_with("Exit code:")
+        || raw.starts_with("Command: "))
+    {
+        return None;
     }
+
+    let marker = "\nOutput:\n";
+    raw.find(marker).map(|idx| idx + marker.len())
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,5 +324,45 @@ mod tests {
         assert!(matches!(messages[2].kind, MessageKind::ToolCall { .. }));
         assert!(matches!(messages[3].kind, MessageKind::ToolOutput));
         assert_eq!(messages[3].content, "done");
+    }
+
+    #[test]
+    fn strips_codex_tool_output_envelope() {
+        let wrapped = concat!(
+            "Chunk ID: 244394\n",
+            "Wall time: 0.0507 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 42\n",
+            "Output:\n",
+            "real output\n",
+        );
+        assert_eq!(normalize_tool_output(wrapped.to_string()), "real output");
+    }
+
+    #[test]
+    fn strips_codex_tool_output_envelope_with_command_prefix() {
+        let wrapped = concat!(
+            "Command: /usr/bin/bash -lc 'git status'\n",
+            "Chunk ID: fbd20e\n",
+            "Wall time: 0.0000 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 0\n",
+            "Output:\n",
+        );
+        assert_eq!(normalize_tool_output(wrapped.to_string()), "");
+    }
+
+    #[test]
+    fn strips_legacy_codex_tool_output_envelope() {
+        let wrapped = concat!(
+            "Exit code: 101\n",
+            "Wall time: 0 seconds\n",
+            "Output:\n",
+            "thread 'main' panicked\n",
+        );
+        assert_eq!(
+            normalize_tool_output(wrapped.to_string()),
+            "thread 'main' panicked"
+        );
     }
 }
