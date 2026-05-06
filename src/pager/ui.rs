@@ -103,7 +103,8 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .take(list_height.max(1))
         .map(|(idx, row)| (*idx, row))
         .collect();
-    let widths = RowWidths::measure(viewport_rows.iter().map(|(idx, row)| (*idx, *row)));
+    let measured_widths = RowWidths::measure(viewport_rows.iter().map(|(idx, row)| (*idx, *row)));
+    let widths = measured_widths.fit(inner.width as usize);
 
     let items: Vec<ListItem> = viewport_rows
         .iter()
@@ -422,8 +423,9 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
 
 // === Helper functions ===
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct RowWidths {
+    state: usize,
     index: usize,
     harness: usize,
     workspace: usize,
@@ -439,6 +441,7 @@ impl RowWidths {
         let mut widths = Self::default();
 
         for (idx, row) in rows {
+            widths.state = widths.state.max(display_width(row.state_icon));
             widths.index = widths.index.max(format!("{}", idx + 1).len());
             widths.harness = widths.harness.max(row.harness.len());
             widths.workspace = widths.workspace.max(display_width(&row.workspace));
@@ -449,8 +452,72 @@ impl RowWidths {
             widths.prompt = widths.prompt.max(display_width(&row.last_prompt));
         }
 
+        widths.state = widths.state.max(1);
         widths.index = widths.index.max(1);
         widths
+    }
+
+    fn fit(mut self, row_width: usize) -> Self {
+        if row_width == 0 {
+            return self;
+        }
+
+        let min_total = self.total_width();
+        if min_total < row_width {
+            self.distribute_extra(row_width - min_total);
+            return self;
+        }
+
+        self.shrink_to(row_width);
+        self
+    }
+
+    fn total_width(&self) -> usize {
+        // Leading state cluster:
+        // " " + state icon + " " + harness + "  " + workspace + "  " + cwd
+        // + "  " + filter + " " + time + "  " + turns + "  " + index + "  "
+        // + title + "  " + prompt.
+        1 + self.state
+            + 1
+            + self.harness
+            + 2
+            + self.workspace
+            + 2
+            + self.cwd
+            + 2
+            + 1
+            + 1
+            + self.time
+            + 2
+            + self.turns
+            + 2
+            + self.index
+            + 2
+            + self.title
+            + 2
+            + self.prompt
+    }
+
+    fn distribute_extra(&mut self, mut extra: usize) {
+        // The browser should use the full row, but path/status columns stay
+        // compact. The semantic text cells — thread/title and prompt/message —
+        // are the useful elastic surfaces.
+        let title_extra = extra / 2;
+        self.title += title_extra;
+        extra = extra.saturating_sub(title_extra);
+        self.prompt += extra;
+    }
+
+    fn shrink_to(&mut self, row_width: usize) {
+        while self.total_width() > row_width && self.prompt > 8 {
+            self.prompt -= 1;
+        }
+        while self.total_width() > row_width && self.title > 8 {
+            self.title -= 1;
+        }
+        while self.total_width() > row_width && self.cwd > 12 {
+            self.cwd -= 1;
+        }
     }
 }
 
@@ -473,11 +540,12 @@ fn push_left_cell(
     text_style: Style,
     pad_style: Style,
 ) {
-    let text_width = display_width(text);
+    let fitted = fit_cell_text(text, width);
+    let text_width = display_width(&fitted);
     if text_width < width {
         push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
     }
-    push_span(spans, line_width, text.to_string(), text_style);
+    push_span(spans, line_width, fitted, text_style);
 }
 
 fn push_right_cell(
@@ -488,10 +556,19 @@ fn push_right_cell(
     text_style: Style,
     pad_style: Style,
 ) {
-    push_span(spans, line_width, text.to_string(), text_style);
-    let text_width = display_width(text);
+    let fitted = fit_cell_text(text, width);
+    push_span(spans, line_width, fitted.clone(), text_style);
+    let text_width = display_width(&fitted);
     if text_width < width {
         push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
+    }
+}
+
+fn fit_cell_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        String::new()
+    } else {
+        middle_truncate_str(text, width)
     }
 }
 
@@ -864,5 +941,44 @@ mod tests {
             tool_call_preview("Grep", args),
             "Grep: ToolCall in src/pager"
         );
+    }
+
+    #[test]
+    fn row_widths_expand_title_and_prompt_to_fill_row() {
+        let widths = RowWidths {
+            state: 1,
+            index: 2,
+            harness: 6,
+            workspace: 1,
+            cwd: 12,
+            time: 2,
+            turns: 3,
+            title: 10,
+            prompt: 10,
+        };
+        let fitted = widths.fit(widths.total_width() + 20);
+        assert_eq!(fitted.cwd, 12);
+        assert_eq!(fitted.title, 20);
+        assert_eq!(fitted.prompt, 20);
+        assert_eq!(fitted.total_width(), widths.total_width() + 20);
+    }
+
+    #[test]
+    fn row_widths_shrink_flexible_text_cells_to_viewport() {
+        let widths = RowWidths {
+            state: 1,
+            index: 2,
+            harness: 6,
+            workspace: 1,
+            cwd: 40,
+            time: 2,
+            turns: 4,
+            title: 80,
+            prompt: 80,
+        };
+        let fitted = widths.fit(100);
+        assert!(fitted.total_width() <= 100);
+        assert!(fitted.prompt <= widths.prompt);
+        assert!(fitted.title <= widths.title);
     }
 }

@@ -3,10 +3,10 @@
 //! Manages the same cross-harness session surface that `ls-sessions` prints,
 //! with pager-only cursor/search state layered on top.
 
-use crate::ActivityState;
 use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
 use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
+use crate::ActivityState;
 use std::path::PathBuf;
 
 /// Running status of a session
@@ -135,6 +135,7 @@ impl EnrichedSession {
                         activity_state: Some(*activity_state),
                     }),
                 },
+                text_max_chars: 160,
             },
             now,
         )

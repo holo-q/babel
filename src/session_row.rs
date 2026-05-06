@@ -45,6 +45,7 @@ pub struct SessionRowInput<'a> {
     pub has_title: bool,
     pub hidden: bool,
     pub live: Option<LiveSessionState>,
+    pub text_max_chars: usize,
 }
 
 /// Precomputed display cells for one session row.
@@ -81,15 +82,15 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         .unwrap_or_default();
 
     let (title, has_title) = if let Some(generated) = input.generated_title {
-        (sanitize_display(generated, 40), true)
+        (sanitize_display(generated, input.text_max_chars), true)
     } else {
         let raw = input.display_name.unwrap_or(input.native_id);
-        (sanitize_display(raw, 40), input.has_title)
+        (sanitize_display(raw, input.text_max_chars), input.has_title)
     };
 
     let last_prompt = input
         .last_prompt
-        .map(|text| sanitize_display(text, 40))
+        .map(|text| sanitize_display(text, input.text_max_chars))
         .unwrap_or_default();
 
     let turns = if input.turn_count > 0 {

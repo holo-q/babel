@@ -1471,6 +1471,7 @@ fn session_row(
             command_only: s.command_only,
             has_title: s.has_title,
             hidden: is_hidden,
+            text_max_chars: 40,
             live: live.map(|pane| LiveSessionState {
                 workspace: pane.workspace,
                 hook_state: pane.hook_state,
