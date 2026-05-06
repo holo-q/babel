@@ -7,6 +7,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use scrollparse::MessageKind;
+use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::session_row::{self, SessionRow, StateKind};
@@ -329,15 +330,12 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
             MessageKind::User => ("> ", Style::default().fg(Color::White).bg(USER_PROMPT_BG)),
             MessageKind::Assistant => ("● ", Style::default().fg(Color::Cyan)),
             MessageKind::ToolCall { name, args } => {
-                let tool_line = if args.is_empty() {
-                    format!("● {}", name)
-                } else {
-                    format!("● {}({})", name, truncate_str(args, 30))
-                };
-                lines.push(Line::from(Span::styled(
-                    tool_line,
+                lines.push(collapsed_message_line(
+                    "● ",
+                    &tool_call_preview(name, args),
                     Style::default().fg(Color::Yellow),
-                )));
+                    inner.width as usize,
+                ));
                 continue;
             }
             MessageKind::ToolOutput => ("  ⎿ ", Style::default().fg(Color::DarkGray)),
@@ -536,6 +534,173 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+fn tool_call_preview(name: &str, args: &str) -> String {
+    let Ok(input) = serde_json::from_str::<Value>(args) else {
+        return raw_tool_call_preview(name, args);
+    };
+
+    match name {
+        "Bash" => string_field(&input, "command")
+            .map(|command| format!("Bash: {}", one_line(command)))
+            .unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "exec_command" => string_field(&input, "cmd")
+            .or_else(|| string_field(&input, "command"))
+            .map(|command| format!("exec: {}", one_line(command)))
+            .unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "Edit" => {
+            edit_tool_preview("Edit", &input).unwrap_or_else(|| raw_tool_call_preview(name, args))
+        }
+        "MultiEdit" => {
+            multi_edit_tool_preview(&input).unwrap_or_else(|| raw_tool_call_preview(name, args))
+        }
+        "Write" => {
+            file_tool_preview("Write", &input).unwrap_or_else(|| raw_tool_call_preview(name, args))
+        }
+        "Read" => read_tool_preview(&input).unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "Grep" => grep_tool_preview(&input).unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "Glob" => glob_tool_preview(&input).unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "NotebookEdit" => edit_tool_preview("NotebookEdit", &input)
+            .unwrap_or_else(|| raw_tool_call_preview(name, args)),
+        "apply_patch" => "apply_patch".to_string(),
+        _ => raw_tool_call_preview(name, args),
+    }
+}
+
+fn raw_tool_call_preview(name: &str, args: &str) -> String {
+    if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}({})", name, truncate_str(args, 48))
+    }
+}
+
+fn edit_tool_preview(label: &str, input: &Value) -> Option<String> {
+    let path = input_path(input)?;
+    let mut preview = format!("{label}: {}", short_path(path));
+    if let Some(range) = line_range(input) {
+        preview.push(' ');
+        preview.push_str(&range);
+    } else if let Some(old_string) = string_field(input, "old_string") {
+        let line_count = old_string.lines().count().max(1);
+        preview.push_str(&format!(" replace {line_count}L"));
+    }
+    Some(preview)
+}
+
+fn multi_edit_tool_preview(input: &Value) -> Option<String> {
+    let path = input_path(input)?;
+    let edit_count = input
+        .get("edits")
+        .and_then(Value::as_array)
+        .map(|edits| edits.len())
+        .unwrap_or(0);
+    if edit_count == 0 {
+        Some(format!("MultiEdit: {}", short_path(path)))
+    } else {
+        Some(format!(
+            "MultiEdit: {} {edit_count} edits",
+            short_path(path)
+        ))
+    }
+}
+
+fn file_tool_preview(label: &str, input: &Value) -> Option<String> {
+    let path = input_path(input)?;
+    let mut preview = format!("{label}: {}", short_path(path));
+    if let Some(range) = line_range(input) {
+        preview.push(' ');
+        preview.push_str(&range);
+    }
+    Some(preview)
+}
+
+fn read_tool_preview(input: &Value) -> Option<String> {
+    let path = input_path(input)?;
+    let mut preview = format!("Read: {}", short_path(path));
+    if let Some(range) = line_range(input) {
+        preview.push(' ');
+        preview.push_str(&range);
+    } else if let Some(offset) = number_field(input, "offset") {
+        preview.push_str(&format!(" L{offset}"));
+        if let Some(limit) = number_field(input, "limit") {
+            preview.push_str(&format!(
+                "-{}",
+                offset.saturating_add(limit).saturating_sub(1)
+            ));
+        }
+    }
+    Some(preview)
+}
+
+fn grep_tool_preview(input: &Value) -> Option<String> {
+    let pattern = string_field(input, "pattern")?;
+    let scope = string_field(input, "path")
+        .or_else(|| string_field(input, "include"))
+        .map(short_path);
+    Some(match scope {
+        Some(scope) => format!("Grep: {} in {}", one_line(pattern), scope),
+        None => format!("Grep: {}", one_line(pattern)),
+    })
+}
+
+fn glob_tool_preview(input: &Value) -> Option<String> {
+    let pattern = string_field(input, "pattern")?;
+    let scope = string_field(input, "path").map(short_path);
+    Some(match scope {
+        Some(scope) => format!("Glob: {} in {}", one_line(pattern), scope),
+        None => format!("Glob: {}", one_line(pattern)),
+    })
+}
+
+fn input_path(input: &Value) -> Option<&str> {
+    string_field(input, "file_path")
+        .or_else(|| string_field(input, "path"))
+        .or_else(|| string_field(input, "notebook_path"))
+}
+
+fn line_range(input: &Value) -> Option<String> {
+    let start = number_field(input, "line")
+        .or_else(|| number_field(input, "line_number"))
+        .or_else(|| number_field(input, "start_line"));
+    let end = number_field(input, "end_line");
+    match (start, end) {
+        (Some(start), Some(end)) if end != start => Some(format!("L{start}-{end}")),
+        (Some(start), _) => Some(format!("L{start}")),
+        _ => None,
+    }
+}
+
+fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key)?.as_str()
+}
+
+fn number_field(value: &Value, key: &str) -> Option<u64> {
+    value.get(key)?.as_u64()
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn short_path(path: &str) -> String {
+    let home = std::env::var("HOME").ok();
+    let compact = home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).map(|rest| format!("~{rest}")))
+        .unwrap_or_else(|| path.to_string());
+
+    let normalized = compact.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() <= 3 || normalized.starts_with("~") && parts.len() <= 4 {
+        return normalized;
+    }
+
+    format!("…/{}", parts[parts.len().saturating_sub(3)..].join("/"))
+}
+
 /// Truncate a string to max length, adding ellipsis
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
@@ -649,5 +814,55 @@ fn state_style(state_kind: StateKind) -> Style {
         StateKind::AwaitingInput => Style::default().fg(Color::Green),
         StateKind::BackgroundTask => Style::default().fg(Color::Magenta),
         StateKind::Unknown | StateKind::NotRunning => Style::default().fg(Color::DarkGray),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_bash_tool_call_with_command() {
+        let args = r#"{"command":"uv run birdideas timeline 24h --max 5","description":"Verify"}"#;
+        assert_eq!(
+            tool_call_preview("Bash", args),
+            "Bash: uv run birdideas timeline 24h --max 5"
+        );
+    }
+
+    #[test]
+    fn formats_codex_exec_command_with_cmd() {
+        let args = r#"{"cmd":"git status --short","workdir":"/home/nuck/holoq/repo-os/babel"}"#;
+        assert_eq!(
+            tool_call_preview("exec_command", args),
+            "exec: git status --short"
+        );
+    }
+
+    #[test]
+    fn formats_edit_tool_call_with_short_path_and_replace_count() {
+        let args = r#"{"file_path":"/home/nuck/holoq/repo-os/babel/src/pager/ui.rs","old_string":"a\nb\n","new_string":"c\n"}"#;
+        assert_eq!(
+            tool_call_preview("Edit", args),
+            "Edit: …/src/pager/ui.rs replace 2L"
+        );
+    }
+
+    #[test]
+    fn formats_read_tool_call_with_line_range() {
+        let args = r#"{"file_path":"/home/nuck/holoq/repo-os/babel/src/pager/ui.rs","offset":120,"limit":20}"#;
+        assert_eq!(
+            tool_call_preview("Read", args),
+            "Read: …/src/pager/ui.rs L120-139"
+        );
+    }
+
+    #[test]
+    fn formats_grep_tool_call_with_scope() {
+        let args = r#"{"pattern":"ToolCall","path":"src/pager"}"#;
+        assert_eq!(
+            tool_call_preview("Grep", args),
+            "Grep: ToolCall in src/pager"
+        );
     }
 }
