@@ -626,8 +626,17 @@ impl TerminalBackend for KittyBackend {
         conn: &str,
         cmd: &[&str],
         cwd: &std::path::Path,
-    ) -> Result<u64> {
-        launch_pane_on_socket(conn, cmd, cwd).await
+    ) -> Result<super::LaunchedPane> {
+        let pane_id = launch_pane_on_socket(conn, cmd, cwd).await?;
+        let platform_window_id = list_panes_on_socket(conn)
+            .await
+            .ok()
+            .and_then(|panes| panes.into_iter().find(|p| p.id == pane_id))
+            .and_then(|p| p.platform_window_id);
+        Ok(super::LaunchedPane {
+            pane_id,
+            platform_window_id,
+        })
     }
 
     async fn list_panes_raw(&self, conn: &str) -> Result<String> {

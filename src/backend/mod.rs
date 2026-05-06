@@ -163,6 +163,16 @@ pub struct BackendInstance {
     pub error: Option<String>,
 }
 
+/// Result of launching a command in a new terminal pane.
+#[derive(Debug, Clone)]
+pub struct LaunchedPane {
+    pub pane_id: u64,
+    /// X11/Wayland window ID. Present when the backend creates a distinct
+    /// desktop window (kitty os-window). Absent when panes share a host
+    /// window (tmux). Used for wmctrl workspace moves.
+    pub platform_window_id: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------
 // TerminalBackend — the trait all backends implement
 // ---------------------------------------------------------------------------
@@ -217,13 +227,14 @@ pub trait TerminalBackend: Send + Sync {
     // === Launch (optional — open a command in a new pane/window) ===
 
     /// Spawn `cmd` in a new terminal surface (os-window for kitty, window for tmux)
-    /// rooted at `cwd`. Returns the new pane ID on success.
+    /// rooted at `cwd`. Returns the new pane's ID and, when available, the
+    /// platform (X11/Wayland) window ID for desktop workspace operations.
     async fn launch_pane(
         &self,
         conn: &str,
         cmd: &[&str],
         cwd: &std::path::Path,
-    ) -> Result<u64> {
+    ) -> Result<LaunchedPane> {
         let _ = (conn, cmd, cwd);
         anyhow::bail!("{} does not support pane launch", self.backend_name())
     }
@@ -436,7 +447,7 @@ impl BackendRegistry {
         conn: &str,
         cmd: &[&str],
         cwd: &std::path::Path,
-    ) -> Result<u64> {
+    ) -> Result<LaunchedPane> {
         let backend = self
             .backend_for(conn)
             .ok_or_else(|| anyhow::anyhow!("no backend for connection {}", conn))?;

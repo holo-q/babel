@@ -372,10 +372,12 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
 
     let (backend, conn) = detect_current_backend()?;
 
-    let pane_id = backend.launch_pane(&conn, &parts, &cwd).await?;
+    let launched = backend.launch_pane(&conn, &parts, &cwd).await?;
 
-    // Kitty-specific: move the new pane to its last-known workspace.
-    if backend.backend_name() == "kitty" {
+    // Restore the session to its last-known desktop workspace, if the backend
+    // created a distinct desktop window (kitty os-window). Tmux panes share
+    // the host window so platform_window_id is None and this is skipped.
+    if let Some(pw_id) = launched.platform_window_id {
         let target_workspace = babel::babel_storage::init_db()
             .ok()
             .and_then(|db| {
@@ -386,10 +388,8 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
             .and_then(|m| m.last_workspace);
 
         if let Some(ws) = target_workspace {
-            if let Ok(Some(pane)) = babel::kitty::get_window(pane_id).await {
-                if let Err(e) = pane.move_to_workspace(ws) {
-                    tracing::debug!(error = %e, ws, "workspace move failed for resumed session");
-                }
+            if let Err(e) = babel::desktop::move_window_to_workspace(pw_id, ws) {
+                tracing::debug!(error = %e, ws, "workspace move failed for resumed session");
             }
         }
     }

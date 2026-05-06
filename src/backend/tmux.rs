@@ -450,12 +450,10 @@ impl TerminalBackend for TmuxBackend {
         conn: &str,
         cmd: &[&str],
         cwd: &std::path::Path,
-    ) -> Result<u64> {
+    ) -> Result<super::LaunchedPane> {
         let socket = socket_from_conn(conn);
         let cwd_str = cwd.to_string_lossy();
 
-        // new-window -P prints the new pane id (e.g. "%42")
-        // -c sets the working directory, trailing args are the command
         let mut args = vec!["new-window", "-P", "-F", "#{pane_id}", "-c", &cwd_str];
         for part in cmd {
             args.push(part);
@@ -475,7 +473,12 @@ impl TerminalBackend for TmuxBackend {
             .context("tmux new-window returned non-numeric pane id")?;
 
         effect!("tmux", "pane launched", id = pane_id);
-        Ok(pane_id)
+        // Tmux panes share the host terminal's desktop window — no individual
+        // platform_window_id. Workspace moves are a no-op.
+        Ok(super::LaunchedPane {
+            pane_id,
+            platform_window_id: None,
+        })
     }
 
     async fn send_text(&self, conn: &str, id: u64, text: &str) -> Result<()> {
