@@ -7,6 +7,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use scrollparse::MessageKind;
+use unicode_width::UnicodeWidthStr;
 
 use crate::session_row::{self, SessionRow, StateKind};
 
@@ -98,7 +99,7 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         .enumerate()
         .map(|(idx, (global_idx, row))| {
             let is_selected = idx + scroll_offset == app.sessions.cursor;
-            render_session_item(*global_idx, row, &widths, is_selected)
+            render_session_item(*global_idx, row, &widths, inner.width as usize, is_selected)
         })
         .collect();
 
@@ -127,6 +128,7 @@ fn render_session_item(
     idx: usize,
     row: &SessionRow,
     widths: &RowWidths,
+    row_width: usize,
     is_selected: bool,
 ) -> ListItem<'static> {
     let accent = session_row::closest_ansi256_from_hex(row.accent);
@@ -179,37 +181,74 @@ fn render_session_item(
     };
     let title_style = selected_style(row_style(title_style, running), selected_bg);
 
-    let line = Line::from(vec![
-        Span::styled(" ", gap),
-        Span::styled(row.state_icon, state_style),
-        Span::styled(" ", gap),
-        Span::styled(
-            format!("{:<w$}", row.harness, w = widths.harness),
-            harness_style,
-        ),
-        Span::styled("  ", gap),
-        Span::styled(
-            format!("{:>w$}", row.workspace, w = widths.workspace),
-            row_dim,
-        ),
-        Span::styled("  ", gap),
-        Span::styled(format!("{:<w$}", row.cwd, w = widths.cwd), row_dim),
-        Span::styled("  ", gap),
-        Span::styled(row.filter_tag, row_dim),
-        Span::styled(" ", gap),
-        Span::styled(format!("{:>w$}", row.time, w = widths.time), row_dim),
-        Span::styled("  ", gap),
-        Span::styled(format!("{:>w$}", row.turns, w = widths.turns), row_dim),
-        Span::styled("  ", gap),
-        Span::styled(format!("{:>w$}", idx + 1, w = widths.index), idx_style),
-        Span::styled("  ", gap),
-        Span::styled(format!("{:<w$}", row.title, w = widths.title), title_style),
-        Span::styled("  ", gap),
-        Span::styled(
-            format!("{:<w$}", row.last_prompt, w = widths.prompt),
-            text_style,
-        ),
-    ]);
+    let mut line_width = 0;
+    let mut spans = Vec::new();
+    push_span(&mut spans, &mut line_width, " ", gap);
+    push_span(&mut spans, &mut line_width, row.state_icon, state_style);
+    push_span(&mut spans, &mut line_width, " ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_right(&row.harness, widths.harness),
+        harness_style,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_left(&row.workspace, widths.workspace),
+        row_dim,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_right(&row.cwd, widths.cwd),
+        row_dim,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(&mut spans, &mut line_width, row.filter_tag, row_dim);
+    push_span(&mut spans, &mut line_width, " ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_left(&row.time, widths.time),
+        row_dim,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_left(&row.turns, widths.turns),
+        row_dim,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_left(&(idx + 1).to_string(), widths.index),
+        idx_style,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_right(&row.title, widths.title),
+        title_style,
+    );
+    push_span(&mut spans, &mut line_width, "  ", gap);
+    push_span(
+        &mut spans,
+        &mut line_width,
+        pad_right(&row.last_prompt, widths.prompt),
+        text_style,
+    );
+    if line_width < row_width {
+        let trailing = " ".repeat(row_width - line_width);
+        push_span(&mut spans, &mut line_width, trailing, gap);
+    }
+
+    let line = Line::from(spans);
 
     ListItem::new(line)
 }
@@ -359,17 +398,50 @@ impl RowWidths {
         for (idx, row) in rows {
             widths.index = widths.index.max(format!("{}", idx + 1).len());
             widths.harness = widths.harness.max(row.harness.len());
-            widths.workspace = widths.workspace.max(row.workspace.len());
-            widths.cwd = widths.cwd.max(row.cwd.len());
-            widths.time = widths.time.max(row.time.len());
-            widths.turns = widths.turns.max(row.turns.len());
-            widths.title = widths.title.max(row.title.chars().count());
-            widths.prompt = widths.prompt.max(row.last_prompt.chars().count());
+            widths.workspace = widths.workspace.max(display_width(&row.workspace));
+            widths.cwd = widths.cwd.max(display_width(&row.cwd));
+            widths.time = widths.time.max(display_width(&row.time));
+            widths.turns = widths.turns.max(display_width(&row.turns));
+            widths.title = widths.title.max(display_width(&row.title));
+            widths.prompt = widths.prompt.max(display_width(&row.last_prompt));
         }
 
         widths.index = widths.index.max(1);
         widths
     }
+}
+
+fn push_span(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: impl Into<String>,
+    style: Style,
+) {
+    let text = text.into();
+    *line_width += display_width(&text);
+    spans.push(Span::styled(text, style));
+}
+
+fn pad_left(text: &str, width: usize) -> String {
+    let text_width = display_width(text);
+    if text_width >= width {
+        text.to_string()
+    } else {
+        format!("{}{}", " ".repeat(width - text_width), text)
+    }
+}
+
+fn pad_right(text: &str, width: usize) -> String {
+    let text_width = display_width(text);
+    if text_width >= width {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(width - text_width))
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 fn unix_now() -> i64 {
