@@ -82,14 +82,12 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .map(|(idx, session)| (*idx, session.row(now)))
         .collect();
 
-    // Keep cursor visible
-    let scroll_offset = if cursor < app.sessions.scroll_offset {
-        cursor
-    } else if cursor >= app.sessions.scroll_offset + list_height {
-        cursor.saturating_sub(list_height.saturating_sub(1))
-    } else {
-        app.sessions.scroll_offset
-    };
+    let scroll_offset = scroll_offset_for_cursor(
+        cursor,
+        app.sessions.scroll_offset,
+        list_height,
+        visible.len(),
+    );
     app.sessions.scroll_offset = scroll_offset;
 
     let viewport_rows: Vec<(usize, &SessionRow)> = visible_rows
@@ -448,6 +446,34 @@ fn pad_right(text: &str, width: usize) -> String {
 
 fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
+}
+
+fn scroll_offset_for_cursor(
+    cursor: usize,
+    current_offset: usize,
+    viewport_height: usize,
+    row_count: usize,
+) -> usize {
+    if viewport_height == 0 || row_count <= viewport_height {
+        return 0;
+    }
+
+    let max_offset = row_count.saturating_sub(viewport_height);
+    let margin = (viewport_height / 4).clamp(1, 4);
+    let upper_edge = current_offset.saturating_add(margin);
+    let lower_edge = current_offset
+        .saturating_add(viewport_height)
+        .saturating_sub(1 + margin);
+
+    let next_offset = if cursor < upper_edge {
+        cursor.saturating_sub(margin)
+    } else if cursor > lower_edge {
+        cursor.saturating_sub(viewport_height.saturating_sub(1 + margin))
+    } else {
+        current_offset
+    };
+
+    next_offset.min(max_offset)
 }
 
 fn unix_now() -> i64 {
