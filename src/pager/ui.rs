@@ -5,7 +5,7 @@
 //! - Optional transcript preview with message rendering
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use scrollparse::MessageKind;
 
 use crate::session_row::{self, SessionRow, StateKind};
@@ -28,6 +28,10 @@ pub fn draw(frame: &mut Frame, app: &ResumeApp) {
         height: 1,
         ..area
     };
+
+    // Borderless/dynamic panes do not necessarily repaint every cell. Clear the
+    // body first so fast cursor movement cannot leave stale row fragments behind.
+    frame.render_widget(Clear, main_area);
 
     if app.show_transcript {
         // Keep the session list wide enough to preserve the `ls-sessions` row grammar.
