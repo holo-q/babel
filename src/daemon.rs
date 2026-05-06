@@ -86,17 +86,7 @@ use crate::fingerprint::{
 };
 use crate::indicator::IndicatorEvent;
 use crate::ipc::{Request, Response, TitleTarget};
-use crate::kitty::{
-    focus_pane_any,
-    focus_pane_on_socket,
-    get_scrollback, // used in fingerprint_match_addr
-    get_scrollback_any,
-    get_scrollback_on_socket,
-    reset_border_color_on_socket,
-    send_text_any,
-    send_text_on_socket,
-    set_border_color_on_socket,
-};
+use crate::kitty::{focus_pane_any, get_scrollback_any, send_text_any};
 use crate::kitty::{PaneAddr, PaneSelector};
 use crate::model::{ActivitySource, PaneActivity};
 use crate::paint::{
@@ -521,9 +511,10 @@ impl BabelState {
         // spawned kitty OS window would otherwise stay invisible to the cache and
         // render as "Workspace ?" until the next manual invalidation.
         let cache_misses_pane = !self.workspace_cache_dirty
-            && all_panes
-                .iter()
-                .any(|p| p.platform_window_id.map_or(false, |pid| !self.workspace_cache.contains_key(&pid)));
+            && all_panes.iter().any(|p| {
+                p.platform_window_id
+                    .map_or(false, |pid| !self.workspace_cache.contains_key(&pid))
+            });
         if cache_misses_pane {
             self.workspace_cache_dirty = true;
         }
@@ -544,7 +535,9 @@ impl BabelState {
 
         for pane in &all_panes {
             let addr = pane.addr();
-            let workspace = pane.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
+            let workspace = pane
+                .platform_window_id
+                .and_then(|pid| workspaces.get(&pid).copied());
             let is_agent = detect_agent_signals(pane).is_agent();
 
             new_terminals.insert(
@@ -608,7 +601,9 @@ impl BabelState {
 
         for kw in agent_kitty_panes {
             let addr = kw.addr();
-            let workspace = kw.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
+            let workspace = kw
+                .platform_window_id
+                .and_then(|pid| workspaces.get(&pid).copied());
 
             // Check if we have existing data for this pane (use get, not remove)
             let agent_pane = if let Some(existing) = self.panes.get(&addr) {
@@ -667,7 +662,10 @@ impl BabelState {
                             title_session = %title_sid,
                             "replacing stale kitty session tag from title match"
                         );
-                        let _ = self.registry.set_meta(&addr, "babel_session_id", title_sid).await;
+                        let _ = self
+                            .registry
+                            .set_meta(&addr, "babel_session_id", title_sid)
+                            .await;
                         existing_session = Some(title_sid.to_string());
                     }
                 }
@@ -823,7 +821,7 @@ impl BabelState {
                             read_changed_addrs.insert(addr.clone());
                         }
                         // Dim the ring—the worker's call has been answered
-                        if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id).await {
+                        if let Err(e) = self.registry.reset_border_color(addr).await {
                             effect!("xfconf", "reset_border", error = e.to_string());
                         }
                     }
@@ -961,9 +959,7 @@ impl BabelState {
                                 if self.pane_unread.remove(addr) {
                                     paint_addrs.insert(addr.clone());
                                 }
-                                if let Err(e) =
-                                    reset_border_color_on_socket(&addr.socket, addr.id).await
-                                {
+                                if let Err(e) = self.registry.reset_border_color(addr).await {
                                     effect!("xfconf", "reset_border", error = e.to_string());
                                 }
                             }
@@ -984,13 +980,10 @@ impl BabelState {
                                 }
                                 // Keep the legacy terminal border cue in sync with the
                                 // daemon-owned paint ring.
-                                if let Err(e) = set_border_color_on_socket(
-                                    &addr.socket,
-                                    addr.id,
-                                    "#f67400",
-                                    "#7a3a00",
-                                )
-                                .await
+                                if let Err(e) = self
+                                    .registry
+                                    .set_border_color(addr, "#f67400", "#7a3a00")
+                                    .await
                                 {
                                     effect!("xfconf", "set_unread_border", error = e.to_string());
                                 }
@@ -1245,7 +1238,7 @@ impl BabelState {
                         if self.pane_unread.remove(addr) {
                             paint_state_changed = true;
                         }
-                        if let Err(e) = reset_border_color_on_socket(&addr.socket, addr.id).await {
+                        if let Err(e) = self.registry.reset_border_color(addr).await {
                             effect!("xfconf", "reset_border", error = e.to_string());
                         }
                     }
@@ -1262,9 +1255,10 @@ impl BabelState {
                             paint_state_changed = true;
                         }
                         // Keep the legacy terminal border cue in sync with the paint ring.
-                        if let Err(e) =
-                            set_border_color_on_socket(&addr.socket, addr.id, "#f67400", "#7a3a00")
-                                .await
+                        if let Err(e) = self
+                            .registry
+                            .set_border_color(addr, "#f67400", "#7a3a00")
+                            .await
                         {
                             effect!("xfconf", "set_unread_border", error = e.to_string());
                         }
@@ -1373,15 +1367,14 @@ impl BabelState {
     /// (unreliable - Claude's status bar format varies and may scroll off).
     /// Takes claimed_sessions to exclude from "unique CWD" matching - prevents
     /// double-matching when multiple windows are processed in parallel.
-    #[tracing::instrument(skip(fingerprint_index, claimed_sessions), fields(addr = %addr.short(), cwd = %kitty_cwd.display(), index_size = fingerprint_index.len()))]
+    #[tracing::instrument(skip(registry, fingerprint_index, claimed_sessions), fields(addr = %addr.short(), cwd = %kitty_cwd.display(), index_size = fingerprint_index.len()))]
     pub async fn fingerprint_match_addr(
+        registry: &crate::backend::BackendRegistry,
         addr: &PaneAddr,
         kitty_cwd: &Path,
         fingerprint_index: &HashMap<String, SessionFingerprint>,
         claimed_sessions: &HashSet<String>,
     ) -> Option<(String, MatchConfidence, SessionFingerprint)> {
-        use crate::kitty::get_scrollback_on_socket;
-
         trace!(
             "fingerprint_match({}) - index has {} sessions, cwd={}",
             addr.short(),
@@ -1389,8 +1382,8 @@ impl BabelState {
             kitty_cwd.display()
         );
 
-        // Get scrollback using the pane's socket (EXPENSIVE I/O - done without lock)
-        let scrollback = match get_scrollback_on_socket(&addr.socket, addr.id).await {
+        // Get scrollback using the registry-routed backend (EXPENSIVE I/O - done without lock)
+        let scrollback = match registry.get_scrollback(addr).await {
             Ok(s) => s,
             Err(e) => {
                 trace_error!("failed to get scrollback", addr = %addr.short(), error = %e);
@@ -2134,18 +2127,19 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
 
                             // Phase 4: Get windows needing fingerprints + snapshot index + claimed sessions
                             // Arc-wrapped to avoid per-window deep clones (audit #2: allocation churn)
-                            let (needs_matching, fingerprint_index, claimed_sessions) = {
+                            let (needs_matching, fingerprint_index, claimed_sessions, registry) = {
                                 let s = state_clone.read().await;
                                 let needs = s.get_panes_needing_fingerprints();
                                 let index = Arc::new(s.fingerprint_index.clone());
                                 let claimed = Arc::new(s.get_claimed_sessions());
+                                let reg = Arc::clone(&s.registry);
                                 checkpoint!(
                                     "phase_4",
                                     needs_count = needs.len(),
                                     index_size = index.len(),
                                     claimed_count = claimed.len()
                                 );
-                                (needs, index, claimed)
+                                (needs, index, claimed, reg)
                             };
 
                             // Phase 5: Do fingerprint matching I/O (expensive)
@@ -2160,8 +2154,9 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
                                     let cwd = cwd.clone();
                                     let fingerprint_index = Arc::clone(&fingerprint_index);
                                     let claimed_sessions = Arc::clone(&claimed_sessions);
+                                    let registry = Arc::clone(&registry);
                                     async move {
-                                        BabelState::fingerprint_match_addr(&addr, &cwd, &fingerprint_index, &claimed_sessions).await
+                                        BabelState::fingerprint_match_addr(&registry, &addr, &cwd, &fingerprint_index, &claimed_sessions).await
                                             .map(|(session_id, confidence, fingerprint)| {
                                                 (addr, session_id, confidence, fingerprint)
                                             })
@@ -2618,7 +2613,7 @@ async fn handle_client(
 
 mod handlers {
     use super::*;
-    use crate::kitty::get_window_geometry;
+    use crate::desktop::get_window_geometry;
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // Screen Position Sorting
@@ -2803,11 +2798,12 @@ mod handlers {
                 win
             })
             .collect();
+        let registry = Arc::clone(&s.registry);
         drop(s); // Release lock before expensive operations
 
         for pane in &mut panes {
             if pane.fingerprint.is_none() {
-                if let Ok(scrollback) = get_scrollback(pane.id()).await {
+                if let Ok(scrollback) = registry.get_scrollback(&pane.addr).await {
                     let fp = extract_from_scrollback(&scrollback);
                     pane.fingerprint = Some(fp);
                 }
@@ -2866,10 +2862,13 @@ mod handlers {
         }
     }
 
-    /// Focus a pane (canonical address: no scan; legacy id: scan all sockets).
-    pub async fn focus(target: &PaneSelector) -> Response {
+    /// Focus a pane (canonical address: registry-routed; legacy id: scan all sockets).
+    pub async fn focus(
+        registry: &crate::backend::BackendRegistry,
+        target: &PaneSelector,
+    ) -> Response {
         match target {
-            PaneSelector::Addr(addr) => match focus_pane_on_socket(&addr.socket, addr.id).await {
+            PaneSelector::Addr(addr) => match registry.focus_pane(addr).await {
                 Ok(()) => Response::Ok {
                     message: format!("Focused pane {}", addr.short()),
                 },
@@ -2898,16 +2897,17 @@ mod handlers {
     }
 
     /// Get scrollback from a pane.
-    pub async fn scroll(target: &PaneSelector) -> Response {
+    pub async fn scroll(
+        registry: &crate::backend::BackendRegistry,
+        target: &PaneSelector,
+    ) -> Response {
         match target {
-            PaneSelector::Addr(addr) => {
-                match get_scrollback_on_socket(&addr.socket, addr.id).await {
-                    Ok(text) => Response::Scrollback { text },
-                    Err(e) => Response::Error {
-                        message: format!("Scroll failed: {}", e),
-                    },
-                }
-            }
+            PaneSelector::Addr(addr) => match registry.get_scrollback(addr).await {
+                Ok(text) => Response::Scrollback { text },
+                Err(e) => Response::Error {
+                    message: format!("Scroll failed: {}", e),
+                },
+            },
             PaneSelector::Id(id) => match get_scrollback_any(*id).await {
                 Ok(result) => {
                     if result.is_non_current {
@@ -2925,19 +2925,21 @@ mod handlers {
     }
 
     /// Send text to a pane (with Enter/CR).
-    pub async fn send(target: &PaneSelector, text: &str) -> Response {
+    pub async fn send(
+        registry: &crate::backend::BackendRegistry,
+        target: &PaneSelector,
+        text: &str,
+    ) -> Response {
         let text_with_cr = format!("{}\r", text);
         match target {
-            PaneSelector::Addr(addr) => {
-                match send_text_on_socket(&addr.socket, addr.id, &text_with_cr).await {
-                    Ok(()) => Response::Ok {
-                        message: format!("Sent to pane {}", addr.short()),
-                    },
-                    Err(e) => Response::Error {
-                        message: format!("Send failed: {}", e),
-                    },
-                }
-            }
+            PaneSelector::Addr(addr) => match registry.send_text(addr, &text_with_cr).await {
+                Ok(()) => Response::Ok {
+                    message: format!("Sent to pane {}", addr.short()),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Send failed: {}", e),
+                },
+            },
             PaneSelector::Id(id) => match send_text_any(*id, &text_with_cr).await {
                 Ok(result) => {
                     let message = if result.is_non_current {
@@ -2962,18 +2964,20 @@ mod handlers {
     ///
     /// Unlike `send`, this doesn't append a carriage return, so the text
     /// is typed into the input area but not submitted.
-    pub async fn type_text(target: &PaneSelector, text: &str) -> Response {
+    pub async fn type_text(
+        registry: &crate::backend::BackendRegistry,
+        target: &PaneSelector,
+        text: &str,
+    ) -> Response {
         match target {
-            PaneSelector::Addr(addr) => {
-                match send_text_on_socket(&addr.socket, addr.id, text).await {
-                    Ok(()) => Response::Ok {
-                        message: format!("Typed to pane {}", addr.short()),
-                    },
-                    Err(e) => Response::Error {
-                        message: format!("Type failed: {}", e),
-                    },
-                }
-            }
+            PaneSelector::Addr(addr) => match registry.send_text(addr, text).await {
+                Ok(()) => Response::Ok {
+                    message: format!("Typed to pane {}", addr.short()),
+                },
+                Err(e) => Response::Error {
+                    message: format!("Type failed: {}", e),
+                },
+            },
             PaneSelector::Id(id) => match send_text_any(*id, text).await {
                 Ok(result) => {
                     let message = if result.is_non_current {
@@ -3003,10 +3007,14 @@ mod handlers {
     /// - Detect multiline input
     /// - Handle plan mode selection UI
     /// - Support save/restore of pending input during broadcast
-    pub async fn has_pending_input(target: &PaneSelector) -> Response {
+    pub async fn has_pending_input(
+        registry: &crate::backend::BackendRegistry,
+        target: &PaneSelector,
+    ) -> Response {
         let pane_id = target.id();
         let scrollback = match target {
-            PaneSelector::Addr(addr) => get_scrollback_on_socket(&addr.socket, addr.id)
+            PaneSelector::Addr(addr) => registry
+                .get_scrollback(addr)
                 .await
                 .map_err(|e| e.to_string()),
             PaneSelector::Id(id) => get_scrollback_any(*id)
@@ -3129,12 +3137,13 @@ mod handlers {
         };
 
         // Phase 2: Get windows needing fingerprints + index + claimed sessions
-        let (needs_matching, fingerprint_index, claimed_sessions) = {
+        let (needs_matching, fingerprint_index, claimed_sessions, registry) = {
             let s = state.read().await;
             (
                 s.get_panes_needing_fingerprints(),
                 s.fingerprint_index.clone(),
                 s.get_claimed_sessions(),
+                Arc::clone(&s.registry),
             )
         };
 
@@ -3142,9 +3151,14 @@ mod handlers {
         // Pass kitty CWD (reliable) instead of extracting from scrollback
         let mut fingerprint_results = Vec::new();
         for (addr, cwd) in &needs_matching {
-            if let Some((session_id, confidence, fingerprint)) =
-                BabelState::fingerprint_match_addr(addr, cwd, &fingerprint_index, &claimed_sessions)
-                    .await
+            if let Some((session_id, confidence, fingerprint)) = BabelState::fingerprint_match_addr(
+                &registry,
+                addr,
+                cwd,
+                &fingerprint_index,
+                &claimed_sessions,
+            )
+            .await
             {
                 fingerprint_results.push((addr.clone(), session_id, confidence, fingerprint));
             }
@@ -3630,6 +3644,10 @@ async fn process_request(
     state: &Arc<RwLock<BabelState>>,
     summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
 ) -> Response {
+    // Extract registry once for handlers that need backend-routed pane operations.
+    // Clone the Arc to avoid holding the read lock across the entire dispatch.
+    let registry = state.read().await.registry.clone();
+
     match request {
         // ─── Query Handlers ─────────────────────────────────────────────────────
         Request::List => handlers::list(state).await,
@@ -3644,11 +3662,11 @@ async fn process_request(
 
         // ─── Pane Handlers ──────────────────────────────────────────────────────
         Request::Enrich { target } => handlers::enrich(state, &target).await,
-        Request::Focus { target } => handlers::focus(&target).await,
-        Request::Scroll { target } => handlers::scroll(&target).await,
+        Request::Focus { target } => handlers::focus(&registry, &target).await,
+        Request::Scroll { target } => handlers::scroll(&registry, &target).await,
         Request::Send { target, text } => {
             let pane_id = target.id();
-            let response = handlers::send(&target, &text).await;
+            let response = handlers::send(&registry, &target, &text).await;
             // Trigger workspace re-summarization on user prompt
             // User just sent new instructions to the agent, context is changing
             if matches!(response, Response::Ok { .. }) {
@@ -3668,8 +3686,10 @@ async fn process_request(
             }
             response
         }
-        Request::Type { target, text } => handlers::type_text(&target, &text).await,
-        Request::HasPendingInput { target } => handlers::has_pending_input(&target).await,
+        Request::Type { target, text } => handlers::type_text(&registry, &target, &text).await,
+        Request::HasPendingInput { target } => {
+            handlers::has_pending_input(&registry, &target).await
+        }
 
         // ─── State Handlers ─────────────────────────────────────────────────────
         Request::Tag { target, icon } => handlers::tag(state, &target, &icon).await,
