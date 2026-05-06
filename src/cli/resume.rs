@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use console::style;
 use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
@@ -156,15 +156,17 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
 }
 
 async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>> {
-    let filters = babel::native_sessions::SessionFilters {
-        all: true,
-        ..Default::default()
-    };
-    let sessions = babel::native_sessions::scan_all(None, &filters);
-
-    let conn = babel::babel_storage::init_db().ok();
+    // Session scan (heavy file I/O) and pane query (daemon IPC) run concurrently.
+    let scan_handle = tokio::task::spawn_blocking(|| {
+        let filters = babel::native_sessions::SessionFilters {
+            all: true,
+            ..Default::default()
+        };
+        babel::native_sessions::scan_all(None, &filters)
+    });
 
     let mut panes = core.panes().await.unwrap_or_default();
+    let sessions = scan_handle.await.context("session scan task failed")?;
     panes.sort_by(|a, b| {
         b.is_focused
             .cmp(&a.is_focused)
@@ -201,44 +203,51 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
             });
     }
 
-    let enriched = sessions
-        .into_iter()
-        .map(|session| {
-            let session_key = session.agent_kind.session_key(&session.native_id);
-            let meta = conn.as_ref().and_then(|c| {
-                babel::babel_storage::get_metadata(c, &session_key)
-                    .ok()
-                    .flatten()
-            });
-            let generated_title = conn.as_ref().and_then(|c| {
-                babel::babel_storage::get_generated_title(c, &session_key)
-                    .ok()
-                    .flatten()
-            });
-            EnrichedSession {
-                agent_kind: session.agent_kind,
-                native_id: session.native_id,
-                session_key: session_key.clone(),
-                project_path: session.project_path.map(PathBuf::from),
-                display_name: session.display_name,
-                generated_title,
-                last_prompt: session.last_prompt,
-                turn_count: session.turn_count,
-                last_seen_at: session.last_seen_at,
-                interactive: session.interactive,
-                command_only: session.command_only,
-                has_title: session.has_title,
-                hidden: meta.as_ref().map(|m| m.hidden).unwrap_or(false),
-                custom_icon: meta.as_ref().and_then(|m| m.icon.clone()),
-                unread: !meta.as_ref().map(|m| m.is_read).unwrap_or(true),
-                running_status: running.remove(&session_key).unwrap_or_default(),
-            }
-        })
-        .collect();
+    // Enrichment (SQLite queries + pre-sanitization) off the async executor.
+    let mut enriched: Vec<EnrichedSession> = tokio::task::spawn_blocking(move || {
+        let conn = babel::babel_storage::init_db().ok();
+        let mut enriched: Vec<EnrichedSession> = sessions
+            .into_iter()
+            .map(|session| {
+                let session_key = session.agent_kind.session_key(&session.native_id);
+                let meta = conn.as_ref().and_then(|c| {
+                    babel::babel_storage::get_metadata(c, &session_key)
+                        .ok()
+                        .flatten()
+                });
+                let generated_title = conn.as_ref().and_then(|c| {
+                    babel::babel_storage::get_generated_title(c, &session_key)
+                        .ok()
+                        .flatten()
+                });
+                EnrichedSession {
+                    agent_kind: session.agent_kind,
+                    native_id: session.native_id,
+                    session_key: session_key.clone(),
+                    project_path: session.project_path.map(PathBuf::from),
+                    display_name: session.display_name,
+                    generated_title,
+                    last_prompt: session.last_prompt,
+                    turn_count: session.turn_count,
+                    last_seen_at: session.last_seen_at,
+                    interactive: session.interactive,
+                    command_only: session.command_only,
+                    has_title: session.has_title,
+                    hidden: meta.as_ref().map(|m| m.hidden).unwrap_or(false),
+                    custom_icon: meta.as_ref().and_then(|m| m.icon.clone()),
+                    unread: !meta.as_ref().map(|m| m.is_read).unwrap_or(true),
+                    running_status: running.remove(&session_key).unwrap_or_default(),
+                }
+            })
+            .collect();
 
-    for session in &mut enriched {
-        session.pre_sanitize();
-    }
+        for session in &mut enriched {
+            session.pre_sanitize();
+        }
+        enriched
+    })
+    .await
+    .context("session enrichment task failed")?;
 
     Ok(enriched)
 }
@@ -408,25 +417,30 @@ pub(crate) async fn launch_harness_resume(selection: &ResumeSelection) -> Result
 
 /// Detect which terminal backend we're running inside and return it with
 /// the connection string for this instance.
-fn detect_current_backend() -> Result<(std::sync::Arc<dyn babel::backend::TerminalBackend>, String)> {
+fn detect_current_backend() -> Result<(std::sync::Arc<dyn babel::backend::TerminalBackend>, String)>
+{
     use babel::backend::{kitty::KittyBackend, tmux::TmuxBackend};
 
     // Kitty: KITTY_LISTEN_ON is set inside kitty shells
     if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        let backend = std::sync::Arc::new(KittyBackend) as std::sync::Arc<dyn babel::backend::TerminalBackend>;
+        let backend = std::sync::Arc::new(KittyBackend)
+            as std::sync::Arc<dyn babel::backend::TerminalBackend>;
         let conn = babel::kitty::default_socket();
         return Ok((backend, conn));
     }
 
     // Tmux: $TMUX is set inside tmux sessions
     if let Ok(tmux_val) = std::env::var("TMUX") {
-        let backend = std::sync::Arc::new(TmuxBackend) as std::sync::Arc<dyn babel::backend::TerminalBackend>;
+        let backend =
+            std::sync::Arc::new(TmuxBackend) as std::sync::Arc<dyn babel::backend::TerminalBackend>;
         if let Some(socket) = tmux_val.splitn(3, ',').next() {
             return Ok((backend, format!("tmux:{socket}")));
         }
     }
 
-    Err(anyhow!("no supported terminal backend detected (need kitty or tmux)"))
+    Err(anyhow!(
+        "no supported terminal backend detected (need kitty or tmux)"
+    ))
 }
 
 /// Get working directory for a session by searching ~/.claude/projects/
