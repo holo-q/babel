@@ -509,7 +509,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["factory", "droid"],
         events: CC_EVENTS,
-        resume_cmd: Some("factory --resume {}"),
+        resume_cmd: Some("droid --resume {}"),
     },
     HarnessSpec {
         kind: AgentKind::QwenCode,
@@ -522,7 +522,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["qwen"],
         events: CC_EVENTS,
-        resume_cmd: Some("qwen-code --resume {}"),
+        resume_cmd: Some("qwen --resume {}"),
     },
     HarnessSpec {
         kind: AgentKind::Kimi,
@@ -535,7 +535,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["kimi"],
         events: CC_EVENTS,
-        resume_cmd: Some("kimi resume {}"),
+        resume_cmd: Some("kimi --session {}"),
     },
     HarnessSpec {
         kind: AgentKind::Gemini,
@@ -548,7 +548,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &["GEMINI_SESSION_ID"],
         cmdline_markers: &["gemini"],
         events: GEMINI_EVENTS,
-        resume_cmd: Some("gemini --session {}"),
+        resume_cmd: Some("gemini --resume"),
     },
     HarnessSpec {
         kind: AgentKind::Crush,
@@ -561,7 +561,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &["CRUSH_SESSION_ID"],
         cmdline_markers: &["crush"],
         events: CRUSH_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("crush --session {}"),
     },
     HarnessSpec {
         kind: AgentKind::Cursor,
@@ -574,7 +574,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["cursor-agent", "cursor"],
         events: CC_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("cursor-agent --resume {}"),
     },
     HarnessSpec {
         kind: AgentKind::Cline,
@@ -587,7 +587,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["cline"],
         events: CLINE_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("code"),
     },
     HarnessSpec {
         kind: AgentKind::OpenCode,
@@ -600,7 +600,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["opencode", "open-code"],
         events: CC_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("opencode --session {}"),
     },
     HarnessSpec {
         kind: AgentKind::Amp,
@@ -626,7 +626,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["kiro"],
         events: CC_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("kiro"),
     },
     HarnessSpec {
         kind: AgentKind::GithubCopilot,
@@ -639,7 +639,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["copilot"],
         events: NO_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("copilot --resume {}"),
     },
     HarnessSpec {
         kind: AgentKind::RooCode,
@@ -652,7 +652,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["roo"],
         events: NO_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("code"),
     },
     HarnessSpec {
         kind: AgentKind::KiloCode,
@@ -665,7 +665,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["kilo"],
         events: NO_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("code"),
     },
     HarnessSpec {
         kind: AgentKind::Aider,
@@ -691,7 +691,7 @@ pub const HARNESS_SPECS: &[HarnessSpec] = &[
         env_identity_fields: &[],
         cmdline_markers: &["antigravity"],
         events: NO_EVENTS,
-        resume_cmd: None,
+        resume_cmd: Some("antigravity"),
     },
 ];
 

@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use console::style;
 use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
@@ -39,7 +39,7 @@ pub async fn cmd_resume(core: &mut BabelCore, all: bool, _json: bool) -> Result<
 pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
     use babel::babel_storage::get_metadata;
 
-    let sessions = super::query::scan_all_sessions(None, &Default::default());
+    let sessions = babel::native_sessions::scan_all(None, &Default::default());
 
     if sessions.is_empty() {
         return Err(anyhow!("No sessions found"));
@@ -156,7 +156,7 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
 }
 
 async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>> {
-    let sessions = super::query::scan_all_sessions(None, &Default::default());
+    let sessions = babel::native_sessions::scan_all(None, &Default::default());
 
     let conn = babel::babel_storage::init_db().ok();
 

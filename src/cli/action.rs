@@ -917,19 +917,23 @@ pub async fn cmd_reboot(core: &mut BabelCore, target: &Target) -> Result<()> {
 /// Hide or unhide sessions by ls-sessions index.
 ///
 /// When `unhide` is true, clears the hidden flag instead of setting it.
-/// Indices resolve against `scan_all_sessions` with `show_all=true` so that
+/// Indices resolve against native session discovery with `show_all=true` so that
 /// unhide can reference hidden sessions visible via `--all`.
 pub async fn cmd_hide(indices: &[usize], unhide: bool) -> Result<()> {
     use babel::babel_storage::{init_db, set_hidden};
+    use babel::native_sessions::SessionFilters;
     use console::style;
 
     // For hide: resolve against default view. For unhide: resolve against --all view.
     let filters = if unhide {
-        super::query::SessionFilters { all: true, ..Default::default() }
+        SessionFilters {
+            all: true,
+            ..Default::default()
+        }
     } else {
         Default::default()
     };
-    let sessions = super::query::scan_all_sessions(None, &filters);
+    let sessions = babel::native_sessions::scan_all(None, &filters);
 
     if sessions.is_empty() {
         return Err(anyhow::anyhow!("No sessions found"));

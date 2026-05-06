@@ -65,9 +65,9 @@
 //! queries kitty and ~/.claude directly. Results are cached for the lifetime of the
 //! BabelCore instance to avoid redundant queries within a single command execution
 
-pub mod backend;
 pub mod agent_kind;
 pub mod babel_storage;
+pub mod backend;
 pub mod config;
 pub mod core;
 pub mod daemon;

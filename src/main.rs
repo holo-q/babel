@@ -155,7 +155,12 @@ async fn main() -> Result<()> {
             commands,
             all,
         } => {
-            let filters = cli::query::SessionFilters { sub, oneshot, commands, all };
+            let filters = babel::native_sessions::SessionFilters {
+                sub,
+                oneshot,
+                commands,
+                all,
+            };
             cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), filters, cli.json).await
         }
 

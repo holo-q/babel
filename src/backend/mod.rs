@@ -3,6 +3,7 @@
 //! Babel was born as a kitty-only daemon. This module generalizes it into a
 //! backend-agnostic system where kitty, tmux, and future terminal multiplexers
 //! are equal citizens behind the [`TerminalBackend`] trait.
+
 //!
 //! Key types:
 //! - [`Pane`] — backend-neutral pane descriptor (replaces the old `KittyPane`)
@@ -17,6 +18,8 @@
 //! Each backend implementation lives in its own submodule (e.g. `kitty_backend`).
 //! The registry holds `Arc<dyn TerminalBackend>` so backends are shared across
 //! async tasks without lifetime gymnastics.
+
+pub mod kitty;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -60,6 +63,29 @@ impl Pane {
     /// since PaneAddr predates the multi-backend generalization and will be renamed later.
     pub fn addr(&self) -> crate::model::PaneAddr {
         crate::model::PaneAddr::new(&self.connection, self.id)
+    }
+
+    // === Backend-specific accessors ===
+    // These bridge the gap between the old KittyPane flat struct and the new
+    // PaneExtras-based design. Consumers that only care about kitty can use these
+    // instead of pattern-matching on extras every time.
+
+    /// Kitty OS window ID (internal kitty concept, not the X11 window).
+    /// Returns None for non-kitty backends.
+    pub fn os_window_id(&self) -> Option<u64> {
+        match &self.extras {
+            PaneExtras::Kitty { os_window_id, .. } => Some(*os_window_id),
+            _ => None,
+        }
+    }
+
+    /// Kitty screen geometry (absolute pixel coordinates from newer kitty).
+    /// Returns None for non-kitty backends or older kitty versions.
+    pub fn screen(&self) -> Option<&ScreenGeometry> {
+        match &self.extras {
+            PaneExtras::Kitty { screen, .. } => screen.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -253,7 +279,11 @@ impl BackendRegistry {
 
     /// Discover all instances across all registered backends concurrently.
     pub async fn discover_all(&self) -> Vec<BackendInstance> {
-        let futures: Vec<_> = self.backends.iter().map(|b| b.discover_instances()).collect();
+        let futures: Vec<_> = self
+            .backends
+            .iter()
+            .map(|b| b.discover_instances())
+            .collect();
         let results = futures::future::join_all(futures).await;
         results.into_iter().flatten().collect()
     }
