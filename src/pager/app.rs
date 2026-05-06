@@ -15,6 +15,7 @@ use ratatui::Terminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use vtr::trace_error;
 
 use crate::agent_kind::AgentKind;
@@ -47,6 +48,31 @@ pub enum ResumeAction {
     Quit,
     Launch(ResumeSelection),
     Refresh,
+}
+
+enum TranscriptLoadResult {
+    Loaded {
+        seq: u64,
+        session_id: String,
+        messages: Vec<scrollparse::Message>,
+    },
+    Notice {
+        seq: u64,
+        session_id: String,
+        message: String,
+    },
+}
+
+struct PendingTranscriptLoad {
+    seq: u64,
+    session_id: String,
+    requested_at: Instant,
+}
+
+struct TranscriptTarget {
+    agent_kind: AgentKind,
+    native_id: String,
+    session_key: String,
 }
 
 #[async_trait::async_trait]
@@ -118,7 +144,6 @@ impl ResumeApp {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.focus == PaneFocus::Sessions {
                     self.sessions.cursor_down();
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_down(1);
                 }
@@ -127,7 +152,6 @@ impl ResumeApp {
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.focus == PaneFocus::Sessions {
                     self.sessions.cursor_up();
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_up(1);
                 }
@@ -136,7 +160,6 @@ impl ResumeApp {
             KeyCode::Char('g') => {
                 if self.focus == PaneFocus::Sessions {
                     self.sessions.cursor_top();
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_top();
                 }
@@ -145,7 +168,6 @@ impl ResumeApp {
             KeyCode::Char('G') => {
                 if self.focus == PaneFocus::Sessions {
                     self.sessions.cursor_bottom();
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_bottom();
                 }
@@ -158,7 +180,6 @@ impl ResumeApp {
                     for _ in 0..10 {
                         self.sessions.cursor_down();
                     }
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_down(10);
                 }
@@ -169,7 +190,6 @@ impl ResumeApp {
                     for _ in 0..10 {
                         self.sessions.cursor_up();
                     }
-                    self.load_selected_transcript();
                 } else {
                     self.transcript.scroll_up(10);
                 }
@@ -179,7 +199,6 @@ impl ResumeApp {
             // Tab - toggle cwd/all
             KeyCode::Tab => {
                 self.sessions.toggle_show_all();
-                self.load_selected_transcript();
                 ResumeAction::None
             }
 
@@ -255,57 +274,12 @@ impl ResumeApp {
         }
     }
 
-    fn load_selected_transcript(&mut self) {
-        // Get selected session
-        let session = match self.sessions.selected() {
-            Some(s) => s,
-            None => {
-                self.transcript.clear();
-                return;
-            }
-        };
-
-        let session_id = &session.native_id;
-
-        // Skip if already loaded
-        if self.transcript.session_id.as_deref() == Some(session_id) {
-            return;
-        }
-
-        if session.agent_kind != AgentKind::Claude {
-            self.transcript.notice(
-                session_id.clone(),
-                format!(
-                    "{} transcript preview is not wired yet",
-                    session.agent_kind.display_name()
-                ),
-            );
-            return;
-        }
-
-        // Find and parse the transcript JSONL
-        match crate::utility::claude_storage::find_session_transcript(session_id) {
-            Ok(Some(path)) => match super::jsonl_parser::parse_transcript(&path) {
-                Ok(messages) => {
-                    self.transcript.load(session_id.clone(), messages);
-                }
-                Err(e) => {
-                    trace_error!("transcript parse failed", session_id = session_id, error = %e);
-                    self.transcript
-                        .notice(session_id.clone(), "Transcript parse failed".to_string());
-                }
-            },
-            Ok(None) => {
-                trace_error!("transcript not found", session_id = session_id);
-                self.transcript
-                    .notice(session_id.clone(), "Transcript not found".to_string());
-            }
-            Err(e) => {
-                trace_error!("transcript find failed", session_id = session_id, error = %e);
-                self.transcript
-                    .notice(session_id.clone(), "Transcript lookup failed".to_string());
-            }
-        }
+    fn selected_transcript_target(&self) -> Option<TranscriptTarget> {
+        self.sessions.selected().map(|session| TranscriptTarget {
+            agent_kind: session.agent_kind,
+            native_id: session.native_id.clone(),
+            session_key: session.session_key.clone(),
+        })
     }
 }
 
@@ -338,8 +312,20 @@ where
     // If --all flag passed, start in show_all mode
     app.sessions.show_all = show_all;
 
-    // Initial transcript load
-    app.load_selected_transcript();
+    let (transcript_tx, mut transcript_rx) = mpsc::channel(8);
+    let mut transcript_seq = 0;
+    let mut desired_transcript_key: Option<String> = None;
+    let mut pending_transcript: Option<PendingTranscriptLoad> = None;
+    let mut active_transcript_load: Option<JoinHandle<()>> = None;
+    // `babel resume` is a launcher, so list navigation has to stay hot even
+    // while transcript JSONL files are large. Selection changes only schedule a
+    // debounced background parse; stale workers lose by sequence number.
+    sync_selected_transcript_target(
+        &mut app,
+        &mut desired_transcript_key,
+        &mut pending_transcript,
+        &mut transcript_seq,
+    );
 
     let mut daemon_events = if source.auto_refresh_enabled() {
         Some(spawn_daemon_refresh_listener())
@@ -371,8 +357,39 @@ where
                     }
                     ResumeAction::Refresh => {
                         refresh_app_sessions(&mut app, source, true, "refreshed").await?;
+                        sync_selected_transcript_target(
+                            &mut app,
+                            &mut desired_transcript_key,
+                            &mut pending_transcript,
+                            &mut transcript_seq,
+                        );
                     }
                 }
+                sync_selected_transcript_target(
+                    &mut app,
+                    &mut desired_transcript_key,
+                    &mut pending_transcript,
+                    &mut transcript_seq,
+                );
+            }
+        }
+
+        while let Ok(result) = transcript_rx.try_recv() {
+            apply_transcript_result(&mut app, result, transcript_seq);
+        }
+
+        if let Some(pending) = pending_transcript.take() {
+            if pending.requested_at.elapsed() >= Duration::from_millis(120) {
+                if let Some(handle) = active_transcript_load.take() {
+                    handle.abort();
+                }
+                active_transcript_load = Some(spawn_transcript_load(
+                    pending.seq,
+                    pending.session_id,
+                    transcript_tx.clone(),
+                ));
+            } else {
+                pending_transcript = Some(pending);
             }
         }
 
@@ -386,6 +403,12 @@ where
             auto_refresh_pending = false;
             last_auto_refresh = Instant::now();
             refresh_app_sessions(&mut app, source, false, "auto-refreshed").await?;
+            sync_selected_transcript_target(
+                &mut app,
+                &mut desired_transcript_key,
+                &mut pending_transcript,
+                &mut transcript_seq,
+            );
         }
 
         if app.should_exit {
@@ -401,6 +424,129 @@ where
     Ok(())
 }
 
+fn sync_selected_transcript_target(
+    app: &mut ResumeApp,
+    desired_key: &mut Option<String>,
+    pending: &mut Option<PendingTranscriptLoad>,
+    seq: &mut u64,
+) {
+    let Some(target) = app.selected_transcript_target() else {
+        if desired_key.is_some() {
+            app.transcript.clear();
+            *desired_key = None;
+            *pending = None;
+        }
+        return;
+    };
+
+    if desired_key.as_deref() == Some(&target.session_key) {
+        return;
+    }
+
+    *seq = seq.saturating_add(1);
+    *desired_key = Some(target.session_key.clone());
+    *pending = None;
+
+    if target.agent_kind != AgentKind::Claude {
+        app.transcript.notice(
+            target.native_id,
+            format!(
+                "{} transcript preview is not wired yet",
+                target.agent_kind.display_name()
+            ),
+        );
+        return;
+    }
+
+    app.transcript.notice(
+        target.native_id.clone(),
+        "Loading transcript...".to_string(),
+    );
+    *pending = Some(PendingTranscriptLoad {
+        seq: *seq,
+        session_id: target.native_id,
+        requested_at: Instant::now(),
+    });
+}
+
+fn spawn_transcript_load(
+    seq: u64,
+    session_id: String,
+    tx: mpsc::Sender<TranscriptLoadResult>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let loader_session_id = session_id.clone();
+        let result =
+            tokio::task::spawn_blocking(move || load_claude_transcript(seq, loader_session_id))
+                .await
+                .unwrap_or_else(|e| TranscriptLoadResult::Notice {
+                    seq,
+                    session_id: session_id.clone(),
+                    message: format!("Transcript worker failed: {e}"),
+                });
+        let _ = tx.send(result).await;
+    })
+}
+
+fn load_claude_transcript(seq: u64, session_id: String) -> TranscriptLoadResult {
+    match crate::utility::claude_storage::find_session_transcript(&session_id) {
+        Ok(Some(path)) => match super::jsonl_parser::parse_transcript(&path) {
+            Ok(messages) => TranscriptLoadResult::Loaded {
+                seq,
+                session_id,
+                messages,
+            },
+            Err(e) => {
+                trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
+                TranscriptLoadResult::Notice {
+                    seq,
+                    session_id,
+                    message: "Transcript parse failed".to_string(),
+                }
+            }
+        },
+        Ok(None) => {
+            trace_error!("transcript not found", session_id = session_id.as_str());
+            TranscriptLoadResult::Notice {
+                seq,
+                session_id,
+                message: "Transcript not found".to_string(),
+            }
+        }
+        Err(e) => {
+            trace_error!("transcript find failed", session_id = session_id.as_str(), error = %e);
+            TranscriptLoadResult::Notice {
+                seq,
+                session_id,
+                message: "Transcript lookup failed".to_string(),
+            }
+        }
+    }
+}
+
+fn apply_transcript_result(app: &mut ResumeApp, result: TranscriptLoadResult, current_seq: u64) {
+    match result {
+        TranscriptLoadResult::Loaded {
+            seq,
+            session_id,
+            messages,
+        } => {
+            if seq == current_seq {
+                app.transcript.load(session_id, messages);
+            }
+        }
+        TranscriptLoadResult::Notice {
+            seq,
+            session_id,
+            message,
+        } => {
+            if seq == current_seq {
+                app.transcript.notice(session_id, message);
+            }
+        }
+    }
+}
+
 async fn refresh_app_sessions<S>(
     app: &mut ResumeApp,
     source: &mut S,
@@ -412,7 +558,6 @@ where
 {
     let sessions = source.refresh_sessions(force).await?;
     app.sessions.replace_sessions(sessions);
-    app.load_selected_transcript();
     app.status_message = format!("{label} {} sessions", app.sessions.sessions.len());
     Ok(())
 }
