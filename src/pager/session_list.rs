@@ -266,6 +266,28 @@ impl SessionListState {
     pub fn set_filter(&mut self, query: String) {
         self.filter_query = query.to_lowercase();
         // Reset cursor if out of bounds after filter change
+        self.clamp_cursor();
+    }
+
+    /// Replace session data while preserving the current semantic selection.
+    pub fn replace_sessions(&mut self, sessions: Vec<EnrichedSession>) {
+        let selected_key = self.selected().map(|s| s.session_key.clone());
+        self.sessions = sessions;
+
+        if let Some(selected_key) = selected_key {
+            if let Some(cursor) = self
+                .visible_sessions()
+                .iter()
+                .position(|(_, s)| s.session_key == selected_key)
+            {
+                self.cursor = cursor;
+            }
+        }
+
+        self.clamp_cursor();
+    }
+
+    fn clamp_cursor(&mut self) {
         let count = self.visible_sessions().len();
         if self.cursor >= count {
             self.cursor = count.saturating_sub(1);

@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
 
         Commands::Resume { indices, all } => {
             if indices.is_empty() {
-                cli::resume::cmd_resume(&core, all, cli.json).await
+                cli::resume::cmd_resume(&mut core, all, cli.json).await
             } else {
                 cli::resume::cmd_resume_by_index(&indices).await
             }

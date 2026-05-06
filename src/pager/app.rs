@@ -3,6 +3,7 @@
 //! Coordinates session list and transcript view, handles key events.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -11,10 +12,15 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 use vtr::trace_error;
 
 use crate::agent_kind::AgentKind;
-use crate::core::BabelCore;
+use crate::events::BabelEvent;
+use crate::ipc::{Request, Response};
+use crate::utility::ipc::socket_path;
 
 use super::session_list::{EnrichedSession, SessionListState};
 use super::transcript::TranscriptView;
@@ -32,7 +38,25 @@ pub enum PaneFocus {
 pub struct ResumeSelection {
     pub agent_kind: AgentKind,
     pub native_id: String,
+    pub session_key: String,
     pub project_path: Option<PathBuf>,
+}
+
+pub enum ResumeAction {
+    None,
+    Quit,
+    Launch(ResumeSelection),
+    Refresh,
+}
+
+#[async_trait::async_trait]
+pub trait ResumeSessionSource {
+    async fn refresh_sessions(&mut self, force: bool) -> anyhow::Result<Vec<EnrichedSession>>;
+    async fn launch_resume(&mut self, selection: &ResumeSelection) -> anyhow::Result<String>;
+
+    fn auto_refresh_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// Main pager application state
@@ -49,10 +73,10 @@ pub struct ResumeApp {
     pub search_buffer: String,
     /// Whether the transcript preview pane is visible
     pub show_transcript: bool,
+    /// Last launcher/refresh status shown in the footer
+    pub status_message: String,
     /// Should exit
     pub should_exit: bool,
-    /// Selected session to resume (set on Enter)
-    pub selected_session: Option<ResumeSelection>,
 }
 
 impl ResumeApp {
@@ -64,29 +88,30 @@ impl ResumeApp {
             is_searching: false,
             search_buffer: String::new(),
             show_transcript: true,
+            status_message: "Enter: launch  r: refresh".to_string(),
             should_exit: false,
-            selected_session: None,
         }
     }
 
-    /// Handle key event, return true to continue, false to exit
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+    /// Handle key event and return any launcher-level action it requested.
+    pub fn handle_key(&mut self, key: KeyEvent) -> ResumeAction {
         // Ctrl+C always exits
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_exit = true;
-            return false;
+            return ResumeAction::Quit;
         }
 
         // Handle search mode
         if self.is_searching {
-            return self.handle_search_key(key);
+            self.handle_search_key(key);
+            return ResumeAction::None;
         }
 
         match key.code {
             // Exit
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_exit = true;
-                false
+                ResumeAction::Quit
             }
 
             // Navigation
@@ -97,7 +122,7 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_down(1);
                 }
-                true
+                ResumeAction::None
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.focus == PaneFocus::Sessions {
@@ -106,7 +131,7 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_up(1);
                 }
-                true
+                ResumeAction::None
             }
             KeyCode::Char('g') => {
                 if self.focus == PaneFocus::Sessions {
@@ -115,7 +140,7 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_top();
                 }
-                true
+                ResumeAction::None
             }
             KeyCode::Char('G') => {
                 if self.focus == PaneFocus::Sessions {
@@ -124,7 +149,7 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_bottom();
                 }
-                true
+                ResumeAction::None
             }
 
             // Page navigation
@@ -137,7 +162,7 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_down(10);
                 }
-                true
+                ResumeAction::None
             }
             KeyCode::PageUp => {
                 if self.focus == PaneFocus::Sessions {
@@ -148,14 +173,14 @@ impl ResumeApp {
                 } else {
                     self.transcript.scroll_up(10);
                 }
-                true
+                ResumeAction::None
             }
 
             // Tab - toggle cwd/all
             KeyCode::Tab => {
                 self.sessions.toggle_show_all();
                 self.load_selected_transcript();
-                true
+                ResumeAction::None
             }
 
             // Toggle transcript preview
@@ -164,7 +189,13 @@ impl ResumeApp {
                 if !self.show_transcript && self.focus == PaneFocus::Transcript {
                     self.focus = PaneFocus::Sessions;
                 }
-                true
+                ResumeAction::None
+            }
+
+            // Force refresh
+            KeyCode::Char('r') => {
+                self.status_message = "refreshing sessions...".to_string();
+                ResumeAction::Refresh
             }
 
             // Focus switching
@@ -172,39 +203,38 @@ impl ResumeApp {
                 if self.show_transcript {
                     self.focus = PaneFocus::Transcript;
                 }
-                true
+                ResumeAction::None
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 self.focus = PaneFocus::Sessions;
-                true
+                ResumeAction::None
             }
 
             // Search
             KeyCode::Char('/') => {
                 self.is_searching = true;
                 self.search_buffer.clear();
-                true
+                ResumeAction::None
             }
 
             // Resume selected session
             KeyCode::Enter => {
                 if let Some(session) = self.sessions.selected() {
-                    self.selected_session = Some(ResumeSelection {
+                    return ResumeAction::Launch(ResumeSelection {
                         agent_kind: session.agent_kind,
                         native_id: session.native_id.clone(),
+                        session_key: session.session_key.clone(),
                         project_path: session.project_path.clone(),
                     });
-                    self.should_exit = true;
-                    return false;
                 }
-                true
+                ResumeAction::None
             }
 
-            _ => true,
+            _ => ResumeAction::None,
         }
     }
 
-    fn handle_search_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter | KeyCode::Esc => {
                 self.is_searching = false;
@@ -223,7 +253,6 @@ impl ResumeApp {
             }
             _ => {}
         }
-        true
     }
 
     fn load_selected_transcript(&mut self) {
@@ -281,17 +310,20 @@ impl ResumeApp {
 }
 
 /// Run the resume pager TUI
-pub async fn run_resume_pager(
-    _core: &BabelCore,
+pub async fn run_resume_pager<S>(
+    source: &mut S,
     show_all: bool,
     sessions: Vec<EnrichedSession>,
-) -> anyhow::Result<Option<ResumeSelection>> {
+) -> anyhow::Result<()>
+where
+    S: ResumeSessionSource,
+{
     // Get current working directory for cwd filtering
     let current_cwd = std::env::current_dir().ok();
 
     if sessions.is_empty() {
         println!("No sessions found");
-        return Ok(None);
+        return Ok(());
     }
 
     // Setup terminal
@@ -309,6 +341,14 @@ pub async fn run_resume_pager(
     // Initial transcript load
     app.load_selected_transcript();
 
+    let mut daemon_events = if source.auto_refresh_enabled() {
+        Some(spawn_daemon_refresh_listener())
+    } else {
+        None
+    };
+    let mut auto_refresh_pending = false;
+    let mut last_auto_refresh = Instant::now() - Duration::from_secs(1);
+
     // Event loop
     loop {
         // Draw UI
@@ -320,10 +360,32 @@ pub async fn run_resume_pager(
                 if key.kind == event::KeyEventKind::Release {
                     continue;
                 }
-                if !app.handle_key(key) {
-                    break;
+                match app.handle_key(key) {
+                    ResumeAction::None => {}
+                    ResumeAction::Quit => break,
+                    ResumeAction::Launch(selection) => {
+                        match source.launch_resume(&selection).await {
+                            Ok(message) => app.status_message = message,
+                            Err(e) => app.status_message = format!("launch failed: {e}"),
+                        }
+                    }
+                    ResumeAction::Refresh => {
+                        refresh_app_sessions(&mut app, source, true, "refreshed").await?;
+                    }
                 }
             }
+        }
+
+        if let Some(rx) = daemon_events.as_mut() {
+            while rx.try_recv().is_ok() {
+                auto_refresh_pending = true;
+            }
+        }
+
+        if auto_refresh_pending && last_auto_refresh.elapsed() >= Duration::from_millis(250) {
+            auto_refresh_pending = false;
+            last_auto_refresh = Instant::now();
+            refresh_app_sessions(&mut app, source, false, "auto-refreshed").await?;
         }
 
         if app.should_exit {
@@ -336,5 +398,83 @@ pub async fn run_resume_pager(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    Ok(app.selected_session)
+    Ok(())
+}
+
+async fn refresh_app_sessions<S>(
+    app: &mut ResumeApp,
+    source: &mut S,
+    force: bool,
+    label: &str,
+) -> anyhow::Result<()>
+where
+    S: ResumeSessionSource,
+{
+    let sessions = source.refresh_sessions(force).await?;
+    app.sessions.replace_sessions(sessions);
+    app.load_selected_transcript();
+    app.status_message = format!("{label} {} sessions", app.sessions.sessions.len());
+    Ok(())
+}
+
+fn spawn_daemon_refresh_listener() -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel(64);
+
+    tokio::spawn(async move {
+        if let Err(e) = daemon_refresh_listener(tx).await {
+            trace_error!("resume pager daemon listener failed", error = %e);
+        }
+    });
+
+    rx
+}
+
+async fn daemon_refresh_listener(tx: mpsc::Sender<()>) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path()).await?;
+    let request = Request::Subscribe {
+        events: vec![
+            "window_added".to_string(),
+            "window_removed".to_string(),
+            "terminal_opened".to_string(),
+            "terminal_closed".to_string(),
+            "terminal_became_agent".to_string(),
+            "session_matched".to_string(),
+            "session_updated".to_string(),
+            "session_state_changed".to_string(),
+            "session_started".to_string(),
+            "tool_started".to_string(),
+            "tool_completed".to_string(),
+            "title_generated".to_string(),
+            "title_spliced".to_string(),
+        ],
+    };
+    let mut request_json = serde_json::to_string(&request)?;
+    request_json.push('\n');
+    stream.write_all(request_json.as_bytes()).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    match serde_json::from_str::<Response>(&line)? {
+        Response::Subscribed { .. } => {}
+        Response::Error { message } => anyhow::bail!("subscription failed: {message}"),
+        other => anyhow::bail!("unexpected subscription response: {other:?}"),
+    }
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            break;
+        }
+
+        if let Response::Event { event } = serde_json::from_str::<Response>(&line)? {
+            let shutdown = matches!(event.event, BabelEvent::DaemonShutdown);
+            let _ = tx.send(()).await;
+            if shutdown {
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }

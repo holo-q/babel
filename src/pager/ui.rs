@@ -307,10 +307,17 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let keybinds = if app.is_searching {
         "Enter:confirm  Esc:cancel"
     } else {
-        "Tab:cwd/all  t:transcript  j/k:nav  Enter:resume  /:search  q:quit"
+        "Tab:cwd/all  r:refresh  t:transcript  j/k:nav  Enter:launch  /:search  q:quit"
     };
 
-    let left = format!(" {} of {} sessions", session_count, total);
+    let left = if app.status_message.is_empty() {
+        format!(" {} of {} sessions", session_count, total)
+    } else {
+        format!(
+            " {} of {} sessions  {}",
+            session_count, total, app.status_message
+        )
+    };
     let right = format!("{} ", keybinds);
 
     let left_len = left.len();

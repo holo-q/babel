@@ -15,24 +15,19 @@ use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
 
 use babel::core::BabelCore;
-use babel::pager::{EnrichedSession, ResumeSelection, RunningStatus};
+use babel::pager::{EnrichedSession, ResumeSelection, ResumeSessionSource, RunningStatus};
 use babel::utility::claude_storage::claude_base;
 
 /// Interactive pager for browsing and resuming sessions
 ///
 /// Opens TUI with session list (left) and transcript preview (right).
 /// Tab toggles between cwd-only and all projects.
-/// Enter resumes selected session.
+/// Enter launches selected sessions in external terminals without closing the pager.
 #[instrument(level = "debug", skip(core))]
-pub async fn cmd_resume(core: &BabelCore, all: bool, _json: bool) -> Result<()> {
-    let sessions = build_resume_sessions(core).await?;
-    let selected = babel::pager::run_resume_pager(core, all, sessions).await?;
-
-    if let Some(selection) = selected {
-        launch_harness_resume(&selection)?;
-    }
-
-    Ok(())
+pub async fn cmd_resume(core: &mut BabelCore, all: bool, _json: bool) -> Result<()> {
+    let mut source = CliResumeSessionSource { core };
+    let sessions = source.refresh_sessions(false).await?;
+    babel::pager::run_resume_pager(&mut source, all, sessions).await
 }
 
 /// Resume sessions by their ls-sessions index.
@@ -245,6 +240,28 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
     Ok(enriched)
 }
 
+struct CliResumeSessionSource<'a> {
+    core: &'a mut BabelCore,
+}
+
+#[async_trait::async_trait]
+impl ResumeSessionSource for CliResumeSessionSource<'_> {
+    async fn refresh_sessions(&mut self, force: bool) -> Result<Vec<EnrichedSession>> {
+        if force {
+            self.core.refresh().await?;
+        }
+        build_resume_sessions(self.core).await
+    }
+
+    async fn launch_resume(&mut self, selection: &ResumeSelection) -> Result<String> {
+        launch_harness_resume(selection).await
+    }
+
+    fn auto_refresh_enabled(&self) -> bool {
+        self.core.is_connected()
+    }
+}
+
 /// Resume the most recent session not currently running
 ///
 /// Non-interactive: finds the most recent session from history that isn't
@@ -311,7 +328,7 @@ fn launch_claude_resume(session_id: &str) -> Result<()> {
     Err(anyhow!("Failed to exec claude: {}", err))
 }
 
-fn launch_harness_resume(selection: &ResumeSelection) -> Result<()> {
+async fn launch_harness_resume(selection: &ResumeSelection) -> Result<String> {
     let spec = selection.agent_kind.spec();
     let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
         anyhow!(
@@ -349,12 +366,59 @@ fn launch_harness_resume(selection: &ResumeSelection) -> Result<()> {
         cwd = format!("{:?}", cwd)
     );
 
-    let err = std::process::Command::new(program)
-        .args(args)
-        .current_dir(&cwd)
-        .exec();
+    let main_socket = babel::kitty::main_socket();
+    let target_workspace = babel::babel_storage::init_db()
+        .ok()
+        .and_then(|conn| {
+            babel::babel_storage::get_metadata(&conn, &selection.session_key)
+                .ok()
+                .flatten()
+        })
+        .and_then(|m| m.last_workspace);
 
-    Err(anyhow!("Failed to exec {}: {}", program, err))
+    let mut cmd = Command::new("kitten");
+    cmd.arg("@").arg("launch");
+    cmd.args(["--type", "os-window"]);
+    cmd.args(["--cwd", &cwd.to_string_lossy()]);
+
+    if let Some(ref socket) = main_socket {
+        cmd.args(["--to", socket]);
+    }
+
+    cmd.arg("--");
+    cmd.arg(program);
+    cmd.args(args);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd.output().context("failed to spawn kitten")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "failed to launch {}: {}",
+            selection.agent_kind.display_name(),
+            stderr.trim()
+        ));
+    }
+
+    if let Some(ws) = target_workspace {
+        let pane_id_str = String::from_utf8_lossy(&output.stdout);
+        if let Ok(pane_id) = pane_id_str.trim().parse::<u64>() {
+            if let Ok(Some(pane)) = babel::kitty::get_window(pane_id).await {
+                if let Err(e) = pane.move_to_workspace(ws) {
+                    tracing::debug!(error = %e, ws, "Failed to move resumed session to workspace");
+                }
+            }
+        }
+    }
+
+    let short_id: String = selection.native_id.chars().take(8).collect();
+    Ok(format!(
+        "launched {} {}",
+        selection.agent_kind.slug(),
+        short_id
+    ))
 }
 
 /// Get working directory for a session by searching ~/.claude/projects/

@@ -1,6 +1,6 @@
 //! Conversation History Pager
 //!
-//! Interactive TUI for browsing and resuming cross-harness sessions.
+//! Interactive TUI for browsing and launching cross-harness resumes.
 //!
 //! Access via:
 //!   - `babel resume` - Interactive pager
@@ -12,7 +12,7 @@ mod session_list;
 mod transcript;
 mod ui;
 
-pub use app::{run_resume_pager, ResumeApp, ResumeSelection};
+pub use app::{run_resume_pager, ResumeApp, ResumeSelection, ResumeSessionSource};
 pub use jsonl_parser::parse_transcript;
 pub use session_list::{EnrichedSession, RunningStatus};
 pub use transcript::TranscriptView;
