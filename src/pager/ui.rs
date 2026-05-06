@@ -1,8 +1,8 @@
 //! UI rendering for the resume pager
 //!
-//! Two-panel layout:
-//! - Left: Session list with running indicators
-//! - Right: Transcript preview with message rendering
+//! Resume pager layout:
+//! - Session list with running indicators
+//! - Optional transcript preview with message rendering
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -11,6 +11,8 @@ use scrollparse::MessageKind;
 use crate::session_row::{self, SessionRow, StateKind};
 
 use super::app::{PaneFocus, ResumeApp};
+
+const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
 
 /// Draw the pager UI
 pub fn draw(frame: &mut Frame, app: &ResumeApp) {
@@ -27,14 +29,18 @@ pub fn draw(frame: &mut Frame, app: &ResumeApp) {
         ..area
     };
 
-    // Keep the session list wide enough to preserve the `ls-sessions` row grammar.
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(main_area);
+    if app.show_transcript {
+        // Keep the session list wide enough to preserve the `ls-sessions` row grammar.
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .split(main_area);
 
-    draw_session_list(frame, app, chunks[0]);
-    draw_transcript(frame, app, chunks[1]);
+        draw_session_list(frame, app, chunks[0]);
+        draw_transcript(frame, app, chunks[1]);
+    } else {
+        draw_session_list(frame, app, main_area);
+    }
     draw_status_bar(frame, app, status_area);
 }
 
@@ -47,19 +53,20 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         format!("Sessions [{}]", filter_label)
     };
 
-    let border_style = if app.focus == PaneFocus::Sessions {
-        Style::default().fg(Color::Cyan)
+    let title_style = if app.focus == PaneFocus::Sessions {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let header = Rect { height: 1, ..area };
+    frame.render_widget(Paragraph::new(title).style(title_style), header);
+    let inner = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
 
     let visible = app.sessions.visible_sessions();
     let list_height = inner.height as usize;
@@ -102,8 +109,7 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         return;
     }
 
-    // Create list widget
-    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let list = List::new(items).highlight_style(Style::default().bg(SELECTION_BG));
 
     // Render with scroll offset
     let list_state = &mut ratatui::widgets::ListState::default();
@@ -121,34 +127,38 @@ fn render_session_item(
 ) -> ListItem<'static> {
     let accent = session_row::closest_ansi256_from_hex(row.accent);
     let running = row.is_running();
-    let gap = row_style(Style::default(), running);
+    let selected_bg = is_selected.then_some(SELECTION_BG);
+    let gap = selected_style(row_style(Style::default(), running), selected_bg);
     let harness_style = if row.bright {
         Style::default().fg(Color::Indexed(accent))
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let harness_style = row_style(harness_style, running);
+    let harness_style = selected_style(row_style(harness_style, running), selected_bg);
     let text_style = if row.bright {
         Style::default().fg(Color::Indexed(accent))
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let text_style = row_style(text_style, running);
+    let text_style = selected_style(row_style(text_style, running), selected_bg);
     let state_style = if row.bright {
         state_style(row.state_kind)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let state_style = row_style(state_style, running);
-    let row_dim = row_style(Style::default().fg(Color::DarkGray), running);
-    let idx_style = row_style(
-        if is_selected {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        },
-        running,
+    let state_style = selected_style(row_style(state_style, running), selected_bg);
+    let row_dim = selected_style(
+        row_style(Style::default().fg(Color::DarkGray), running),
+        selected_bg,
     );
+    let raw_idx_style = if is_selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let idx_style = selected_style(row_style(raw_idx_style, running), selected_bg);
 
     let title_style = if row.has_title && row.bright {
         Style::default()
@@ -163,7 +173,7 @@ fn render_session_item(
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let title_style = row_style(title_style, running);
+    let title_style = selected_style(row_style(title_style, running), selected_bg);
 
     let line = Line::from(vec![
         Span::styled(" ", gap),
@@ -297,7 +307,7 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let keybinds = if app.is_searching {
         "Enter:confirm  Esc:cancel"
     } else {
-        "Tab:cwd/all  j/k:nav  Enter:resume  /:search  q:quit"
+        "Tab:cwd/all  t:transcript  j/k:nav  Enter:resume  /:search  q:quit"
     };
 
     let left = format!(" {} of {} sessions", session_count, total);
@@ -371,6 +381,14 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 fn row_style(style: Style, running: bool) -> Style {
     if running {
         style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
+    }
+}
+
+fn selected_style(style: Style, selected_bg: Option<Color>) -> Style {
+    if let Some(bg) = selected_bg {
+        style.bg(bg)
     } else {
         style
     }

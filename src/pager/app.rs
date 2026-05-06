@@ -47,6 +47,8 @@ pub struct ResumeApp {
     pub is_searching: bool,
     /// Search query buffer
     pub search_buffer: String,
+    /// Whether the transcript preview pane is visible
+    pub show_transcript: bool,
     /// Should exit
     pub should_exit: bool,
     /// Selected session to resume (set on Enter)
@@ -61,6 +63,7 @@ impl ResumeApp {
             focus: PaneFocus::Sessions,
             is_searching: false,
             search_buffer: String::new(),
+            show_transcript: true,
             should_exit: false,
             selected_session: None,
         }
@@ -155,9 +158,20 @@ impl ResumeApp {
                 true
             }
 
+            // Toggle transcript preview
+            KeyCode::Char('t') => {
+                self.show_transcript = !self.show_transcript;
+                if !self.show_transcript && self.focus == PaneFocus::Transcript {
+                    self.focus = PaneFocus::Sessions;
+                }
+                true
+            }
+
             // Focus switching
             KeyCode::Char('l') | KeyCode::Right => {
-                self.focus = PaneFocus::Transcript;
+                if self.show_transcript {
+                    self.focus = PaneFocus::Transcript;
+                }
                 true
             }
             KeyCode::Char('h') | KeyCode::Left => {
