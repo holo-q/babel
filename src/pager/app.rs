@@ -13,6 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use vtr::trace_error;
 
+use crate::agent_kind::AgentKind;
 use crate::core::BabelCore;
 
 use super::session_list::{EnrichedSession, SessionListState};
@@ -25,6 +26,13 @@ pub enum PaneFocus {
     #[default]
     Sessions,
     Transcript,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumeSelection {
+    pub agent_kind: AgentKind,
+    pub native_id: String,
+    pub project_path: Option<PathBuf>,
 }
 
 /// Main pager application state
@@ -42,7 +50,7 @@ pub struct ResumeApp {
     /// Should exit
     pub should_exit: bool,
     /// Selected session to resume (set on Enter)
-    pub selected_session_id: Option<String>,
+    pub selected_session: Option<ResumeSelection>,
 }
 
 impl ResumeApp {
@@ -54,7 +62,7 @@ impl ResumeApp {
             is_searching: false,
             search_buffer: String::new(),
             should_exit: false,
-            selected_session_id: None,
+            selected_session: None,
         }
     }
 
@@ -143,6 +151,7 @@ impl ResumeApp {
             // Tab - toggle cwd/all
             KeyCode::Tab => {
                 self.sessions.toggle_show_all();
+                self.load_selected_transcript();
                 true
             }
 
@@ -166,7 +175,11 @@ impl ResumeApp {
             // Resume selected session
             KeyCode::Enter => {
                 if let Some(session) = self.sessions.selected() {
-                    self.selected_session_id = Some(session.info.session_id.clone());
+                    self.selected_session = Some(ResumeSelection {
+                        agent_kind: session.agent_kind,
+                        native_id: session.native_id.clone(),
+                        project_path: session.project_path.clone(),
+                    });
                     self.should_exit = true;
                     return false;
                 }
@@ -209,10 +222,21 @@ impl ResumeApp {
             }
         };
 
-        let session_id = &session.info.session_id;
+        let session_id = &session.native_id;
 
         // Skip if already loaded
         if self.transcript.session_id.as_deref() == Some(session_id) {
+            return;
+        }
+
+        if session.agent_kind != AgentKind::Claude {
+            self.transcript.notice(
+                session_id.clone(),
+                format!(
+                    "{} transcript preview is not wired yet",
+                    session.agent_kind.display_name()
+                ),
+            );
             return;
         }
 
@@ -224,28 +248,32 @@ impl ResumeApp {
                 }
                 Err(e) => {
                     trace_error!("transcript parse failed", session_id = session_id, error = %e);
-                    self.transcript.clear();
+                    self.transcript
+                        .notice(session_id.clone(), "Transcript parse failed".to_string());
                 }
             },
             Ok(None) => {
                 trace_error!("transcript not found", session_id = session_id);
-                self.transcript.clear();
+                self.transcript
+                    .notice(session_id.clone(), "Transcript not found".to_string());
             }
             Err(e) => {
                 trace_error!("transcript find failed", session_id = session_id, error = %e);
-                self.transcript.clear();
+                self.transcript
+                    .notice(session_id.clone(), "Transcript lookup failed".to_string());
             }
         }
     }
 }
 
 /// Run the resume pager TUI
-pub async fn run_resume_pager(core: &BabelCore, show_all: bool) -> anyhow::Result<Option<String>> {
+pub async fn run_resume_pager(
+    _core: &BabelCore,
+    show_all: bool,
+    sessions: Vec<EnrichedSession>,
+) -> anyhow::Result<Option<ResumeSelection>> {
     // Get current working directory for cwd filtering
     let current_cwd = std::env::current_dir().ok();
-
-    // Build session list with running status (always fetch all, filter client-side)
-    let sessions = build_session_list(core).await?;
 
     if sessions.is_empty() {
         println!("No sessions found");
@@ -294,47 +322,5 @@ pub async fn run_resume_pager(core: &BabelCore, show_all: bool) -> anyhow::Resul
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    Ok(app.selected_session_id)
-}
-
-/// Build enriched session list (always fetches all, filtering done client-side)
-async fn build_session_list(core: &BabelCore) -> anyhow::Result<Vec<EnrichedSession>> {
-    use super::session_list::RunningStatus;
-    use std::collections::HashMap;
-
-    // Get running windows
-    let windows = core.panes().await.unwrap_or_default();
-    let running_map: HashMap<String, _> = windows
-        .iter()
-        .filter_map(|w| {
-            w.session_id
-                .as_ref()
-                .map(|id| (id.clone(), (w.id(), w.workspace, w.activity_state.clone())))
-        })
-        .collect();
-
-    // Get session history (always fetch all, filter client-side via Tab toggle)
-    let history = core.history(100).await?;
-
-    // Enrich with running status
-    let enriched: Vec<EnrichedSession> = history
-        .into_iter()
-        .map(|info| {
-            let running_status = running_map
-                .get(&info.session_id)
-                .map(|(id, ws, state)| RunningStatus::Active {
-                    pane_id: *id,
-                    workspace: *ws,
-                    activity_state: state.clone().unwrap_or_default(),
-                })
-                .unwrap_or(RunningStatus::Inactive);
-
-            EnrichedSession {
-                info,
-                running_status,
-            }
-        })
-        .collect();
-
-    Ok(enriched)
+    Ok(app.selected_session)
 }

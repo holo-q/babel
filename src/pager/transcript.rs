@@ -13,6 +13,8 @@ pub struct TranscriptView {
     pub scroll_offset: usize,
     /// Session ID being displayed
     pub session_id: Option<String>,
+    /// Why there are no messages for the selected session.
+    pub notice: Option<String>,
 }
 
 impl TranscriptView {
@@ -25,6 +27,15 @@ impl TranscriptView {
         self.session_id = Some(session_id);
         self.messages = messages;
         self.scroll_offset = 0;
+        self.notice = None;
+    }
+
+    /// Show an empty-state notice for a selected session
+    pub fn notice(&mut self, session_id: String, notice: String) {
+        self.session_id = Some(session_id);
+        self.messages.clear();
+        self.scroll_offset = 0;
+        self.notice = Some(notice);
     }
 
     /// Clear the transcript
@@ -32,6 +43,7 @@ impl TranscriptView {
         self.session_id = None;
         self.messages.clear();
         self.scroll_offset = 0;
+        self.notice = None;
     }
 
     /// Scroll down

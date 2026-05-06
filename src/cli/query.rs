@@ -1373,22 +1373,44 @@ pub async fn cmd_ls_sessions(
     for (i, row) in rows.iter().enumerate() {
         let idx = i + 1;
         let accent_c = closest_ansi256_from_hex(row.accent);
+        let running = row.is_running();
+        let gap = if running {
+            Style::new().underlined().apply_to(" ").to_string()
+        } else {
+            " ".to_string()
+        };
         let harness_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let harness_style = row_style(harness_style, running);
         let text_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
+        let text_style = row_style(text_style, running);
         let state_style = if row.bright { row.state_style() } else { Style::new().dim() };
+        let state_style = row_style(state_style, running);
+        let row_dim = row_style(Style::new().dim(), running);
 
-        // markers | harness | state | ws | cwd | filter_tag | time | turns | idx | title | prompt
-        print!(" {}", row.marker);
-        print!("{:<w_harness$}", harness_style.apply_to(&row.harness));
-        print!(" {}", state_style.apply_to(row.state_icon));
+        // state | harness | ws | cwd | filter_tag | time | turns | idx | title | prompt
+        print!("{}", gap);
+        print!("{}", state_style.apply_to(row.state_icon));
+        print!("{}", gap);
+        print!("{}", harness_style.apply_to(format!("{:<w_harness$}", row.harness)));
         if w_ws > 0 {
-            print!("  {:>w_ws$}", dim.apply_to(&row.workspace));
+            print!("{}", gap);
+            print!("{}", gap);
+            print!("{}", row_dim.apply_to(format!("{:>w_ws$}", row.workspace)));
         }
-        print!("  {:<w_cwd$}", dim.apply_to(&row.cwd));
-        print!("  {}", dim.apply_to(row.filter_tag));
-        print!(" {:>w_time$}", dim.apply_to(&row.time));
-        print!("  {:>w_turns$}", dim.apply_to(&row.turns));
-        print!("  {:>w_idx$}", idx);
+        print!("{}", gap);
+        print!("{}", gap);
+        print!("{}", row_dim.apply_to(format!("{:<w_cwd$}", row.cwd)));
+        print!("{}", gap);
+        print!("{}", gap);
+        print!("{}", row_dim.apply_to(row.filter_tag));
+        print!("{}", gap);
+        print!("{}", row_dim.apply_to(format!("{:>w_time$}", row.time)));
+        print!("{}", gap);
+        print!("{}", gap);
+        print!("{}", row_dim.apply_to(format!("{:>w_turns$}", row.turns)));
+        print!("{}", gap);
+        print!("{}", gap);
+        print!("{}", row_style(Style::new(), running).apply_to(format!("{:>w_idx$}", idx)));
         let tpad = w_title - row.title.chars().count();
         let title_style = if row.has_title && row.bright {
             Style::new().color256(accent_c).bold().italic()
@@ -1399,10 +1421,15 @@ pub async fn cmd_ls_sessions(
         } else {
             Style::new().dim()
         };
-        print!("  {}{}", title_style.apply_to(&row.title), " ".repeat(tpad));
+        let title_style = row_style(title_style, running);
+        print!("{}", gap);
+        print!("{}", gap);
+        print!("{}", title_style.apply_to(format!("{}{}", row.title, " ".repeat(tpad))));
         if w_prompt > 0 {
             let ppad = w_prompt - row.last_prompt.chars().count();
-            print!("  {}{}", text_style.apply_to(&row.last_prompt), " ".repeat(ppad));
+            print!("{}", gap);
+            print!("{}", gap);
+            print!("{}", text_style.apply_to(format!("{}{}", row.last_prompt, " ".repeat(ppad))));
         }
         println!();
     }
@@ -1423,7 +1450,7 @@ pub async fn cmd_ls_sessions(
     );
     println!(
         "{}",
-        dim.apply_to("  ● unread/custom marker  ⚡/⚙/●/○ live pane state  blank state/workspace = not running")
+        dim.apply_to("  leading glyph = live pane state (⚡ thinking, ⚙ tool, ● working, ○ idle); underlined row = running; blank = not running")
     );
 
     Ok(())
@@ -1501,7 +1528,6 @@ fn closest_ansi256_from_hex(hex: &str) -> u8 {
 
 /// Precomputed display cells for one session row.
 struct SessionRow {
-    marker: String,
     state_icon: &'static str,
     state_kind: StateKind,
     harness: String,
@@ -1545,6 +1571,18 @@ impl SessionRow {
             StateKind::NotRunning => Style::new().dim(),
         }
     }
+
+    fn is_running(&self) -> bool {
+        !matches!(self.state_kind, StateKind::NotRunning)
+    }
+}
+
+fn row_style(style: Style, running: bool) -> Style {
+    if running {
+        style.underlined()
+    } else {
+        style
+    }
 }
 
 fn session_row(
@@ -1559,18 +1597,8 @@ fn session_row(
     let session_key = s.agent_kind.session_key(&s.native_id);
 
     let meta = get_metadata(conn, &session_key).ok().flatten();
-    let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
-    let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
     let live = live.and_then(|panes| panes.first());
     let (state_icon, state_kind) = live_state_icon(live);
-
-    let marker = if let Some(icon) = custom_icon {
-        format!("{} ", icon)
-    } else if unread {
-        format!("{} ", style("●").yellow())
-    } else {
-        "  ".to_string()
-    };
 
     let cwd = s
         .project_path
@@ -1633,7 +1661,6 @@ fn session_row(
     let bright = s.interactive && !is_hidden && !s.command_only && s.turn_count > 1;
 
     SessionRow {
-        marker,
         state_icon,
         state_kind,
         harness: s.agent_kind.slug().to_string(),

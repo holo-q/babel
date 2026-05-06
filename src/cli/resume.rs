@@ -4,7 +4,7 @@
 //! - `babel resume 3 6 9` - Resume sessions by ls-sessions index
 //! - `babel continue` / `babel c` - Resume most recent non-running session
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -15,6 +15,7 @@ use tracing::instrument;
 use vtr::{boundary, checkpoint, trace_error};
 
 use babel::core::BabelCore;
+use babel::pager::{EnrichedSession, ResumeSelection, RunningStatus};
 use babel::utility::claude_storage::claude_base;
 
 /// Interactive pager for browsing and resuming sessions
@@ -24,13 +25,11 @@ use babel::utility::claude_storage::claude_base;
 /// Enter resumes selected session.
 #[instrument(level = "debug", skip(core))]
 pub async fn cmd_resume(core: &BabelCore, all: bool, _json: bool) -> Result<()> {
-    // Run the pager (to be implemented in phase 2)
-    // For now, just show a placeholder message
-    let selected = babel::pager::run_resume_pager(core, all).await?;
+    let sessions = build_resume_sessions(core).await?;
+    let selected = babel::pager::run_resume_pager(core, all, sessions).await?;
 
-    // If a session was selected, launch claude --resume
-    if let Some(session_id) = selected {
-        launch_claude_resume(&session_id)?;
+    if let Some(selection) = selected {
+        launch_harness_resume(&selection)?;
     }
 
     Ok(())
@@ -43,8 +42,7 @@ pub async fn cmd_resume(core: &BabelCore, all: bool, _json: bool) -> Result<()> 
 /// Restores to last-known workspace when available in the overlay DB.
 #[instrument(level = "debug")]
 pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
-    use babel::babel_storage::{get_metadata, init_db};
-    use babel::AgentKind;
+    use babel::babel_storage::get_metadata;
 
     let sessions = super::query::scan_all_sessions(None, &Default::default());
 
@@ -52,7 +50,7 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
         return Err(anyhow!("No sessions found"));
     }
 
-    let conn = init_db().ok();
+    let conn = babel::babel_storage::init_db().ok();
     let main_socket = babel::kitty::main_socket();
 
     for &idx in indices {
@@ -154,16 +152,97 @@ pub async fn cmd_resume_by_index(indices: &[usize]) -> Result<()> {
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "{} failed to spawn kitten: {}",
-                    style("✗").red(),
-                    e
-                );
+                eprintln!("{} failed to spawn kitten: {}", style("✗").red(), e);
             }
         }
     }
 
     Ok(())
+}
+
+async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>> {
+    let mut sessions = super::query::scan_all_sessions(None, &Default::default());
+
+    let conn = babel::babel_storage::init_db().ok();
+    sessions.retain(|s| {
+        let key = s.agent_kind.session_key(&s.native_id);
+        let hidden = conn
+            .as_ref()
+            .and_then(|c| babel::babel_storage::get_metadata(c, &key).ok().flatten())
+            .map(|m| m.hidden)
+            .unwrap_or(false);
+        !hidden
+    });
+
+    let mut panes = core.panes().await.unwrap_or_default();
+    panes.sort_by(|a, b| {
+        b.is_focused
+            .cmp(&a.is_focused)
+            .then_with(|| {
+                a.workspace
+                    .unwrap_or(i32::MAX)
+                    .cmp(&b.workspace.unwrap_or(i32::MAX))
+            })
+            .then_with(|| a.id().cmp(&b.id()))
+    });
+
+    let mut running: HashMap<String, RunningStatus> = HashMap::new();
+    for pane in panes {
+        let Some(session_id) = pane.session_id.as_deref() else {
+            continue;
+        };
+        let session_key = if session_id.contains(':') {
+            session_id.to_string()
+        } else {
+            pane.agent_kind.session_key(session_id)
+        };
+        running
+            .entry(session_key)
+            .or_insert_with(|| RunningStatus::Active {
+                pane_id: pane.id(),
+                workspace: pane.workspace,
+                focused: pane.is_focused,
+                hook_state: pane.hook_state,
+                activity_state: pane.activity_state.unwrap_or_default(),
+            });
+    }
+
+    let enriched = sessions
+        .into_iter()
+        .map(|session| {
+            let session_key = session.agent_kind.session_key(&session.native_id);
+            let meta = conn.as_ref().and_then(|c| {
+                babel::babel_storage::get_metadata(c, &session_key)
+                    .ok()
+                    .flatten()
+            });
+            let generated_title = conn.as_ref().and_then(|c| {
+                babel::babel_storage::get_generated_title(c, &session_key)
+                    .ok()
+                    .flatten()
+            });
+            EnrichedSession {
+                agent_kind: session.agent_kind,
+                native_id: session.native_id,
+                session_key: session_key.clone(),
+                project_path: session.project_path.map(PathBuf::from),
+                display_name: session.display_name,
+                generated_title,
+                last_prompt: session.last_prompt,
+                turn_count: session.turn_count,
+                last_seen_at: session.last_seen_at,
+                interactive: session.interactive,
+                command_only: session.command_only,
+                has_title: session.has_title,
+                hidden: meta.as_ref().map(|m| m.hidden).unwrap_or(false),
+                custom_icon: meta.as_ref().and_then(|m| m.icon.clone()),
+                unread: !meta.as_ref().map(|m| m.is_read).unwrap_or(true),
+                running_status: running.remove(&session_key).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    Ok(enriched)
 }
 
 /// Resume the most recent session not currently running
@@ -230,6 +309,52 @@ fn launch_claude_resume(session_id: &str) -> Result<()> {
 
     // If we get here, exec failed
     Err(anyhow!("Failed to exec claude: {}", err))
+}
+
+fn launch_harness_resume(selection: &ResumeSelection) -> Result<()> {
+    let spec = selection.agent_kind.spec();
+    let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
+        anyhow!(
+            "{} has no resume command",
+            selection.agent_kind.display_name()
+        )
+    })?;
+    let parts: Vec<&str> = resume_cmd.split_whitespace().collect();
+    let Some((program, args)) = parts.split_first() else {
+        return Err(anyhow!(
+            "Empty resume command for {}",
+            selection.agent_kind.display_name()
+        ));
+    };
+
+    let cwd = selection
+        .project_path
+        .as_ref()
+        .filter(|p| p.exists())
+        .cloned()
+        .or_else(|| {
+            if selection.agent_kind == babel::AgentKind::Claude {
+                get_session_cwd(&selection.native_id).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    boundary!(
+        "harness",
+        "resume",
+        agent = selection.agent_kind.slug(),
+        native_id = selection.native_id.as_str(),
+        cwd = format!("{:?}", cwd)
+    );
+
+    let err = std::process::Command::new(program)
+        .args(args)
+        .current_dir(&cwd)
+        .exec();
+
+    Err(anyhow!("Failed to exec {}: {}", program, err))
 }
 
 /// Get working directory for a session by searching ~/.claude/projects/
