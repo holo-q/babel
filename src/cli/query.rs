@@ -1645,8 +1645,10 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
 
     struct Acc {
         project: String,
-        first_display: String,
-        last_display: String,
+        /// First non-command user prompt (for display_name).
+        first_real: Option<String>,
+        /// Most recent non-command user prompt (for last_prompt).
+        last_real: Option<String>,
         first_ts: i64,
         last_ts: i64,
         turns: u32,
@@ -1672,27 +1674,33 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
         let project = e.project.to_string_lossy().into_owned();
 
         let is_cmd = is_slash_command(&e.display);
+        let real = if is_cmd { None } else { Some(e.display.clone()) };
         sessions
             .entry(sid)
             .and_modify(|acc| {
                 if ts < acc.first_ts {
                     acc.first_ts = ts;
-                    acc.first_display = e.display.clone();
+                    if !is_cmd && acc.first_real.is_none() {
+                        acc.first_real = real.clone();
+                    }
                 }
                 if ts >= acc.last_ts {
                     acc.last_ts = ts;
-                    acc.last_display = e.display.clone();
                     acc.project = project.clone();
                 }
                 if !is_cmd {
                     acc.all_commands = false;
+                    acc.last_real = real.clone();
+                    if acc.first_real.is_none() {
+                        acc.first_real = real.clone();
+                    }
                 }
                 acc.turns += 1;
             })
             .or_insert(Acc {
                 project,
-                first_display: e.display.clone(),
-                last_display: e.display,
+                first_real: real.clone(),
+                last_real: real,
                 first_ts: ts,
                 last_ts: ts,
                 turns: 1,
@@ -1702,21 +1710,22 @@ fn scan_claude() -> Result<Vec<NativeSession>> {
 
     Ok(sessions
         .into_iter()
-        .map(|(sid, acc)| NativeSession {
-            agent_kind: babel::AgentKind::Claude,
-            native_id: sid,
-            project_path: Some(acc.project),
-            display_name: Some(acc.first_display),
-            last_prompt: if acc.turns > 1 {
-                Some(acc.last_display)
-            } else {
-                None
-            },
-            turn_count: acc.turns,
-            last_seen_at: acc.last_ts,
-            interactive: true,
-            command_only: acc.all_commands,
-            has_title: false,
+        .map(|(sid, acc)| {
+            let display_name = acc.first_real;
+            let last_prompt = if acc.turns > 1 { acc.last_real } else { None };
+
+            NativeSession {
+                agent_kind: babel::AgentKind::Claude,
+                native_id: sid,
+                project_path: Some(acc.project),
+                display_name,
+                last_prompt,
+                turn_count: acc.turns,
+                last_seen_at: acc.last_ts,
+                interactive: true,
+                command_only: acc.all_commands,
+                has_title: false,
+            }
         })
         .collect())
 }
@@ -1736,8 +1745,8 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
 
     // Accumulator for history.jsonl prompt data (turn count + last prompt)
     struct PromptAcc {
-        first_text: String,
-        last_text: String,
+        first_real: Option<String>,
+        last_real: Option<String>,
         turns: u32,
         all_commands: bool,
     }
@@ -1756,18 +1765,22 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                         continue;
                     }
                     let is_cmd = is_slash_command(&e.text);
+                    let real = if is_cmd { None } else { Some(truncate_str(&e.text, 100)) };
                     prompt_data
                         .entry(e.session_id)
                         .and_modify(|acc| {
-                            acc.last_text = truncate_str(&e.text, 100);
                             if !is_cmd {
                                 acc.all_commands = false;
+                                acc.last_real = real.clone();
+                                if acc.first_real.is_none() {
+                                    acc.first_real = real.clone();
+                                }
                             }
                             acc.turns += 1;
                         })
                         .or_insert(PromptAcc {
-                            first_text: truncate_str(&e.text, 100),
-                            last_text: truncate_str(&e.text, 100),
+                            first_real: real.clone(),
+                            last_real: real,
                             turns: 1,
                             all_commands: is_cmd,
                         });
@@ -1811,11 +1824,11 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
                 let has_title = title.as_ref().is_some_and(|t| !t.is_empty());
                 let display_name = title
                     .filter(|t| !t.is_empty())
-                    .or_else(|| first_msg.filter(|m| !m.is_empty()))
-                    .or_else(|| prompts.as_ref().map(|p| p.first_text.clone()));
+                    .or_else(|| first_msg.filter(|m| !m.is_empty() && !is_slash_command(m)))
+                    .or_else(|| prompts.as_ref().and_then(|p| p.first_real.clone()));
 
                 let last_prompt = prompts.and_then(|p| {
-                    if p.turns > 1 { Some(p.last_text) } else { None }
+                    if p.turns > 1 { p.last_real } else { None }
                 });
 
                 out.push(NativeSession {
@@ -1842,8 +1855,8 @@ fn scan_codex() -> Result<Vec<NativeSession>> {
             agent_kind: babel::AgentKind::Codex,
             native_id: sid,
             project_path: None,
-            display_name: Some(acc.first_text),
-            last_prompt: if acc.turns > 1 { Some(acc.last_text) } else { None },
+            display_name: acc.first_real,
+            last_prompt: if acc.turns > 1 { acc.last_real } else { None },
             turn_count: acc.turns,
             last_seen_at: 0,
             interactive: true,
