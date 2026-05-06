@@ -265,6 +265,13 @@ fn log_duplicate_claim(addr: &PaneAddr, session_id: &str, kind: ClaimKind, phase
     );
 }
 
+fn same_session_claim(agent_kind: AgentKind, left: &str, right: &str) -> bool {
+    left == right
+        || AgentKind::native_session_id(left) == AgentKind::native_session_id(right)
+        || agent_kind.session_key(left) == right
+        || agent_kind.session_key(right) == left
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Babel State
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -637,17 +644,42 @@ impl BabelState {
                 }
                 updated
             } else {
-                // New pane - check for existing tag but ignore agent-* sessions
-                // (they were matched before we had fingerprinting)
-                let existing_session = kw
-                    .user_vars
-                    .get("babel_session_id")
-                    .filter(|id| !id.starts_with("agent-"))
-                    .cloned();
                 // Detect harness once at construction; cached on the pane so
                 // panel-color dispatch (Claude orange vs Codex cyan) doesn't
                 // need to re-walk foreground processes on every event.
                 let agent_kind = detect_agent_signals(&kw).agent;
+                // New pane - check for an existing kitty tag, but validate it
+                // against the visible title when the title has a durable session
+                // match. Kitty user_vars can outlive a resumed/reused pane; a
+                // stale `babel_session_id` is worse than no claim because the
+                // coordinator treats existing claims as ground truth.
+                let mut existing_session = kw
+                    .user_vars
+                    .get("babel_session_id")
+                    .filter(|id| !id.starts_with("agent-"))
+                    .cloned();
+                let title_session = self.match_title_to_session(&kw.title);
+                if let (Some(existing), Some(title_sid)) =
+                    (existing_session.as_deref(), title_session.as_deref())
+                {
+                    if !same_session_claim(agent_kind, existing, title_sid) {
+                        tracing::warn!(
+                            addr = %addr.short(),
+                            title = %kw.title,
+                            stale_session = %existing,
+                            title_session = %title_sid,
+                            "replacing stale kitty session tag from title match"
+                        );
+                        let _ = crate::kitty::set_user_var_on_socket(
+                            &addr.socket,
+                            addr.id,
+                            "babel_session_id",
+                            title_sid,
+                        )
+                        .await;
+                        existing_session = Some(title_sid.to_string());
+                    }
+                }
                 AgentPane {
                     addr: addr.clone(),
                     title: kw.title.clone(),

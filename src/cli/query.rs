@@ -1259,10 +1259,11 @@ pub(super) fn scan_all_sessions(
 /// List all known sessions across all harnesses.
 ///
 /// Reads native storage directly per harness, merges, sorts by recency,
-/// and joins with session_metadata for overlay enrichment (hook_state, icon, is_read).
-#[instrument(level = "debug", skip(_core))]
+/// joins live pane state for liveness, and joins session_metadata only for
+/// overlay concerns (icon, read state, generated titles, hidden filter).
+#[instrument(level = "debug", skip(core))]
 pub async fn cmd_ls_sessions(
-    _core: &BabelCore,
+    core: &BabelCore,
     count: usize,
     kind: Option<&str>,
     filters: SessionFilters,
@@ -1286,11 +1287,14 @@ pub async fn cmd_ls_sessions(
 
     let total = sessions.len();
     sessions.truncate(count);
+    let live_sessions = live_session_index(core).await.unwrap_or_default();
 
     if json {
         let json_out: Vec<_> = sessions
             .iter()
             .map(|s| {
+                let session_key = s.agent_kind.session_key(&s.native_id);
+                let live = live_sessions.get(&session_key);
                 serde_json::json!({
                     "agent_kind": s.agent_kind.slug(),
                     "native_id": s.native_id,
@@ -1299,6 +1303,16 @@ pub async fn cmd_ls_sessions(
                     "last_prompt": s.last_prompt,
                     "turn_count": s.turn_count,
                     "last_seen_at": s.last_seen_at,
+                    "running": live.is_some(),
+                    "live_panes": live.map(|panes| {
+                        panes.iter().map(|pane| serde_json::json!({
+                            "addr": pane.addr,
+                            "workspace": pane.workspace,
+                            "focused": pane.focused,
+                            "activity_state": pane.activity_state,
+                            "hook_state": pane.hook_state,
+                        })).collect::<Vec<_>>()
+                    }).unwrap_or_default(),
                 })
             })
             .collect();
@@ -1339,7 +1353,10 @@ pub async fn cmd_ls_sessions(
     // Pass 1: compute display cells
     let rows: Vec<SessionRow> = sessions
         .iter()
-        .map(|s| session_row(s, &conn, now))
+        .map(|s| {
+            let session_key = s.agent_kind.session_key(&s.native_id);
+            session_row(s, &conn, now, live_sessions.get(&session_key))
+        })
         .collect();
 
     // Pass 2: measure column widths
@@ -1403,6 +1420,10 @@ pub async fn cmd_ls_sessions(
             kinds.len(),
             if kinds.len() == 1 { "" } else { "es" }
         ))
+    );
+    println!(
+        "{}",
+        dim.apply_to("  ● unread/custom marker  ⚡/⚙/●/○ live pane state  blank state/workspace = not running")
     );
 
     Ok(())
@@ -1498,7 +1519,17 @@ struct SessionRow {
 }
 
 #[derive(Clone, Copy)]
-enum StateKind { Idle, Working, ToolRunning, Unknown }
+enum StateKind {
+    Idle,
+    Working,
+    ToolRunning,
+    Thinking,
+    PlanApproval,
+    AwaitingInput,
+    BackgroundTask,
+    Unknown,
+    NotRunning,
+}
 
 impl SessionRow {
     fn state_style(&self) -> Style {
@@ -1506,13 +1537,23 @@ impl SessionRow {
             StateKind::Idle => Style::new().dim(),
             StateKind::Working => Style::new().yellow(),
             StateKind::ToolRunning => Style::new().cyan().bold(),
+            StateKind::Thinking => Style::new().yellow(),
+            StateKind::PlanApproval => Style::new().magenta(),
+            StateKind::AwaitingInput => Style::new().green(),
+            StateKind::BackgroundTask => Style::new().magenta(),
             StateKind::Unknown => Style::new().dim(),
+            StateKind::NotRunning => Style::new().dim(),
         }
     }
 }
 
-fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> SessionRow {
-    use babel::babel_storage::{get_metadata, HookState};
+fn session_row(
+    s: &NativeSession,
+    conn: &rusqlite::Connection,
+    now: i64,
+    live: Option<&Vec<LiveSession>>,
+) -> SessionRow {
+    use babel::babel_storage::get_metadata;
 
     let accent = s.agent_kind.accent_color();
     let session_key = s.agent_kind.session_key(&s.native_id);
@@ -1520,14 +1561,8 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
     let meta = get_metadata(conn, &session_key).ok().flatten();
     let unread = !meta.as_ref().map(|m| m.is_read).unwrap_or(true);
     let custom_icon = meta.as_ref().and_then(|m| m.icon.as_ref());
-    let hook_state = meta.as_ref().and_then(|m| m.hook_state);
-
-    let (state_icon, state_kind) = match hook_state {
-        Some(HookState::Idle) => ("○", StateKind::Idle),
-        Some(HookState::Working) => ("●", StateKind::Working),
-        Some(HookState::ToolRunning) => ("⚙", StateKind::ToolRunning),
-        None => (" ", StateKind::Unknown),
-    };
+    let live = live.and_then(|panes| panes.first());
+    let (state_icon, state_kind) = live_state_icon(live);
 
     let marker = if let Some(icon) = custom_icon {
         format!("{} ", icon)
@@ -1574,9 +1609,8 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         String::new()
     };
 
-    let workspace = meta
-        .as_ref()
-        .and_then(|m| m.last_workspace)
+    let workspace = live
+        .and_then(|pane| pane.workspace)
         .map(|ws| format!("{}", ws + 1)) // 0-indexed → 1-indexed
         .unwrap_or_default();
 
@@ -1612,7 +1646,75 @@ fn session_row(s: &NativeSession, conn: &rusqlite::Connection, now: i64) -> Sess
         last_prompt,
         accent,
         bright,
-        has_title: s.has_title,
+        has_title,
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LiveSession {
+    addr: babel::PaneAddr,
+    workspace: Option<i32>,
+    focused: bool,
+    hook_state: Option<babel::babel_storage::HookState>,
+    activity_state: Option<ActivityState>,
+}
+
+async fn live_session_index(core: &BabelCore) -> Result<HashMap<String, Vec<LiveSession>>> {
+    let mut panes = core.panes().await?;
+    panes.sort_by(|a, b| {
+        b.is_focused
+            .cmp(&a.is_focused)
+            .then_with(|| a.workspace.unwrap_or(i32::MAX).cmp(&b.workspace.unwrap_or(i32::MAX)))
+            .then_with(|| a.id().cmp(&b.id()))
+    });
+
+    let mut index: HashMap<String, Vec<LiveSession>> = HashMap::new();
+    for pane in panes {
+        let Some(session_id) = pane.session_id.as_deref() else {
+            continue;
+        };
+        let session_key = if session_id.contains(':') {
+            session_id.to_string()
+        } else {
+            pane.agent_kind.session_key(session_id)
+        };
+        index.entry(session_key).or_default().push(LiveSession {
+            addr: pane.addr,
+            workspace: pane.workspace,
+            focused: pane.is_focused,
+            hook_state: pane.hook_state,
+            activity_state: pane.activity_state,
+        });
+    }
+    Ok(index)
+}
+
+fn live_state_icon(live: Option<&LiveSession>) -> (&'static str, StateKind) {
+    use babel::babel_storage::HookState;
+
+    let Some(live) = live else {
+        return (" ", StateKind::NotRunning);
+    };
+
+    match (live.hook_state, live.activity_state) {
+        (Some(HookState::Idle), _) => ("○", StateKind::Idle),
+        (Some(HookState::ToolRunning), _) => ("⚙", StateKind::ToolRunning),
+        (Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
+        (Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
+        (Some(HookState::Working), Some(ActivityState::PlanApproval)) => {
+            ("📋", StateKind::PlanApproval)
+        }
+        (Some(HookState::Working), Some(ActivityState::BackgroundTask)) => {
+            ("◐", StateKind::BackgroundTask)
+        }
+        (Some(HookState::Working), _) => ("●", StateKind::Working),
+        (None, Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
+        (None, Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
+        (None, Some(ActivityState::PlanApproval)) => ("📋", StateKind::PlanApproval),
+        (None, Some(ActivityState::AwaitingInput)) => ("◆", StateKind::AwaitingInput),
+        (None, Some(ActivityState::BackgroundTask)) => ("◐", StateKind::BackgroundTask),
+        (None, Some(ActivityState::Idle)) => ("○", StateKind::Idle),
+        (None, Some(ActivityState::Unknown)) | (None, None) => ("◌", StateKind::Unknown),
     }
 }
 
