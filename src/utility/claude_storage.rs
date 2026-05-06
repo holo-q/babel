@@ -191,6 +191,42 @@ pub fn get_session_summaries(session_path: &Path) -> Result<Vec<Summary>> {
     Ok(summaries)
 }
 
+/// Fast summary extraction — stops as soon as we see a non-summary entry.
+///
+/// Summaries are always at the top of Claude JSONL files. This avoids even
+/// the 20-line window of `get_session_summaries` and bails on the first
+/// non-summary line, making it ideal for bulk parallel scanning (3000+ files).
+pub fn get_session_summaries_fast(session_path: &Path) -> Result<Vec<Summary>> {
+    let file = File::open(session_path)?;
+    let reader = BufReader::new(file);
+    let mut summaries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Quick substring check before paying for a full JSON parse
+        if !line.contains("\"summary\"") {
+            break;
+        }
+
+        let Ok(entry) = serde_json::from_str::<JsonlEntry>(&line) else {
+            break;
+        };
+        if entry.entry_type.as_deref() == Some("summary") {
+            if let Ok(summary) = serde_json::from_value::<Summary>(entry.data) {
+                summaries.push(summary);
+            }
+        } else {
+            break; // Non-summary entry means we're past the header
+        }
+    }
+
+    Ok(summaries)
+}
+
 /// Get basic session info without full parse
 /// Extracts: session_id, summaries, slug, cwd, last_timestamp, message_count, first_prompt
 pub fn get_session_info(session_path: &Path) -> Result<SessionInfo> {

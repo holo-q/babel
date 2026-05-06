@@ -81,6 +81,9 @@ futures = "0.3"
 # Pattern matching for file path extraction
 regex = "1"
 
+# Parallel iteration for index builds (summary scanning over 3000+ JSONL files)
+rayon = "1"
+
 # Config serialization (used by wset.rs for workspace set persistence)
 toml = "0.8"
 anstyle = "1.0.13"

@@ -101,7 +101,9 @@ use crate::utility::agent_discovery::{
     detect_agent_signals, get_activity_with_scrollback_on_socket, get_pane_activity_with_scrollback,
 };
 use crate::utility::agent_discovery::{enrich_pane, load_wset, AgentPane};
-use crate::utility::claude_storage::{claude_base, get_recent_sessions, get_session_info};
+use crate::utility::claude_storage::{
+    claude_base, get_recent_sessions, get_session_info, get_session_summaries_fast,
+};
 use crate::utility::ipc::create_listener;
 use crate::wset::{get_current_wset_name, list_wsets, set_current_wset_name, WSet};
 use crate::{AgentKind, PulseEffect};
@@ -260,6 +262,16 @@ fn same_session_claim(agent_kind: AgentKind, left: &str, right: &str) -> bool {
         || agent_kind.session_key(right) == left
 }
 
+fn infer_session_claim_from_cwd(agent_kind: AgentKind, cwd: &Path) -> Option<String> {
+    match agent_kind {
+        AgentKind::Codex => crate::native_sessions::newest_codex_thread_for_cwd(cwd)
+            .ok()
+            .flatten()
+            .map(|native_id| agent_kind.session_key(&native_id)),
+        _ => None,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Babel State
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -271,8 +283,11 @@ fn same_session_claim(agent_kind: AgentKind, left: &str, right: &str) -> bool {
 // historical `babel::daemon::{BabelState, ...}` import surface so existing
 // tests and crate consumers keep compiling during the boundary move.
 
+use crate::service::state::{
+    default_daemon_warmup_operations, DaemonReadiness, DaemonReadinessState, PaneActivityApply,
+    SummaryEntry,
+};
 pub use crate::service::state::{BabelState, PaneIdResolution, SocketStatus, TerminalInfo};
-use crate::service::state::{PaneActivityApply, SummaryEntry};
 
 impl BabelState {
     // ═══════════════════════════════════════════════════════════════════════
@@ -604,6 +619,7 @@ impl BabelState {
             let workspace = kw
                 .platform_window_id
                 .and_then(|pid| workspaces.get(&pid).copied());
+            let markers = detect_agent_signals(&kw);
 
             // Check if we have existing data for this pane (use get, not remove)
             let agent_pane = if let Some(existing) = self.panes.get(&addr) {
@@ -614,7 +630,8 @@ impl BabelState {
                 // Refresh agent kind every tick — a pane that exits claude and
                 // launches codex (or vice versa) reuses the kitty window id, so
                 // the cached value would lie. Cmdline detection is cheap.
-                updated.agent_kind = detect_agent_signals(&kw).agent;
+                let detected_agent = markers.agent;
+                updated.agent_kind = detected_agent;
 
                 // Reset agent-* sessions to force re-matching via fingerprint
                 if updated
@@ -629,28 +646,134 @@ impl BabelState {
 
                 // Preserve existing session info if title hasn't changed
                 if updated.title != kw.title {
-                    // Title changed - need to re-match
+                    // Title changed - need to re-match unless argv gives a
+                    // stronger harness-native resume id below.
                     updated.title = kw.title.clone();
                     updated.session_id = None;
                     updated.session_info = None;
+                }
+
+                if let Some(cmdline_claim) = markers
+                    .session_id
+                    .as_deref()
+                    .and_then(|id| detected_agent.normalize_session_claim(id))
+                {
+                    if updated.session_id.as_deref() != Some(cmdline_claim.as_str()) {
+                        tracing::debug!(
+                            addr = %addr.short(),
+                            detected_harness = %detected_agent,
+                            session_id = %cmdline_claim,
+                            "binding live pane from harness resume argv"
+                        );
+                        let _ = self
+                            .registry
+                            .set_meta(&addr, "babel_session_id", &cmdline_claim)
+                            .await;
+                        updated.session_id = Some(cmdline_claim);
+                        updated.session_info = None;
+                        updated.match_confidence = None;
+                    }
+                }
+                if updated
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| detected_agent.normalize_session_claim(id).is_none())
+                {
+                    tracing::warn!(
+                        addr = %addr.short(),
+                        detected_harness = %detected_agent,
+                        stale_session = %updated.session_id.as_deref().unwrap_or_default(),
+                        "clearing stale cross-harness pane session tag"
+                    );
+                    let _ = self.registry.set_meta(&addr, "babel_session_id", "").await;
+                    updated.session_id = None;
+                    updated.session_info = None;
+                    updated.match_confidence = None;
+                }
+                if markers.infer_session_from_cwd {
+                    if let Some(cwd_claim) = infer_session_claim_from_cwd(detected_agent, &kw.cwd) {
+                        if updated.session_id.as_deref() != Some(cwd_claim.as_str()) {
+                            tracing::info!(
+                                addr = %addr.short(),
+                                detected_harness = %detected_agent,
+                                cwd = %kw.cwd.display(),
+                                previous_session = %updated.session_id.as_deref().unwrap_or_default(),
+                                session_id = %cwd_claim,
+                                "binding live pane from native cwd inference"
+                            );
+                            let _ = self
+                                .registry
+                                .set_meta(&addr, "babel_session_id", &cwd_claim)
+                                .await;
+                            updated.session_id = Some(cwd_claim);
+                            updated.session_info = None;
+                            updated.match_confidence = None;
+                        }
+                    }
                 }
                 updated
             } else {
                 // Detect harness once at construction; cached on the pane so
                 // panel-color dispatch (Claude orange vs Codex cyan) doesn't
                 // need to re-walk foreground processes on every event.
-                let agent_kind = detect_agent_signals(&kw).agent;
+                let agent_kind = markers.agent;
                 // New pane - check for an existing kitty tag, but validate it
                 // against the visible title when the title has a durable session
                 // match. Kitty user_vars can outlive a resumed/reused pane; a
                 // stale `babel_session_id` is worse than no claim because the
                 // coordinator treats existing claims as ground truth.
-                let mut existing_session = kw
+                let mut existing_session = markers
+                    .session_id
+                    .as_deref()
+                    .filter(|id| !id.starts_with("agent-"))
+                    .and_then(|id| agent_kind.normalize_session_claim(id));
+                if let Some(session_id) = existing_session.as_deref() {
+                    if kw.user_vars.get("babel_session_id").map(String::as_str) != Some(session_id)
+                    {
+                        let _ = self
+                            .registry
+                            .set_meta(&addr, "babel_session_id", session_id)
+                            .await;
+                    }
+                }
+                if kw
                     .user_vars
                     .get("babel_session_id")
                     .filter(|id| !id.starts_with("agent-"))
-                    .cloned();
-                let title_session = self.match_title_to_session(&kw.title);
+                    .is_some_and(|id| agent_kind.normalize_session_claim(id).is_none())
+                {
+                    tracing::warn!(
+                        addr = %addr.short(),
+                        detected_harness = %agent_kind,
+                        stale_session = %kw.user_vars.get("babel_session_id").map(String::as_str).unwrap_or_default(),
+                        "dropping stale cross-harness kitty session tag"
+                    );
+                    let _ = self.registry.set_meta(&addr, "babel_session_id", "").await;
+                }
+                if markers.infer_session_from_cwd {
+                    if let Some(cwd_claim) = infer_session_claim_from_cwd(agent_kind, &kw.cwd) {
+                        if existing_session.as_deref() != Some(cwd_claim.as_str()) {
+                            tracing::info!(
+                                addr = %addr.short(),
+                                detected_harness = %agent_kind,
+                                cwd = %kw.cwd.display(),
+                                previous_session = %existing_session.as_deref().unwrap_or_default(),
+                                session_id = %cwd_claim,
+                                "binding new live pane from native cwd inference"
+                            );
+                            let _ = self
+                                .registry
+                                .set_meta(&addr, "babel_session_id", &cwd_claim)
+                                .await;
+                            existing_session = Some(cwd_claim);
+                        }
+                    }
+                }
+                let title_session = if agent_kind == AgentKind::Claude {
+                    self.match_title_to_session(&kw.title)
+                } else {
+                    None
+                };
                 if let (Some(existing), Some(title_sid)) =
                     (existing_session.as_deref(), title_session.as_deref())
                 {
@@ -1791,6 +1914,363 @@ pub async fn run_daemon_traced(enable_scrollparse: bool) -> Result<()> {
     run_daemon(enable_scrollparse).await
 }
 
+fn initial_daemon_readiness() -> DaemonReadiness {
+    DaemonReadiness {
+        state: DaemonReadinessState::Warming,
+        uptime_secs: 0,
+        operations: default_daemon_warmup_operations(),
+        detail: None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Blocking Index Builders
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Heavy CPU+IO work (reading/parsing thousands of JSONL files) extracted as
+// free functions so they can run inside `spawn_blocking` without holding the
+// async RwLock. Each returns owned data that the caller swaps into BabelState
+// under a short write lock.
+
+/// Build summary index + session path map by scanning all JSONL files in parallel.
+///
+/// Uses rayon `par_iter` to distribute the 3000+ file reads across threads and
+/// `get_session_summaries_fast` which bails on the first non-summary line.
+fn rebuild_summary_index_blocking() -> Result<(Vec<SummaryEntry>, HashMap<String, PathBuf>)> {
+    use rayon::prelude::*;
+
+    let projects_dir = claude_base().join("projects");
+    if !projects_dir.exists() {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+
+    // Collect all session file paths first (cheap directory enumeration)
+    let mut session_files: Vec<(String, PathBuf)> = Vec::new();
+    for project_entry in std::fs::read_dir(&projects_dir)? {
+        let project_path = project_entry?.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        for session_entry in std::fs::read_dir(&project_path)? {
+            let session_path = session_entry?.path();
+            if session_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let session_id = session_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            session_files.push((session_id, session_path));
+        }
+    }
+
+    // Build paths map (cheap, no file reads — includes agent sessions for O(1) lookup)
+    let paths: HashMap<String, PathBuf> = session_files
+        .iter()
+        .map(|(id, path)| (id.clone(), path.clone()))
+        .collect();
+
+    // Parallel scan for summaries (skip agent-spawned sessions — they pollute title matching)
+    let index: Vec<SummaryEntry> = session_files
+        .par_iter()
+        .filter(|(id, _)| !id.starts_with("agent-"))
+        .flat_map(|(session_id, path)| {
+            get_session_summaries_fast(path)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| SummaryEntry {
+                    summary: s.summary,
+                    session_id: session_id.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    Ok((index, paths))
+}
+
+/// Build fingerprint index from most-recently-modified JSONL files.
+///
+/// Collects session files, sorts by mtime, truncates to the configured limit,
+/// then extracts fingerprints sequentially (fingerprint extraction reads more
+/// data per file than summaries, but operates on a much smaller file set).
+fn rebuild_fingerprint_index_blocking(
+    limit: usize,
+) -> Result<(HashMap<String, SessionFingerprint>, usize)> {
+    use crate::utility::claude_storage::{list_projects, list_sessions};
+
+    let projects_dir = claude_base().join("projects");
+    if !projects_dir.exists() {
+        return Ok((HashMap::new(), 0));
+    }
+
+    let mut session_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+    for project_dir in list_projects()? {
+        for session_path in list_sessions(&project_dir)? {
+            if let Some(stem) = session_path.file_stem().and_then(|s| s.to_str()) {
+                if stem.starts_with("agent-") {
+                    continue;
+                }
+            }
+            if let Ok(meta) = std::fs::metadata(&session_path) {
+                if let Ok(mtime) = meta.modified() {
+                    session_files.push((session_path, mtime));
+                }
+            }
+        }
+    }
+
+    // Sort by modification time (newest first) and limit
+    session_files.sort_by(|a, b| b.1.cmp(&a.1));
+    session_files.truncate(limit);
+
+    let mut index = HashMap::new();
+    let mut sessions_with_cwd = 0;
+    for (path, _) in session_files {
+        if let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) {
+            if let Ok(mut fp) = extract_from_jsonl(&path) {
+                fp.session_id = Some(session_id.to_string());
+                if fp.cwd.is_some() {
+                    sessions_with_cwd += 1;
+                    if let Some(cwd) = &fp.cwd {
+                        if cwd.to_string_lossy().contains("babel") {
+                            tracing::debug!(
+                                "Index adding session {} with CWD {:?}",
+                                session_id,
+                                cwd
+                            );
+                        }
+                    }
+                }
+                index.insert(session_id.to_string(), fp);
+            }
+        }
+    }
+    checkpoint!(
+        "index_built",
+        sessions = index.len(),
+        with_cwd = sessions_with_cwd
+    );
+
+    let count = index.len();
+    Ok((index, count))
+}
+
+async fn complete_warmup_operation(
+    readiness: &Arc<RwLock<DaemonReadiness>>,
+    name: &str,
+    detail: Option<String>,
+) {
+    let mut readiness = readiness.write().await;
+    if let Some(operation) = readiness
+        .operations
+        .iter_mut()
+        .find(|operation| operation.name == name)
+    {
+        operation.complete = true;
+        operation.detail = detail;
+    }
+}
+
+async fn mark_warmup_failed(readiness: &Arc<RwLock<DaemonReadiness>>, message: String) {
+    let mut readiness = readiness.write().await;
+    readiness.state = DaemonReadinessState::Failed;
+    readiness.detail = Some(message);
+}
+
+async fn mark_warmup_ready(readiness: &Arc<RwLock<DaemonReadiness>>) {
+    let mut readiness = readiness.write().await;
+    readiness.state = DaemonReadinessState::Ready;
+    readiness.detail = None;
+}
+
+async fn warm_daemon_state(
+    state: &Arc<RwLock<BabelState>>,
+    readiness: &Arc<RwLock<DaemonReadiness>>,
+    enable_scrollparse: bool,
+) -> Result<()> {
+    // ── Step 1: Summary index (spawn_blocking + rayon parallel scan) ─────
+    // Heavy CPU+IO work over 3000+ JSONL files — runs off the async executor.
+    let (summary_index, session_paths) = tokio::task::spawn_blocking(|| {
+        rebuild_summary_index_blocking()
+    })
+    .await
+    .context("summary index task panicked")?
+    .context("Failed to build summary index")?;
+
+    let total_summaries = summary_index.len();
+    {
+        let mut s = state.write().await;
+        s.summary_index = summary_index;
+        s.session_paths = session_paths;
+        s.complete_warmup_operation(
+            "summary_index",
+            Some(format!("{} summaries", total_summaries)),
+        );
+    }
+    complete_warmup_operation(
+        readiness,
+        "summary_index",
+        Some(format!("{} summaries", total_summaries)),
+    )
+    .await;
+
+    // ── Step 2: Fingerprint index (spawn_blocking) ──────────────────────
+    let fp_limit = config::FINGERPRINT_INDEX_LIMIT;
+    let (fingerprint_index, sessions_with_fingerprints) = tokio::task::spawn_blocking(move || {
+        rebuild_fingerprint_index_blocking(fp_limit)
+    })
+    .await
+    .context("fingerprint index task panicked")?
+    .context("Failed to build fingerprint index")?;
+
+    {
+        let mut s = state.write().await;
+        s.fingerprint_index = fingerprint_index;
+        s.last_fingerprint_rebuild = Instant::now();
+        s.complete_warmup_operation(
+            "fingerprint_index",
+            Some(format!("{} fingerprints", sessions_with_fingerprints)),
+        );
+    }
+    complete_warmup_operation(
+        readiness,
+        "fingerprint_index",
+        Some(format!("{} fingerprints", sessions_with_fingerprints)),
+    )
+    .await;
+
+    // ── Step 3: Pane refresh (async — needs backend IO) ─────────────────
+    let (windows_found, windows_identified, workspaces_count);
+    {
+        let mut s = state.write().await;
+        let _ = s
+            .refresh_panes(!enable_scrollparse)
+            .await
+            .context("Failed initial window scan")?;
+        windows_found = s.panes.len();
+        windows_identified = s.panes.values().filter(|w| w.session_id.is_some()).count();
+        let workspaces_active: std::collections::HashSet<_> =
+            s.panes.values().filter_map(|w| w.workspace).collect();
+        workspaces_count = workspaces_active.len();
+        s.complete_warmup_operation(
+            "pane_refresh",
+            Some(format!(
+                "{} panes, {} identified, {} workspaces",
+                windows_found, windows_identified, workspaces_count
+            )),
+        );
+    }
+    complete_warmup_operation(
+        readiness,
+        "pane_refresh",
+        Some(format!(
+            "{} panes, {} identified, {} workspaces",
+            windows_found, windows_identified, workspaces_count
+        )),
+    )
+    .await;
+
+    // ── Step 4: Hook state reconciliation ───────────────────────────────
+    {
+        let live_sids: Vec<String> = {
+            let s = state.read().await;
+            s.panes
+                .values()
+                .filter_map(|w| w.session_id.clone())
+                .collect()
+        };
+        let live_refs: Vec<&str> = live_sids.iter().map(|s| s.as_str()).collect();
+        if let Ok(conn) = init_db() {
+            match reconcile_hook_states(&conn, &live_refs) {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!("Cleared {} stale hook states", n);
+                    }
+                    let mut s = state.write().await;
+                    s.complete_warmup_operation(
+                        "hook_reconcile",
+                        Some(format!("{} cleared", n)),
+                    );
+                    complete_warmup_operation(
+                        readiness,
+                        "hook_reconcile",
+                        Some(format!("{} cleared", n)),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Failed to reconcile hook states");
+                    let mut s = state.write().await;
+                    s.complete_warmup_operation(
+                        "hook_reconcile",
+                        Some(format!("skipped: {}", e)),
+                    );
+                    complete_warmup_operation(
+                        readiness,
+                        "hook_reconcile",
+                        Some(format!("skipped: {}", e)),
+                    )
+                    .await;
+                }
+            }
+        } else {
+            let mut s = state.write().await;
+            s.complete_warmup_operation(
+                "hook_reconcile",
+                Some("sqlite unavailable".to_string()),
+            );
+            complete_warmup_operation(
+                readiness,
+                "hook_reconcile",
+                Some("sqlite unavailable".to_string()),
+            )
+            .await;
+        }
+    }
+
+    // ── Final: Log summary + mark ready ─────────────────────────────────
+    if windows_found > 0 {
+        tracing::info!(
+            "Discovered {} windows ({} identified) across {} workspaces",
+            windows_found,
+            windows_identified,
+            workspaces_count
+        );
+    }
+
+    tracing::info!(
+        "Indexed {} sessions ({} with fingerprints)",
+        total_summaries,
+        sessions_with_fingerprints
+    );
+
+    {
+        let s = state.read().await;
+        let socket_count = s.socket_status.len();
+        if socket_count > 1 {
+            tracing::warn!(
+                "⚠ Multiple kitty instances detected ({} sockets)",
+                socket_count
+            );
+            for (socket, status) in &s.socket_status {
+                let marker = if status.is_current { "●" } else { "○" };
+                let short = socket.rsplit("kitty.sock-").next().unwrap_or(socket);
+                tracing::warn!("  {} {} ({} panes)", marker, short, status.pane_count);
+            }
+        }
+    }
+
+    {
+        let mut s = state.write().await;
+        s.mark_daemon_ready();
+    }
+    mark_warmup_ready(readiness).await;
+    Ok(())
+}
+
 /// Run the daemon
 #[vtr::trace_errors]
 pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
@@ -1839,12 +2319,10 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
     }
 
     // Tmux backend: register if any tmux server sockets exist
-    if !crate::backend::tmux::find_all_sockets().is_empty() {
+    let tmux_sockets = crate::backend::tmux::find_all_sockets();
+    if !tmux_sockets.is_empty() {
         registry.register(Arc::new(crate::backend::tmux::TmuxBackend));
-        checkpoint!(
-            "tmux_registered",
-            sockets = crate::backend::tmux::find_all_sockets().len()
-        );
+        checkpoint!("tmux_registered", sockets = tmux_sockets.len());
     }
 
     if registry.backends().is_empty() {
@@ -1855,76 +2333,36 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
 
     // Initialize state with the backend registry
     let state = Arc::new(RwLock::new(BabelState::new(Arc::clone(&registry))));
+    let daemon_started = Instant::now();
+    let readiness = Arc::new(RwLock::new(initial_daemon_readiness()));
 
     // Initialize workspace summarizer
     let summarizer = Arc::new(crate::summarizer::WorkspaceSummarizer::new());
 
-    // ─── Initial Indexing ───────────────────────────────────────────────────────
-    {
-        let mut s = state.write().await;
-        s.rebuild_summary_index()
-            .context("Failed to build summary index")?;
-        s.rebuild_fingerprint_index()
-            .context("Failed to build fingerprint index")?;
-        let _ = s
-            .refresh_panes(!enable_scrollparse)
-            .await
-            .context("Failed initial window scan")?;
+    // ─── IPC Socket ──────────────────────────────────────────────────────────────
+    // Bind before warmup. After a `spaceship upgrade`, the expensive session
+    // indexes can take long enough that "no socket" looks like "no daemon" to
+    // clients. Readiness is now an explicit state: clients can wait on it instead
+    // of silently starting an authoritative-looking local scan.
+    let listener = create_listener().await?;
+    let socket_path = crate::utility::ipc::socket_path();
+    checkpoint!("ipc_listening", socket = socket_path.display().to_string());
 
-        // Reconcile stale hook states: any session marked working/tool_running
-        // that has no live pane is reset to NULL (no signal, not idle).
-        let live_sids: Vec<String> = s
-            .panes
-            .values()
-            .filter_map(|w| w.session_id.clone())
-            .collect();
-        let live_refs: Vec<&str> = live_sids.iter().map(|s| s.as_str()).collect();
-        if let Ok(conn) = init_db() {
-            match reconcile_hook_states(&conn, &live_refs) {
-                Ok(0) => {}
-                Ok(n) => tracing::info!("Cleared {} stale hook states", n),
-                Err(e) => tracing::debug!(error = %e, "Failed to reconcile hook states"),
+    // ─── Initial Warmup ─────────────────────────────────────────────────────────
+    let warmup_state = Arc::clone(&state);
+    let warmup_readiness = Arc::clone(&readiness);
+    tokio::spawn(async move {
+        checkpoint!("daemon_warmup_started");
+        match warm_daemon_state(&warmup_state, &warmup_readiness, enable_scrollparse).await {
+            Ok(()) => checkpoint!("daemon_ready"),
+            Err(e) => {
+                trace_error!("daemon warmup failed", error = %e);
+                mark_warmup_failed(&warmup_readiness, e.to_string()).await;
+                let mut s = warmup_state.write().await;
+                s.mark_daemon_failed(e.to_string());
             }
         }
-
-        // Compute meaningful stats
-        let sessions_with_fingerprints = s.fingerprint_index.len();
-        let total_summaries = s.summary_index.len();
-        let windows_found = s.panes.len();
-        let windows_identified = s.panes.values().filter(|w| w.session_id.is_some()).count();
-        let workspaces_active: std::collections::HashSet<_> =
-            s.panes.values().filter_map(|w| w.workspace).collect();
-
-        // Log startup state - include key numbers in message for journald visibility
-        if windows_found > 0 {
-            tracing::info!(
-                "Discovered {} windows ({} identified) across {} workspaces",
-                windows_found,
-                windows_identified,
-                workspaces_active.len()
-            );
-        }
-
-        tracing::info!(
-            "Indexed {} sessions ({} with fingerprints)",
-            total_summaries,
-            sessions_with_fingerprints
-        );
-
-        // Multi-socket warning at startup
-        let socket_count = s.socket_status.len();
-        if socket_count > 1 {
-            tracing::warn!(
-                "⚠ Multiple kitty instances detected ({} sockets)",
-                socket_count
-            );
-            for (socket, status) in &s.socket_status {
-                let marker = if status.is_current { "●" } else { "○" };
-                let short = socket.rsplit("kitty.sock-").next().unwrap_or(socket);
-                tracing::warn!("  {} {} ({} panes)", marker, short, status.pane_count);
-            }
-        }
-    }
+    });
 
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel::<DaemonEvent>(config::EVENT_CHANNEL_SIZE);
@@ -2038,14 +2476,6 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
         }
     });
 
-    // ─── IPC Socket ──────────────────────────────────────────────────────────────
-    let listener = create_listener().await?;
-    let socket_path = crate::utility::ipc::socket_path();
-    checkpoint!("ipc_listening", socket = socket_path.display().to_string());
-
-    // ─── Ready ──────────────────────────────────────────────────────────────────
-    checkpoint!("daemon_ready");
-
     // Backpressure guard: prevents overlapping background poll tasks.
     // Without this, slow Phase 2 (scrollback fetch, ~100ms/window) causes
     // unbounded task accumulation when poll interval < task duration.
@@ -2058,8 +2488,9 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
             Ok((stream, _)) = listener.accept() => {
                 let state = Arc::clone(&state);
                 let summarizer = Arc::clone(&summarizer);
+                let readiness = Arc::clone(&readiness);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state, summarizer).await {
+                    if let Err(e) = handle_client(stream, state, summarizer, readiness, daemon_started).await {
                         trace_error!("IPC client error", error = %e);
                     }
                 });
@@ -2465,6 +2896,8 @@ async fn handle_client(
     mut stream: UnixStream,
     state: Arc<RwLock<BabelState>>,
     summarizer: Arc<crate::summarizer::WorkspaceSummarizer>,
+    readiness: Arc<RwLock<DaemonReadiness>>,
+    daemon_started: Instant,
 ) -> Result<()> {
     // Generate correlation ID for this request - enables tracing across all operations
     let trace_id = generate_trace_id();
@@ -2599,7 +3032,7 @@ async fn handle_client(
         return handle_paint_subscriber(stream, rx, subscriber_id, replay_events).await;
     }
 
-    let response = process_request(request, &state, &summarizer).await;
+    let response = process_request(request, &state, &summarizer, &readiness, daemon_started).await;
 
     // Write response
     drop(reader); // Release borrow
@@ -3649,7 +4082,48 @@ async fn process_request(
     request: Request,
     state: &Arc<RwLock<BabelState>>,
     summarizer: &Arc<crate::summarizer::WorkspaceSummarizer>,
+    readiness: &Arc<RwLock<DaemonReadiness>>,
+    daemon_started: Instant,
 ) -> Response {
+    if matches!(request, Request::Readiness) {
+        let mut readiness = readiness.read().await.clone();
+        readiness.uptime_secs = daemon_started.elapsed().as_secs();
+        return Response::Readiness { readiness };
+    }
+
+    if !matches!(request, Request::Ping | Request::Shutdown) {
+        let readiness = readiness.read().await.clone();
+        if !matches!(readiness.state, DaemonReadinessState::Ready) {
+            let operations = readiness
+                .operations
+                .iter()
+                .map(|operation| {
+                    format!(
+                        "{}={}",
+                        operation.name,
+                        if operation.complete {
+                            "done"
+                        } else {
+                            "pending"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            return Response::Error {
+                message: format!(
+                    "{} ({})",
+                    match readiness.state {
+                        DaemonReadinessState::Failed => "daemon warmup failed",
+                        DaemonReadinessState::Warming => "daemon warming up",
+                        DaemonReadinessState::Ready => "daemon ready",
+                    },
+                    operations
+                ),
+            };
+        }
+    }
+
     // Extract registry once for handlers that need backend-routed pane operations.
     // Clone the Arc to avoid holding the read lock across the entire dispatch.
     let registry = state.read().await.registry.clone();
@@ -3664,6 +4138,7 @@ async fn process_request(
         Request::Status { target } => handlers::status(state, target.as_ref()).await,
         Request::History { limit } => handlers::history(limit),
         Request::Ping => handlers::ping(state).await,
+        Request::Readiness => unreachable!("handled before dispatch"),
         Request::Titles => handlers::titles(state).await,
 
         // ─── Pane Handlers ──────────────────────────────────────────────────────
