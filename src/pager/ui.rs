@@ -81,7 +81,6 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .iter()
         .map(|(idx, session)| (*idx, session.row(now)))
         .collect();
-    let widths = RowWidths::measure(visible_rows.iter().map(|(idx, row)| (*idx, row)));
 
     // Keep cursor visible
     let scroll_offset = if cursor < app.sessions.scroll_offset {
@@ -93,10 +92,16 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     };
     app.sessions.scroll_offset = scroll_offset;
 
-    let items: Vec<ListItem> = visible_rows
+    let viewport_rows: Vec<(usize, &SessionRow)> = visible_rows
         .iter()
         .skip(scroll_offset)
         .take(list_height.max(1))
+        .map(|(idx, row)| (*idx, row))
+        .collect();
+    let widths = RowWidths::measure(viewport_rows.iter().map(|(idx, row)| (*idx, *row)));
+
+    let items: Vec<ListItem> = viewport_rows
+        .iter()
         .enumerate()
         .map(|(idx, (global_idx, row))| {
             let is_selected = idx + scroll_offset == app.sessions.cursor;
