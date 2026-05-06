@@ -15,6 +15,7 @@ use babel::babel_storage::{get_generated_title, get_metadata, init_db};
 use babel::core::BabelCore;
 use babel::kitty::discover_all_instances;
 use babel::service::state::TerminalInfo;
+use babel::session_row::{self, LiveSessionState, SessionRow, SessionRowInput, StateKind};
 use babel::utility::agent_discovery::{detect_agent_signals, resolve_pane_title, AgentPane};
 use babel::utility::claude_storage::{get_session_display_name, get_session_path, SessionInfo};
 use babel::ActivityState;
@@ -1372,7 +1373,7 @@ pub async fn cmd_ls_sessions(
     // Pass 3: print
     for (i, row) in rows.iter().enumerate() {
         let idx = i + 1;
-        let accent_c = closest_ansi256_from_hex(row.accent);
+        let accent_c = session_row::closest_ansi256_from_hex(row.accent);
         let running = row.is_running();
         let gap = if running {
             Style::new().underlined().apply_to(" ").to_string()
@@ -1383,7 +1384,7 @@ pub async fn cmd_ls_sessions(
         let harness_style = row_style(harness_style, running);
         let text_style = if row.bright { Style::new().color256(accent_c) } else { Style::new().dim() };
         let text_style = row_style(text_style, running);
-        let state_style = if row.bright { row.state_style() } else { Style::new().dim() };
+        let state_style = if row.bright { state_style(row.state_kind) } else { Style::new().dim() };
         let state_style = row_style(state_style, running);
         let row_dim = row_style(Style::new().dim(), running);
 
@@ -1475,114 +1476,25 @@ fn is_slash_command(text: &str) -> bool {
 }
 
 pub(super) fn sanitize_display(s: &str, max_chars: usize) -> String {
-    let clean = s.replace('\n', "↵").replace('\r', "");
-    if clean.chars().count() > max_chars {
-        let short: String = clean.chars().take(max_chars).collect();
-        format!("{}…", short)
-    } else {
-        clean
-    }
+    session_row::sanitize_display(s, max_chars)
 }
 
-fn relative_time(seconds_ago: i64) -> String {
-    if seconds_ago < 0 {
-        return "now".to_string();
-    }
-    if seconds_ago < 60 {
-        return format!("{}s", seconds_ago);
-    }
-    let minutes = seconds_ago / 60;
-    if minutes < 60 {
-        return format!("{}m", minutes);
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format!("{}h", hours);
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format!("{}d", days);
-    }
-    let months = days / 30;
-    format!("{}mo", months)
-}
-
-fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let hex = hex.strip_prefix('#')?;
-    if hex.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some((r, g, b))
-}
-
-fn closest_ansi256_from_hex(hex: &str) -> u8 {
-    let (r, g, b) = hex_to_rgb(hex).unwrap_or((102, 102, 102));
-    let ri = ((r as u16) * 5 / 255) as u8;
-    let gi = ((g as u16) * 5 / 255) as u8;
-    let bi = ((b as u16) * 5 / 255) as u8;
-    16 + 36 * ri + 6 * gi + bi
-}
-
-/// Precomputed display cells for one session row.
-struct SessionRow {
-    state_icon: &'static str,
-    state_kind: StateKind,
-    harness: String,
-    /// Filter category sigil: ◇ oneshot, / command-only, ⊞ subagent, ▪ hidden
-    filter_tag: &'static str,
-    workspace: String,
-    cwd: String,
-    time: String,
-    turns: String,
-    title: String,
-    last_prompt: String,
-    accent: &'static str,
-    bright: bool,
-    has_title: bool,
-}
-
-#[derive(Clone, Copy)]
-enum StateKind {
-    Idle,
-    Working,
-    ToolRunning,
-    Thinking,
-    PlanApproval,
-    AwaitingInput,
-    BackgroundTask,
-    Unknown,
-    NotRunning,
-}
-
-impl SessionRow {
-    fn state_style(&self) -> Style {
-        match self.state_kind {
-            StateKind::Idle => Style::new().dim(),
-            StateKind::Working => Style::new().yellow(),
-            StateKind::ToolRunning => Style::new().cyan().bold(),
-            StateKind::Thinking => Style::new().yellow(),
-            StateKind::PlanApproval => Style::new().magenta(),
-            StateKind::AwaitingInput => Style::new().green(),
-            StateKind::BackgroundTask => Style::new().magenta(),
-            StateKind::Unknown => Style::new().dim(),
-            StateKind::NotRunning => Style::new().dim(),
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        !matches!(self.state_kind, StateKind::NotRunning)
+fn state_style(state_kind: StateKind) -> Style {
+    match state_kind {
+        StateKind::Idle => Style::new().dim(),
+        StateKind::Working => Style::new().yellow(),
+        StateKind::ToolRunning => Style::new().cyan().bold(),
+        StateKind::Thinking => Style::new().yellow(),
+        StateKind::PlanApproval => Style::new().magenta(),
+        StateKind::AwaitingInput => Style::new().green(),
+        StateKind::BackgroundTask => Style::new().magenta(),
+        StateKind::Unknown => Style::new().dim(),
+        StateKind::NotRunning => Style::new().dim(),
     }
 }
 
 fn row_style(style: Style, running: bool) -> Style {
-    if running {
-        style.underlined()
-    } else {
-        style
-    }
+    if running { style.underlined() } else { style }
 }
 
 fn session_row(
@@ -1593,88 +1505,40 @@ fn session_row(
 ) -> SessionRow {
     use babel::babel_storage::get_metadata;
 
-    let accent = s.agent_kind.accent_color();
     let session_key = s.agent_kind.session_key(&s.native_id);
 
     let meta = get_metadata(conn, &session_key).ok().flatten();
     let live = live.and_then(|panes| panes.first());
-    let (state_icon, state_kind) = live_state_icon(live);
-
-    let cwd = s
-        .project_path
-        .as_deref()
-        .and_then(|p| {
-            let home = dirs::home_dir()?;
-            std::path::Path::new(p)
-                .strip_prefix(&home)
-                .ok()
-                .map(|rel| format!("~/{}", rel.display()))
-                .or_else(|| Some(p.to_string()))
-        })
-        .unwrap_or_default();
 
     // Check for babel-generated haiku title or user /rename (Claude)
     let session_key_str = &session_key;
     let generated = babel::babel_storage::get_generated_title(conn, session_key_str)
         .ok()
         .flatten();
-    let (title, has_title) = if let Some(ref gen) = generated {
-        (sanitize_display(gen, 40), true)
-    } else {
-        let raw = s.display_name.as_deref().unwrap_or("");
-        (sanitize_display(raw, 40), s.has_title)
-    };
-
-    let last_prompt = s
-        .last_prompt
-        .as_deref()
-        .map(|t| sanitize_display(t, 40))
-        .unwrap_or_default();
-
-    let turns = if s.turn_count > 0 {
-        format!("{}t", s.turn_count)
-    } else {
-        String::new()
-    };
-
-    let workspace = live
-        .and_then(|pane| pane.workspace)
-        .map(|ws| format!("{}", ws + 1)) // 0-indexed → 1-indexed
-        .unwrap_or_default();
-
-    let elapsed = now - s.last_seen_at;
-    let time = relative_time(elapsed);
 
     let is_hidden = meta.as_ref().map(|m| m.hidden).unwrap_or(false);
-    let filter_tag = if is_hidden {
-        "▪"
-    } else if !s.interactive {
-        "⊞"
-    } else if s.command_only {
-        "/"
-    } else if s.turn_count == 1 {
-        "◇"
-    } else {
-        " "
-    };
-
-    let bright = s.interactive && !is_hidden && !s.command_only && s.turn_count > 1;
-
-    SessionRow {
-        state_icon,
-        state_kind,
-        harness: s.agent_kind.slug().to_string(),
-        filter_tag,
-        workspace,
-        cwd,
-        time,
-        turns,
-        title,
-        last_prompt,
-        accent,
-        bright,
-        has_title,
-    }
+    session_row::session_row(
+        SessionRowInput {
+            agent_kind: s.agent_kind,
+            native_id: &s.native_id,
+            project_path: s.project_path.as_deref().map(std::path::Path::new),
+            display_name: s.display_name.as_deref(),
+            generated_title: generated.as_deref(),
+            last_prompt: s.last_prompt.as_deref(),
+            turn_count: s.turn_count,
+            last_seen_at: s.last_seen_at,
+            interactive: s.interactive,
+            command_only: s.command_only,
+            has_title: s.has_title,
+            hidden: is_hidden,
+            live: live.map(|pane| LiveSessionState {
+                workspace: pane.workspace,
+                hook_state: pane.hook_state,
+                activity_state: pane.activity_state,
+            }),
+        },
+        now,
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1714,35 +1578,6 @@ async fn live_session_index(core: &BabelCore) -> Result<HashMap<String, Vec<Live
         });
     }
     Ok(index)
-}
-
-fn live_state_icon(live: Option<&LiveSession>) -> (&'static str, StateKind) {
-    use babel::babel_storage::HookState;
-
-    let Some(live) = live else {
-        return (" ", StateKind::NotRunning);
-    };
-
-    match (live.hook_state, live.activity_state) {
-        (Some(HookState::Idle), _) => ("○", StateKind::Idle),
-        (Some(HookState::ToolRunning), _) => ("⚙", StateKind::ToolRunning),
-        (Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
-        (Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
-        (Some(HookState::Working), Some(ActivityState::PlanApproval)) => {
-            ("📋", StateKind::PlanApproval)
-        }
-        (Some(HookState::Working), Some(ActivityState::BackgroundTask)) => {
-            ("◐", StateKind::BackgroundTask)
-        }
-        (Some(HookState::Working), _) => ("●", StateKind::Working),
-        (None, Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
-        (None, Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
-        (None, Some(ActivityState::PlanApproval)) => ("📋", StateKind::PlanApproval),
-        (None, Some(ActivityState::AwaitingInput)) => ("◆", StateKind::AwaitingInput),
-        (None, Some(ActivityState::BackgroundTask)) => ("◐", StateKind::BackgroundTask),
-        (None, Some(ActivityState::Idle)) => ("○", StateKind::Idle),
-        (None, Some(ActivityState::Unknown)) | (None, None) => ("◌", StateKind::Unknown),
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

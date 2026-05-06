@@ -3,9 +3,10 @@
 //! Manages the same cross-harness session surface that `ls-sessions` prints,
 //! with pager-only cursor/search state layered on top.
 
+use crate::ActivityState;
 use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
-use crate::ActivityState;
+use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
 use std::path::PathBuf;
 
 /// Running status of a session
@@ -104,6 +105,39 @@ impl EnrichedSession {
         } else {
             " "
         }
+    }
+
+    pub fn row(&self, now: i64) -> SessionRow {
+        session_row::session_row(
+            SessionRowInput {
+                agent_kind: self.agent_kind,
+                native_id: &self.native_id,
+                project_path: self.project_path.as_deref(),
+                display_name: self.display_name.as_deref(),
+                generated_title: self.generated_title.as_deref(),
+                last_prompt: self.last_prompt.as_deref(),
+                turn_count: self.turn_count,
+                last_seen_at: self.last_seen_at,
+                interactive: self.interactive,
+                command_only: self.command_only,
+                has_title: self.has_title,
+                hidden: self.hidden,
+                live: match &self.running_status {
+                    RunningStatus::Inactive => None,
+                    RunningStatus::Active {
+                        workspace,
+                        hook_state,
+                        activity_state,
+                        ..
+                    } => Some(LiveSessionState {
+                        workspace: *workspace,
+                        hook_state: *hook_state,
+                        activity_state: Some(*activity_state),
+                    }),
+                },
+            },
+            now,
+        )
     }
 }
 

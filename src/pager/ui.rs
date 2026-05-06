@@ -8,10 +8,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use scrollparse::MessageKind;
 
-use crate::ActivityState;
+use crate::session_row::{self, SessionRow, StateKind};
 
 use super::app::{PaneFocus, ResumeApp};
-use super::session_list::{EnrichedSession, RunningStatus};
 
 /// Draw the pager UI
 pub fn draw(frame: &mut Frame, app: &ResumeApp) {
@@ -28,10 +27,10 @@ pub fn draw(frame: &mut Frame, app: &ResumeApp) {
         ..area
     };
 
-    // Split into left (40%) and right (60%) panels
+    // Keep the session list wide enough to preserve the `ls-sessions` row grammar.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .split(main_area);
 
     draw_session_list(frame, app, chunks[0]);
@@ -65,6 +64,12 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     let visible = app.sessions.visible_sessions();
     let list_height = inner.height as usize;
     let cursor = app.sessions.cursor;
+    let now = unix_now();
+    let visible_rows: Vec<(usize, SessionRow)> = visible
+        .iter()
+        .map(|(idx, session)| (*idx, session.row(now)))
+        .collect();
+    let widths = RowWidths::measure(visible_rows.iter().map(|(idx, row)| (*idx, row)));
 
     // Keep cursor visible
     let scroll_offset = if cursor < app.sessions.scroll_offset {
@@ -75,14 +80,14 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
         app.sessions.scroll_offset
     };
 
-    let items: Vec<ListItem> = visible
+    let items: Vec<ListItem> = visible_rows
         .iter()
         .skip(scroll_offset)
         .take(list_height.max(1))
         .enumerate()
-        .map(|(idx, (_, session))| {
+        .map(|(idx, (global_idx, row))| {
             let is_selected = idx + scroll_offset == app.sessions.cursor;
-            render_session_item(session, is_selected)
+            render_session_item(*global_idx, row, &widths, is_selected)
         })
         .collect();
 
@@ -107,106 +112,92 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     frame.render_stateful_widget(list, inner, list_state);
 }
 
-/// Render a single session item
-fn render_session_item(session: &EnrichedSession, is_selected: bool) -> ListItem<'static> {
-    let accent = closest_ansi256_from_hex(session.agent_kind.accent_color());
-    let bright =
-        session.interactive && !session.hidden && !session.command_only && session.turn_count > 1;
-    let harness_style = if bright {
+/// Render a single session item with the same cell order as `ls-sessions`.
+fn render_session_item(
+    idx: usize,
+    row: &SessionRow,
+    widths: &RowWidths,
+    is_selected: bool,
+) -> ListItem<'static> {
+    let accent = session_row::closest_ansi256_from_hex(row.accent);
+    let running = row.is_running();
+    let gap = row_style(Style::default(), running);
+    let harness_style = if row.bright {
         Style::default().fg(Color::Indexed(accent))
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let text_style = if bright {
+    let harness_style = row_style(harness_style, running);
+    let text_style = if row.bright {
         Style::default().fg(Color::Indexed(accent))
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let state_style = state_style(&session.running_status, bright);
-
-    // Selection indicator
-    let sel_char = if is_selected { '▸' } else { ' ' };
-
-    let marker = if let Some(icon) = &session.custom_icon {
-        icon.clone()
-    } else if session.unread {
-        "●".to_string()
+    let text_style = row_style(text_style, running);
+    let state_style = if row.bright {
+        state_style(row.state_kind)
     } else {
-        " ".to_string()
+        Style::default().fg(Color::DarkGray)
     };
+    let state_style = row_style(state_style, running);
+    let row_dim = row_style(Style::default().fg(Color::DarkGray), running);
+    let idx_style = row_style(
+        if is_selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        },
+        running,
+    );
 
-    let workspace = match &session.running_status {
-        RunningStatus::Active {
-            workspace: Some(ws),
-            ..
-        } => format!("{}", ws + 1),
-        _ => String::new(),
-    };
-
-    let cwd = session
-        .project_path
-        .as_ref()
-        .map(|p| abbreviate_path(p, 34))
-        .unwrap_or_default();
-    let title = sanitize_display(&session.title(), 42);
-    let last_prompt = session
-        .last_prompt
-        .as_deref()
-        .map(|p| sanitize_display(p, 42))
-        .unwrap_or_default();
-    let turns = if session.turn_count > 0 {
-        format!("{}t", session.turn_count)
-    } else {
-        String::new()
-    };
-    let time = format_relative_time(session.last_seen_at);
-    let title_style = if session.has_real_title() && bright {
+    let title_style = if row.has_title && row.bright {
         Style::default()
             .fg(Color::Indexed(accent))
             .add_modifier(Modifier::BOLD | Modifier::ITALIC)
-    } else if session.has_real_title() {
+    } else if row.has_title {
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC)
+    } else if row.bright {
+        Style::default().fg(Color::Indexed(accent))
     } else {
-        text_style
+        Style::default().fg(Color::DarkGray)
     };
+    let title_style = row_style(title_style, running);
 
-    let line1 = Line::from(vec![
-        Span::raw(format!("{}", sel_char)),
-        Span::styled(format!("{} ", marker), Style::default().fg(Color::Yellow)),
-        Span::styled(format!("{:<8}", session.agent_kind.slug()), harness_style),
-        Span::raw(" "),
+    let line = Line::from(vec![
+        Span::styled(" ", gap),
+        Span::styled(row.state_icon, state_style),
+        Span::styled(" ", gap),
         Span::styled(
-            format!("{:<2}", session.running_status.indicator()),
-            state_style,
+            format!("{:<w$}", row.harness, w = widths.harness),
+            harness_style,
         ),
-        Span::raw(" "),
+        Span::styled("  ", gap),
         Span::styled(
-            format!("{:>2}", workspace),
-            Style::default().fg(Color::DarkGray),
+            format!("{:>w$}", row.workspace, w = widths.workspace),
+            row_dim,
         ),
-        Span::raw(" "),
-        Span::styled(format!("{:<34}", cwd), Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
-        Span::styled(session.filter_tag(), Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
-        Span::styled(format!("{:>4}", time), Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
+        Span::styled("  ", gap),
+        Span::styled(format!("{:<w$}", row.cwd, w = widths.cwd), row_dim),
+        Span::styled("  ", gap),
+        Span::styled(row.filter_tag, row_dim),
+        Span::styled(" ", gap),
+        Span::styled(format!("{:>w$}", row.time, w = widths.time), row_dim),
+        Span::styled("  ", gap),
+        Span::styled(format!("{:>w$}", row.turns, w = widths.turns), row_dim),
+        Span::styled("  ", gap),
+        Span::styled(format!("{:>w$}", idx + 1, w = widths.index), idx_style),
+        Span::styled("  ", gap),
+        Span::styled(format!("{:<w$}", row.title, w = widths.title), title_style),
+        Span::styled("  ", gap),
         Span::styled(
-            format!("{:>5}", turns),
-            Style::default().fg(Color::DarkGray),
+            format!("{:<w$}", row.last_prompt, w = widths.prompt),
+            text_style,
         ),
     ]);
 
-    let line2 = Line::from(vec![
-        Span::raw("   "),
-        Span::styled(title, title_style),
-        Span::raw("  "),
-        Span::styled(last_prompt, text_style),
-    ]);
-
-    ListItem::new(vec![line1, line2])
+    ListItem::new(line)
 }
 
 /// Draw the transcript preview panel
@@ -328,53 +319,43 @@ fn draw_status_bar(frame: &mut Frame, app: &ResumeApp, area: Rect) {
 
 // === Helper functions ===
 
-/// Format unix seconds as relative time (same compact shape as ls-sessions).
-fn format_relative_time(last_seen_at: i64) -> String {
-    let now = std::time::SystemTime::now()
+#[derive(Default)]
+struct RowWidths {
+    index: usize,
+    harness: usize,
+    workspace: usize,
+    cwd: usize,
+    time: usize,
+    turns: usize,
+    title: usize,
+    prompt: usize,
+}
+
+impl RowWidths {
+    fn measure<'a>(rows: impl Iterator<Item = (usize, &'a SessionRow)>) -> Self {
+        let mut widths = Self::default();
+
+        for (idx, row) in rows {
+            widths.index = widths.index.max(format!("{}", idx + 1).len());
+            widths.harness = widths.harness.max(row.harness.len());
+            widths.workspace = widths.workspace.max(row.workspace.len());
+            widths.cwd = widths.cwd.max(row.cwd.len());
+            widths.time = widths.time.max(row.time.len());
+            widths.turns = widths.turns.max(row.turns.len());
+            widths.title = widths.title.max(row.title.chars().count());
+            widths.prompt = widths.prompt.max(row.last_prompt.chars().count());
+        }
+
+        widths.index = widths.index.max(1);
+        widths
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
-    let secs = now - last_seen_at;
-    if secs < 0 {
-        return "now".to_string();
-    }
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3_600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3_600)
-    } else if secs < 2_592_000 {
-        format!("{}d", secs / 86_400)
-    } else {
-        format!("{}mo", secs / 2_592_000)
-    }
-}
-
-/// Abbreviate a path for display
-fn abbreviate_path(path: &std::path::Path, max_len: usize) -> String {
-    let path_str = path.to_string_lossy();
-
-    // Replace home dir with ~
-    if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        if path_str.starts_with(home_str.as_ref()) {
-            let shortened = format!("~{}", &path_str[home_str.len()..]);
-            return truncate_str(&shortened, max_len).to_string();
-        }
-    }
-
-    truncate_str(&path_str, max_len).to_string()
-}
-
-fn sanitize_display(s: &str, max_chars: usize) -> String {
-    let clean = s.replace('\n', "↵").replace('\r', "");
-    if clean.chars().count() > max_chars {
-        let short: String = clean.chars().take(max_chars).collect();
-        format!("{}…", short)
-    } else {
-        clean
-    }
+        .as_secs() as i64
 }
 
 /// Truncate a string to max length, adding ellipsis
@@ -387,48 +368,25 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-fn closest_ansi256_from_hex(hex: &str) -> u8 {
-    let Some(hex) = hex.strip_prefix('#') else {
-        return 8;
-    };
-    if hex.len() != 6 {
-        return 8;
+fn row_style(style: Style, running: bool) -> Style {
+    if running {
+        style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(102);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(102);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(102);
-    let ri = ((r as u16) * 5 / 255) as u8;
-    let gi = ((g as u16) * 5 / 255) as u8;
-    let bi = ((b as u16) * 5 / 255) as u8;
-    16 + 36 * ri + 6 * gi + bi
 }
 
-fn state_style(status: &RunningStatus, bright: bool) -> Style {
-    if !bright {
-        return Style::default().fg(Color::DarkGray);
-    }
-
-    match status {
-        RunningStatus::Inactive => Style::default().fg(Color::DarkGray),
-        RunningStatus::Active {
-            hook_state,
-            activity_state,
-            ..
-        } => match (*hook_state, activity_state) {
-            (Some(crate::babel_storage::HookState::ToolRunning), _)
-            | (Some(crate::babel_storage::HookState::Working), ActivityState::ToolUse)
-            | (None, ActivityState::ToolUse) => Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            (Some(crate::babel_storage::HookState::Working), ActivityState::PlanApproval)
-            | (Some(crate::babel_storage::HookState::Working), ActivityState::BackgroundTask)
-            | (None, ActivityState::PlanApproval)
-            | (None, ActivityState::BackgroundTask) => Style::default().fg(Color::Magenta),
-            (None, ActivityState::AwaitingInput) => Style::default().fg(Color::Green),
-            (Some(crate::babel_storage::HookState::Idle), _)
-            | (None, ActivityState::Idle)
-            | (None, ActivityState::Unknown) => Style::default().fg(Color::DarkGray),
-            _ => Style::default().fg(Color::Yellow),
-        },
+fn state_style(state_kind: StateKind) -> Style {
+    match state_kind {
+        StateKind::Idle => Style::default().fg(Color::DarkGray),
+        StateKind::Working => Style::default().fg(Color::Yellow),
+        StateKind::ToolRunning => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        StateKind::Thinking => Style::default().fg(Color::Yellow),
+        StateKind::PlanApproval => Style::default().fg(Color::Magenta),
+        StateKind::AwaitingInput => Style::default().fg(Color::Green),
+        StateKind::BackgroundTask => Style::default().fg(Color::Magenta),
+        StateKind::Unknown | StateKind::NotRunning => Style::default().fg(Color::DarkGray),
     }
 }
