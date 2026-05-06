@@ -65,11 +65,13 @@
 //! queries kitty and ~/.claude directly. Results are cached for the lifetime of the
 //! BabelCore instance to avoid redundant queries within a single command execution
 
+pub mod backend;
 pub mod agent_kind;
 pub mod babel_storage;
 pub mod config;
 pub mod core;
 pub mod daemon;
+pub mod desktop;
 pub mod events;
 pub mod file_index;
 pub mod fingerprint;
@@ -81,6 +83,7 @@ pub mod kitty;
 pub mod layout;
 pub mod logging;
 pub mod model;
+pub mod native_sessions;
 pub mod pager;
 pub mod paint;
 #[cfg(feature = "gtk-render")]
