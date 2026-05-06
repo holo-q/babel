@@ -232,6 +232,32 @@ impl SessionListState {
         visible.get(self.cursor).map(|(_, s)| *s)
     }
 
+    /// Toggle the selected session's hidden bit in memory.
+    ///
+    /// In hidden-display mode this flips the row between dimmed/regular. In
+    /// normal mode, hiding the selected row removes it from the visible list.
+    pub fn toggle_selected_hidden(&mut self) -> Option<(String, bool)> {
+        let selected_index = self.selected_index()?;
+        let session = self.sessions.get_mut(selected_index)?;
+        session.hidden = !session.hidden;
+        let session_key = session.session_key.clone();
+        let hidden = session.hidden;
+        self.clamp_cursor();
+        Some((session_key, hidden))
+    }
+
+    /// Set a session's hidden bit in memory by stable session key.
+    pub fn set_hidden_by_key(&mut self, session_key: &str, hidden: bool) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.session_key == session_key)
+        {
+            session.hidden = hidden;
+        }
+        self.clamp_cursor();
+    }
+
     /// Move cursor down
     pub fn cursor_down(&mut self) {
         let count = self.visible_sessions().len();
@@ -302,5 +328,10 @@ impl SessionListState {
         if self.cursor >= count {
             self.cursor = count.saturating_sub(1);
         }
+    }
+
+    fn selected_index(&self) -> Option<usize> {
+        let visible = self.visible_sessions();
+        visible.get(self.cursor).map(|(idx, _)| *idx)
     }
 }

@@ -48,6 +48,7 @@ pub enum ResumeAction {
     Quit,
     Launch(ResumeSelection),
     Refresh,
+    SetHidden { session_key: String, hidden: bool },
 }
 
 enum TranscriptLoadResult {
@@ -79,6 +80,7 @@ struct TranscriptTarget {
 pub trait ResumeSessionSource {
     async fn refresh_sessions(&mut self, force: bool) -> anyhow::Result<Vec<EnrichedSession>>;
     async fn launch_resume(&mut self, selection: &ResumeSelection) -> anyhow::Result<String>;
+    async fn set_hidden(&mut self, session_key: &str, hidden: bool) -> anyhow::Result<()>;
 
     fn auto_refresh_enabled(&self) -> bool {
         false
@@ -200,6 +202,19 @@ impl ResumeApp {
             KeyCode::Tab => {
                 self.sessions.toggle_show_all();
                 ResumeAction::None
+            }
+
+            // Mark/unmark selected session as hidden
+            KeyCode::Char(ch)
+                if ch == 'H' || (ch == 'h' && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+            {
+                let Some((session_key, hidden)) = self.sessions.toggle_selected_hidden() else {
+                    return ResumeAction::None;
+                };
+                ResumeAction::SetHidden {
+                    session_key,
+                    hidden,
+                }
             }
 
             // Toggle hidden sessions
@@ -370,6 +385,22 @@ where
                             &mut transcript_seq,
                         );
                     }
+                    ResumeAction::SetHidden {
+                        session_key,
+                        hidden,
+                    } => match source.set_hidden(&session_key, hidden).await {
+                        Ok(()) => {
+                            app.status_message = if hidden {
+                                "hid session".to_string()
+                            } else {
+                                "unhid session".to_string()
+                            };
+                        }
+                        Err(e) => {
+                            app.sessions.set_hidden_by_key(&session_key, !hidden);
+                            app.status_message = format!("hide failed: {e}");
+                        }
+                    },
                 }
                 sync_selected_transcript_target(
                     &mut app,

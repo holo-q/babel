@@ -248,6 +248,11 @@ impl ResumeSessionSource for CliResumeSessionSource<'_> {
         launch_harness_resume(selection).await
     }
 
+    async fn set_hidden(&mut self, session_key: &str, hidden: bool) -> Result<()> {
+        let conn = babel::babel_storage::init_db()?;
+        babel::babel_storage::set_hidden(&conn, session_key, hidden)
+    }
+
     fn auto_refresh_enabled(&self) -> bool {
         self.core.is_connected()
     }
