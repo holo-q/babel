@@ -7,8 +7,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::backend::BackendRegistry;
 use crate::events::EventPublisher;
 use crate::fingerprint::SessionFingerprint;
 use crate::kitty::PaneAddr;
@@ -203,16 +205,19 @@ pub struct BabelState {
     pub socket_status: HashMap<String, SocketStatus>,
     pub workspace_cache: HashMap<u64, i32>,
     pub workspace_cache_dirty: bool,
+    /// Multi-backend terminal registry. Routes pane operations to the correct
+    /// backend (kitty, tmux, etc.) by connection string.
+    pub registry: Arc<BackendRegistry>,
 }
 
 impl Default for BabelState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(BackendRegistry::new()))
     }
 }
 
 impl BabelState {
-    pub fn new() -> Self {
+    pub fn new(registry: Arc<BackendRegistry>) -> Self {
         let (paint_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             panes: HashMap::new(),
@@ -236,6 +241,7 @@ impl BabelState {
             socket_status: HashMap::new(),
             workspace_cache: HashMap::new(),
             workspace_cache_dirty: true,
+            registry,
         }
     }
 }

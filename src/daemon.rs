@@ -1817,37 +1817,54 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
         scrollparse = enable_scrollparse
     );
 
-    // ─── Kitty Config Validation ────────────────────────────────────────────────
-    // Babel requires kitty with remote control enabled. Validate config on startup
-    // and abort with helpful error message if misconfigured.
-    let kitty_config = crate::kitty::validate_kitty_config()
-        .map_err(|e| anyhow::anyhow!("Kitty config validation failed:\n{}", e))?;
+    // ─── Backend Registry ────────────────────────────────────────────────────────
+    // Multi-backend: register all available terminal backends. The registry
+    // discovers kitty sockets + tmux servers concurrently on each refresh cycle.
+    let mut registry = crate::backend::BackendRegistry::new();
 
-    checkpoint!(
-        "kitty_validated",
-        config = kitty_config.config_path.display().to_string(),
-        socket_base = format!("{:?}", kitty_config.listen_on_base)
-    );
+    // Kitty backend: validate config and register if available
+    match crate::backend::kitty::validate_kitty_config() {
+        Ok(kitty_config) => {
+            checkpoint!(
+                "kitty_validated",
+                config = kitty_config.config_path.display().to_string(),
+                socket_base = format!("{:?}", kitty_config.listen_on_base)
+            );
+            registry.register(Arc::new(crate::backend::kitty::KittyBackend));
 
-    // Log socket topology - helps diagnose multi-instance issues
-    let sockets = crate::kitty::find_all_sockets();
-    let main_socket = crate::kitty::main_socket();
-    let orphan_count = sockets.len().saturating_sub(1);
+            // Log socket topology — helps diagnose multi-instance issues
+            let sockets = crate::backend::kitty::find_all_sockets();
+            let main_socket = crate::backend::kitty::main_socket();
+            let orphan_count = sockets.len().saturating_sub(1);
 
-    if orphan_count > 0 {
-        trace_error!(
-            "multiple kitty instances detected",
-            main = ?main_socket,
-            orphans = orphan_count
-        );
-    } else if let Some(ref main) = main_socket {
-        checkpoint!("kitty_socket", socket = main.as_str());
-    } else {
-        trace_error!("no kitty sockets found");
+            if orphan_count > 0 {
+                trace_error!(
+                    "multiple kitty instances detected",
+                    main = ?main_socket,
+                    orphans = orphan_count
+                );
+            } else if let Some(ref main) = main_socket {
+                checkpoint!("kitty_socket", socket = main.as_str());
+            } else {
+                trace_error!("no kitty sockets found");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Kitty not available: {e}");
+        }
     }
 
-    // Initialize state
-    let state = Arc::new(RwLock::new(BabelState::new()));
+    // TODO: Register TmuxBackend when implemented
+    // if tmux is available, register it alongside kitty
+
+    if registry.backends().is_empty() {
+        anyhow::bail!("No terminal backends available. Kitty remote control must be enabled, or tmux must be running.");
+    }
+
+    let registry = Arc::new(registry);
+
+    // Initialize state with the backend registry
+    let state = Arc::new(RwLock::new(BabelState::new(Arc::clone(&registry))));
 
     // Initialize workspace summarizer
     let summarizer = Arc::new(crate::summarizer::WorkspaceSummarizer::new());

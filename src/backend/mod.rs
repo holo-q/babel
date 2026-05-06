@@ -340,6 +340,59 @@ impl BackendRegistry {
     pub fn backends(&self) -> &[Arc<dyn TerminalBackend>] {
         &self.backends
     }
+
+    // === PaneAddr-routed convenience methods ===
+    //
+    // These let daemon/core code call registry.focus(addr) instead of manually
+    // resolving the backend and passing connection + id. The addr.socket field
+    // is used as the connection string (will become addr.connection after rename).
+
+    fn resolve(&self, addr: &crate::model::PaneAddr) -> Result<Arc<dyn TerminalBackend>> {
+        self.backend_for(&addr.socket)
+            .ok_or_else(|| anyhow::anyhow!("no backend for connection {}", addr.socket))
+    }
+
+    pub async fn focus_pane(&self, addr: &crate::model::PaneAddr) -> Result<()> {
+        self.resolve(addr)?.focus_pane(&addr.socket, addr.id).await
+    }
+
+    pub async fn send_text(&self, addr: &crate::model::PaneAddr, text: &str) -> Result<()> {
+        self.resolve(addr)?.send_text(&addr.socket, addr.id, text).await
+    }
+
+    pub async fn get_scrollback(&self, addr: &crate::model::PaneAddr) -> Result<String> {
+        self.resolve(addr)?.get_scrollback(&addr.socket, addr.id).await
+    }
+
+    pub async fn get_recent_scrollback(&self, addr: &crate::model::PaneAddr, lines: usize) -> Result<String> {
+        self.resolve(addr)?.get_recent_scrollback(&addr.socket, addr.id, lines).await
+    }
+
+    pub async fn close_pane(&self, addr: &crate::model::PaneAddr) -> Result<()> {
+        self.resolve(addr)?.close_pane(&addr.socket, addr.id).await
+    }
+
+    pub async fn set_meta(&self, addr: &crate::model::PaneAddr, key: &str, val: &str) -> Result<()> {
+        self.resolve(addr)?.set_meta(&addr.socket, addr.id, key, val).await
+    }
+
+    pub async fn set_title(&self, addr: &crate::model::PaneAddr, title: &str) -> Result<()> {
+        self.resolve(addr)?.set_title(&addr.socket, addr.id, title).await
+    }
+
+    pub async fn set_border_color(&self, addr: &crate::model::PaneAddr, active: &str, inactive: &str) -> Result<()> {
+        self.resolve(addr)?.set_border_color(&addr.socket, addr.id, active, inactive).await
+    }
+
+    pub async fn reset_border_color(&self, addr: &crate::model::PaneAddr) -> Result<()> {
+        self.resolve(addr)?.reset_border_color(&addr.socket, addr.id).await
+    }
+
+    pub async fn list_panes_raw(&self, conn: &str) -> Result<String> {
+        let backend = self.backend_for(conn)
+            .ok_or_else(|| anyhow::anyhow!("no backend for connection {}", conn))?;
+        backend.list_panes_raw(conn).await
+    }
 }
 
 impl Default for BackendRegistry {

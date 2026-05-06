@@ -111,7 +111,10 @@ impl BabelCore {
             }
         } else {
             debug!("daemon not available, initializing local state");
-            let mut state = BabelState::new();
+            // Ephemeral mode: construct a registry with kitty backend for direct queries
+            let mut registry = crate::backend::BackendRegistry::new();
+            registry.register(std::sync::Arc::new(crate::backend::kitty::KittyBackend));
+            let mut state = BabelState::new(std::sync::Arc::new(registry));
 
             let refresh_result = if let Some(duration) = refresh_timeout {
                 match tokio::time::timeout(duration, state.refresh_panes(skip_activity_fetch)).await
@@ -152,7 +155,6 @@ impl BabelCore {
     pub fn is_connected(&self) -> bool {
         matches!(self.mode, CoreMode::Connected)
     }
-
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Query Operations (read-only)
