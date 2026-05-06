@@ -16,7 +16,7 @@ use super::app::{PaneFocus, ResumeApp};
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
 
 /// Draw the pager UI
-pub fn draw(frame: &mut Frame, app: &ResumeApp) {
+pub fn draw(frame: &mut Frame, app: &mut ResumeApp) {
     let area = frame.area();
 
     // Reserve bottom row for status bar
@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, app: &ResumeApp) {
 }
 
 /// Draw the session list panel
-fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
+fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let filter_label = if app.sessions.show_all { "all" } else { "cwd" };
     let title = if app.is_searching {
         format!("Sessions [{}] /{}", filter_label, app.search_buffer)
@@ -91,6 +91,7 @@ fn draw_session_list(frame: &mut Frame, app: &ResumeApp, area: Rect) {
     } else {
         app.sessions.scroll_offset
     };
+    app.sessions.scroll_offset = scroll_offset;
 
     let items: Vec<ListItem> = visible_rows
         .iter()

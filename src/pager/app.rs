@@ -352,7 +352,7 @@ where
     // Event loop
     loop {
         // Draw UI
-        terminal.draw(|f| super::ui::draw(f, &app))?;
+        terminal.draw(|f| super::ui::draw(f, &mut app))?;
 
         // Poll for events
         if event::poll(std::time::Duration::from_millis(100))? {
