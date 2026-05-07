@@ -11,13 +11,56 @@ use serde::{Deserialize, Serialize};
 pub struct BabelConfig {
     /// Title policy configuration for generating conversation titles
     pub title_policy: TitlePolicyConfig,
+    /// Launch configuration — how babel opens new agent sessions
+    pub launch: LaunchConfig,
 }
 
 impl Default for BabelConfig {
     fn default() -> Self {
         Self {
             title_policy: TitlePolicyConfig::default(),
+            launch: LaunchConfig::default(),
         }
+    }
+}
+
+/// Configuration for launching new agent sessions (resume, fork, fire).
+///
+/// By default, babel uses the detected backend (kitty/tmux/zellij) to open
+/// panes natively. Set `command` to override with a custom shell command.
+///
+/// The command template supports these placeholders:
+/// - `{cmd}`  — the full agent command (e.g., `claude --resume abc123`)
+/// - `{cwd}`  — the working directory for the session
+/// - `{args}` — just the arguments (without the binary name)
+///
+/// Examples:
+/// ```toml
+/// [launch]
+/// # Use tmux to open a new window
+/// command = "tmux new-window -c {cwd} {cmd}"
+///
+/// # Use zellij to open a new pane
+/// command = "zellij action new-pane --cwd {cwd} -- {cmd}"
+///
+/// # Use kitty to open a new OS window
+/// command = "kitty --directory {cwd} {cmd}"
+///
+/// # Use a custom terminal
+/// command = "alacritty --working-directory {cwd} -e {cmd}"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LaunchConfig {
+    /// Custom launch command template. When set, overrides the backend's
+    /// native `launch_pane()`. Placeholders: `{cmd}`, `{cwd}`, `{args}`.
+    /// When unset (default), uses the detected backend.
+    pub command: Option<String>,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self { command: None }
     }
 }
 

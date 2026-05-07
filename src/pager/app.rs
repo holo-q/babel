@@ -1000,8 +1000,7 @@ pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Resul
         cmd = parts.join(" ")
     );
 
-    let (backend, conn) = crate::backend::detect_current_backend()?;
-    let launched = backend.launch_pane(&conn, &part_refs, &cwd).await?;
+    let launched = launch_command(&parts, &cwd).await?;
 
     if let Some(platform_window_id) = launched.platform_window_id {
         let target_workspace = crate::babel_storage::init_db()
@@ -1030,6 +1029,56 @@ pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Resul
         selection.agent_kind.slug(),
         short_id
     ))
+}
+
+/// Launch a command in a new terminal pane.
+///
+/// Checks `[launch].command` in babel.toml first. If set, expands the template
+/// and runs it as a shell command. Otherwise falls back to the detected backend's
+/// native `launch_pane()`.
+///
+/// Template placeholders:
+/// - `{cmd}` — full command string (e.g., "claude --resume abc123")
+/// - `{cwd}` — working directory path
+/// - `{args}` — arguments only (without the binary name)
+async fn launch_command(
+    parts: &[String],
+    cwd: &std::path::Path,
+) -> anyhow::Result<crate::backend::LaunchedPane> {
+    let config = crate::config::load_config().unwrap_or_default();
+
+    if let Some(template) = &config.launch.command {
+        let cmd_str = parts.join(" ");
+        let args_str = parts[1..].join(" ");
+        let cwd_str = cwd.to_string_lossy();
+
+        let expanded = template
+            .replace("{cmd}", &cmd_str)
+            .replace("{cwd}", &cwd_str)
+            .replace("{args}", &args_str);
+
+        vtr::boundary!("launch", "custom", cmd = expanded.as_str());
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &expanded])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("custom launch command failed: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("launch command failed: {stderr}");
+        }
+
+        Ok(crate::backend::LaunchedPane {
+            pane_id: 0,
+            platform_window_id: None,
+        })
+    } else {
+        let part_refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let (backend, conn) = crate::backend::detect_current_backend()?;
+        backend.launch_pane(&conn, &part_refs, cwd).await
+    }
 }
 
 fn persist_display_options_if_dirty(app: &mut ResumeApp) {
