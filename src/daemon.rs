@@ -345,7 +345,23 @@ impl BabelState {
                 } else {
                     0.0
                 });
-        let ring_color = has_unread_ring.then(|| window.agent_kind.accent_color().to_string());
+        // Semantic ring states: compaction overrides the ring appearance with a
+        // cool cyan outline and a sustained minimum intensity so the user sees
+        // "this pane is processing context" at a glance.
+        let is_compacting = self.pane_compacting.contains(addr);
+        let ring_color = if is_compacting {
+            Some("#40c0f0".to_string())
+        } else if has_unread_ring {
+            Some(window.agent_kind.accent_color().to_string())
+        } else {
+            None
+        };
+        let ring_intensity = if is_compacting {
+            ring_intensity.max(0.5)
+        } else {
+            ring_intensity
+        };
+        let has_outline = is_compacting;
         let event = PaintEvent::Window(IndicatorEvent::Set {
             id: Self::paint_pane_id(addr),
             color: color.to_string(),
@@ -353,7 +369,7 @@ impl BabelState {
             x_pos,
             ring_intensity,
             ring_color,
-            has_outline: false,
+            has_outline,
             scale: 1.0,
         });
         self.publish_paint(event);
@@ -1175,6 +1191,8 @@ impl BabelState {
         self.pane_ring
             .retain(|addr, _| new_windows.contains_key(addr));
         self.pane_unread
+            .retain(|addr| new_windows.contains_key(addr));
+        self.pane_compacting
             .retain(|addr| new_windows.contains_key(addr));
 
         self.panes = new_windows;
@@ -2440,11 +2458,19 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
             // Collect addrs to update — split read from emit to satisfy the
             // borrow checker (emit_pane_paint is &self, but mutating
             // pane_ring needs &mut).
+            // Snapshot compacting addrs before mutable iteration on pane_ring
+            // to avoid overlapping borrows on BabelState fields.
+            let compacting: HashSet<PaneAddr> = s.pane_compacting.clone();
             let addrs_to_repaint: Vec<PaneAddr> = s
                 .pane_ring
                 .iter_mut()
                 .filter_map(|(addr, ring)| {
                     if *ring <= 0.0 {
+                        return None;
+                    }
+                    // Sustained ring states: don't decay while compacting —
+                    // the ring holds steady until post-compact clears it.
+                    if compacting.contains(addr) {
                         return None;
                     }
                     let prev = *ring;
@@ -4037,6 +4063,20 @@ mod handlers {
                         trigger: crate::events::PulseTrigger::HookLifecycle,
                     });
                 s.bump_ring_and_emit(&addr, pulse_intensity as f64);
+            }
+
+            // Track compaction bookends for sustained ring state.
+            // pre-compact → cyan outline ring held until post-compact clears it.
+            match hook_type {
+                "pre-compact" => {
+                    s.pane_compacting.insert(addr.clone());
+                    s.emit_pane_paint(&addr);
+                }
+                "post-compact" => {
+                    s.pane_compacting.remove(&addr);
+                    s.emit_pane_paint(&addr);
+                }
+                _ => {}
             }
 
             Response::Ok {

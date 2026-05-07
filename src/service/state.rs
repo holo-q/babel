@@ -18,6 +18,54 @@ use crate::model::PaneActivity;
 use crate::paint::PaintEvent;
 use crate::utility::agent_discovery::AgentPane;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonReadinessState {
+    Warming,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DaemonWarmupOperation {
+    pub name: String,
+    pub complete: bool,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DaemonReadiness {
+    pub state: DaemonReadinessState,
+    pub uptime_secs: u64,
+    pub operations: Vec<DaemonWarmupOperation>,
+    pub detail: Option<String>,
+}
+
+pub fn default_daemon_warmup_operations() -> Vec<DaemonWarmupOperation> {
+    vec![
+        DaemonWarmupOperation {
+            name: "summary_index".to_string(),
+            complete: false,
+            detail: None,
+        },
+        DaemonWarmupOperation {
+            name: "fingerprint_index".to_string(),
+            complete: false,
+            detail: None,
+        },
+        DaemonWarmupOperation {
+            name: "pane_refresh".to_string(),
+            complete: false,
+            detail: None,
+        },
+        DaemonWarmupOperation {
+            name: "hook_reconcile".to_string(),
+            complete: false,
+            detail: None,
+        },
+    ]
+}
+
 /// Summary entry for fast title→session matching.
 ///
 /// Fields are crate-visible because the daemon's `match_title_to_session` and
@@ -200,11 +248,17 @@ pub struct BabelState {
     pub paint_publisher: tokio::sync::broadcast::Sender<PaintEvent>,
     pub pane_ring: HashMap<PaneAddr, f64>,
     pub pane_unread: HashSet<PaneAddr>,
+    /// Panes currently in compaction phase (pre-compact received, post-compact
+    /// not yet). Drives sustained ring state: cyan ring, outline on, no decay.
+    pub pane_compacting: HashSet<PaneAddr>,
     pub workspace_awaiting_since: HashMap<i32, Instant>,
     pub workspace_titles: HashMap<i32, String>,
     pub socket_status: HashMap<String, SocketStatus>,
     pub workspace_cache: HashMap<u64, i32>,
     pub workspace_cache_dirty: bool,
+    pub daemon_ready: bool,
+    pub daemon_warmup_failed: Option<String>,
+    pub daemon_warmup_operations: Vec<DaemonWarmupOperation>,
     /// Multi-backend terminal registry. Routes pane operations to the correct
     /// backend (kitty, tmux, etc.) by connection string.
     pub registry: Arc<BackendRegistry>,
@@ -236,12 +290,54 @@ impl BabelState {
             paint_publisher: paint_tx,
             pane_ring: HashMap::new(),
             pane_unread: HashSet::new(),
+            pane_compacting: HashSet::new(),
             workspace_awaiting_since: HashMap::new(),
             workspace_titles: HashMap::new(),
             socket_status: HashMap::new(),
             workspace_cache: HashMap::new(),
             workspace_cache_dirty: true,
+            daemon_ready: false,
+            daemon_warmup_failed: None,
+            daemon_warmup_operations: default_daemon_warmup_operations(),
             registry,
+        }
+    }
+
+    pub fn complete_warmup_operation(&mut self, name: &str, detail: Option<String>) {
+        if let Some(operation) = self
+            .daemon_warmup_operations
+            .iter_mut()
+            .find(|operation| operation.name == name)
+        {
+            operation.complete = true;
+            operation.detail = detail;
+        }
+    }
+
+    pub fn mark_daemon_ready(&mut self) {
+        self.daemon_ready = true;
+        self.daemon_warmup_failed = None;
+    }
+
+    pub fn mark_daemon_failed(&mut self, message: String) {
+        self.daemon_ready = false;
+        self.daemon_warmup_failed = Some(message);
+    }
+
+    pub fn daemon_readiness(&self) -> DaemonReadiness {
+        let state = if self.daemon_warmup_failed.is_some() {
+            DaemonReadinessState::Failed
+        } else if self.daemon_ready {
+            DaemonReadinessState::Ready
+        } else {
+            DaemonReadinessState::Warming
+        };
+
+        DaemonReadiness {
+            state,
+            uptime_secs: self.start_time.elapsed().as_secs(),
+            operations: self.daemon_warmup_operations.clone(),
+            detail: self.daemon_warmup_failed.clone(),
         }
     }
 }
