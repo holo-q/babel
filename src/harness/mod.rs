@@ -14,8 +14,7 @@ mod aider;
 mod amp;
 #[path = "antigravity/spec.rs"]
 mod antigravity;
-#[path = "claude/spec.rs"]
-mod claude;
+pub(crate) mod claude;
 #[path = "cline/spec.rs"]
 mod cline;
 pub(crate) mod codex;
@@ -43,7 +42,7 @@ mod qwen_code;
 mod roo_code;
 
 pub const HARNESS_SPECS: &[HarnessSpec] = &[
-    claude::SPEC,
+    claude::spec::SPEC,
     codex::spec::SPEC,
     factory_droid::SPEC,
     qwen_code::SPEC,
@@ -102,7 +101,7 @@ pub fn parse_transcript(
     path: &std::path::Path,
 ) -> anyhow::Result<Vec<scrollparse::Message>> {
     match kind {
-        AgentKind::Claude => crate::pager::parse_transcript(path),
+        AgentKind::Claude => claude::transcript::parse_transcript(path),
         AgentKind::Codex => codex::transcript::parse_transcript(path),
         _ => anyhow::bail!(
             "{} transcript parsing is not wired yet",

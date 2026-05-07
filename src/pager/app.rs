@@ -855,39 +855,27 @@ fn load_harness_transcript(
     agent_kind: AgentKind,
     session_id: String,
 ) -> TranscriptLoadResult {
-    let lookup = match agent_kind {
-        AgentKind::Claude => crate::utility::claude_storage::find_session_transcript(&session_id),
-        AgentKind::Codex => crate::harness::codex::transcript::find_session_transcript(&session_id),
-        _ => Ok(None),
-    };
+    let lookup = crate::harness::find_session_transcript(agent_kind, &session_id);
 
     match lookup {
-        Ok(Some(path)) => {
-            let parsed = match agent_kind {
-                AgentKind::Claude => super::jsonl_parser::parse_transcript(&path),
-                AgentKind::Codex => crate::harness::codex::transcript::parse_transcript(&path),
-                _ => Ok(Vec::new()),
-            };
-
-            match parsed {
-                Ok(mut messages) => {
-                    super::ui::prepare_transcript_messages(&mut messages);
-                    TranscriptLoadResult::Loaded {
-                        seq,
-                        session_id,
-                        messages,
-                    }
-                }
-                Err(e) => {
-                    trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
-                    TranscriptLoadResult::Notice {
-                        seq,
-                        session_id,
-                        message: "Transcript parse failed".to_string(),
-                    }
+        Ok(Some(path)) => match crate::harness::parse_transcript(agent_kind, &path) {
+            Ok(mut messages) => {
+                super::ui::prepare_transcript_messages(&mut messages);
+                TranscriptLoadResult::Loaded {
+                    seq,
+                    session_id,
+                    messages,
                 }
             }
-        }
+            Err(e) => {
+                trace_error!("transcript parse failed", session_id = session_id.as_str(), error = %e);
+                TranscriptLoadResult::Notice {
+                    seq,
+                    session_id,
+                    message: "Transcript parse failed".to_string(),
+                }
+            }
+        },
         Ok(None) => {
             trace_error!("transcript not found", session_id = session_id.as_str());
             TranscriptLoadResult::Notice {
@@ -912,7 +900,7 @@ fn queue_visible_project_metrics(app: &mut ResumeApp, tx: &mpsc::Sender<ProjectL
         return;
     }
 
-    let scroll_offset = app.sessions.selection.scroll_offset;
+    let scroll_offset = app.sessions.scroll_offset;
     let indices: Vec<usize> = app
         .sessions
         .visible_indices()

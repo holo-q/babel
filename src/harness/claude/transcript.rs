@@ -1,7 +1,10 @@
-//! JSONL Session Parser
+//! Claude JSONL Session Parser
 //!
 //! Parses ~/.claude/projects/{project}/{session}.jsonl into scrollparse::Message stream.
 //! Reuses scrollparse::MessageKind for consistent rendering.
+//!
+//! Lives under `harness::claude` — the harness owns its own transcript format,
+//! keeping pager/UI free of harness-specific storage details.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
