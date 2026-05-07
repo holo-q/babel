@@ -48,13 +48,19 @@ fn scan() -> Result<Vec<NativeSession>> {
             if sid.is_empty() {
                 continue;
             }
-            let mtime = chat
-                .metadata()
-                .ok()
+            let metadata = chat.metadata().ok();
+            let mtime = metadata
+                .as_ref()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            let ctime = metadata
+                .as_ref()
+                .and_then(|m| m.created().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(mtime);
             out.push(NativeSession {
                 agent_kind: AgentKind::Gemini,
                 native_id: sid,
@@ -62,6 +68,7 @@ fn scan() -> Result<Vec<NativeSession>> {
                 display_name: None,
                 last_prompt: None,
                 turn_count: 0,
+                created_at: ctime,
                 last_seen_at: mtime,
                 interactive: true,
                 command_only: false,

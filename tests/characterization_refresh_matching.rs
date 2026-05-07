@@ -74,7 +74,7 @@ fn insert_pane(
 
 #[test]
 fn matching_snapshot_keeps_only_unmatched_panes_and_claimed_sessions() {
-    let mut state = BabelState::new();
+    let mut state = BabelState::default();
     insert_pane(
         &mut state,
         "unix:/run/user/1000/kitty.sock-alpha",
@@ -121,7 +121,7 @@ fn matching_snapshot_keeps_only_unmatched_panes_and_claimed_sessions() {
 
 #[test]
 fn apply_fingerprint_result_updates_only_the_addressed_pane_and_cache() {
-    let mut state = BabelState::new();
+    let mut state = BabelState::default();
     let target = insert_pane(
         &mut state,
         "unix:/run/user/1000/kitty.sock-alpha",
@@ -187,7 +187,7 @@ fn resolve_legacy_pane_id_distinguishes_unique_ambiguous_and_missing() {
     // two sockets simultaneously. The legacy u64 resolver must refuse to
     // pick a winner so an IPC request for "pane 7" cannot silently land on
     // the wrong socket.
-    let mut state = BabelState::new();
+    let mut state = BabelState::default();
     let alpha = insert_pane(
         &mut state,
         "unix:/run/user/1000/kitty.sock-alpha",
@@ -238,7 +238,7 @@ fn legacy_id_shims_refuse_ambiguous_lookups() {
     // u64 → pane shims used by IPC request handlers must NOT silently pick
     // a winner when the id is ambiguous. They return None, log the
     // candidates, and let the IPC layer surface a clean "not found".
-    let mut state = BabelState::new();
+    let mut state = BabelState::default();
     insert_pane(
         &mut state,
         "unix:/run/user/1000/kitty.sock-alpha",
@@ -268,7 +268,7 @@ fn legacy_id_shims_refuse_ambiguous_lookups() {
 
 #[test]
 fn legacy_id_shims_resolve_when_unique() {
-    let mut state = BabelState::new();
+    let mut state = BabelState::default();
     insert_pane(
         &mut state,
         "unix:/run/user/1000/kitty.sock-alpha",

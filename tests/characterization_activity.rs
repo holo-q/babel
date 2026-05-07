@@ -18,7 +18,9 @@ fn metadata_conn() -> Connection {
             chapter_history TEXT,
             notes TEXT,
             hook_state TEXT DEFAULT 'idle',
-            last_hook_at INTEGER
+            last_hook_at INTEGER,
+            last_workspace INTEGER,
+            hidden INTEGER NOT NULL DEFAULT 0
         );",
     )
     .unwrap();
@@ -48,14 +50,14 @@ fn read_unread_and_hook_state_share_one_metadata_row() -> anyhow::Result<()> {
     mark_unread(&conn, session)?;
     let meta = get_metadata(&conn, session)?.unwrap();
     assert!(!meta.is_read);
-    assert_eq!(meta.hook_state, HookState::Idle);
+    assert_eq!(meta.hook_state, Some(HookState::Idle));
     assert!(meta.last_hook_at.is_none());
 
     mark_read(&conn, session)?;
     set_hook_state(&conn, session, HookState::Working)?;
     let meta = get_metadata(&conn, session)?.unwrap();
     assert!(meta.is_read);
-    assert_eq!(meta.hook_state, HookState::Working);
+    assert_eq!(meta.hook_state, Some(HookState::Working));
     assert!(meta.last_hook_at.is_some());
     assert_eq!(get_hook_state(&conn, session)?, Some(HookState::Working));
 
@@ -64,7 +66,7 @@ fn read_unread_and_hook_state_share_one_metadata_row() -> anyhow::Result<()> {
     assert!(!meta.is_read);
     assert_eq!(
         meta.hook_state,
-        HookState::Working,
+        Some(HookState::Working),
         "read/unread updates do not reset hook state"
     );
 
@@ -87,7 +89,7 @@ fn set_hook_state_on_fresh_session_creates_unread_row_and_preserves_state() -> a
         !meta.is_read,
         "set_hook_state must not flip is_read to true on row creation"
     );
-    assert_eq!(meta.hook_state, HookState::Working);
+    assert_eq!(meta.hook_state, Some(HookState::Working));
     assert!(meta.last_hook_at.is_some());
 
     mark_read(&conn, session)?;
@@ -95,7 +97,7 @@ fn set_hook_state_on_fresh_session_creates_unread_row_and_preserves_state() -> a
     assert!(meta.is_read);
     assert_eq!(
         meta.hook_state,
-        HookState::Working,
+        Some(HookState::Working),
         "mark_read must not reset hook state"
     );
 
@@ -201,6 +203,8 @@ fn hook_ipc_request_serializes_current_wire_shape() -> Result<(), serde_json::Er
         session: "codex:workspace:kitty-7".to_string(),
         kitty_id: Some(7),
         pane_addr: None,
+        tmux_pane: None,
+        zellij_pane: None,
         agent_kind: AgentKind::Codex,
         hook_state: Some(HookState::Idle),
         pulse: PulseEffect::Finished,
@@ -215,6 +219,8 @@ fn hook_ipc_request_serializes_current_wire_shape() -> Result<(), serde_json::Er
             "session": "codex:workspace:kitty-7",
             "kitty_id": 7,
             "pane_addr": null,
+            "tmux_pane": null,
+            "zellij_pane": null,
             "agent_kind": "codex",
             "hook_state": "Idle",
             "pulse": "finished",

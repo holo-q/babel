@@ -11,13 +11,17 @@ use tracing::instrument;
 
 use super::Target;
 use crate::cli::legend::Legend;
-use crate::cli::table::{print_table, Align, ColumnSpec, TableCell, TableOptions, TableRow};
+use crate::cli::table::{
+    print_table, Align, ColumnSpec, TableCell, TableOptions, TableRow, TruecolorStyle,
+};
 use babel::babel_storage::{get_generated_title, get_metadata, init_db};
 use babel::core::BabelCore;
 use babel::kitty::discover_all_instances;
 use babel::native_sessions::{NativeSession, SessionFilters};
 use babel::service::state::TerminalInfo;
-use babel::session_row::{self, LiveSessionState, SessionRow, SessionRowInput, StateKind};
+use babel::session_row::{
+    self, AgeTone, LiveSessionState, SessionRow, SessionRowInput, StateKind, TurnTone,
+};
 use babel::utility::agent_discovery::{detect_agent_signals, resolve_pane_title, AgentPane};
 use babel::utility::claude_storage::{get_session_display_name, get_session_path, SessionInfo};
 use babel::ActivityState;
@@ -90,7 +94,10 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool, all: bool) -> R
                 if current_workspace.is_some() {
                     println!();
                 }
-                println!("{}", dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws))));
+                println!(
+                    "{}",
+                    dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws)))
+                );
                 current_workspace = Some(ws);
             }
             print_window_detailed(win)?;
@@ -107,7 +114,10 @@ pub async fn cmd_ls(core: &BabelCore, json: bool, details: bool, all: bool) -> R
             if start > 0 {
                 println!();
             }
-            println!("{}", dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws))));
+            println!(
+                "{}",
+                dim.apply_to(format!("─── Workspace {} ───", workspace_name(ws)))
+            );
             let group = windows[start..end].iter().collect::<Vec<_>>();
             print_window_rows(&group)?;
             start = end;
@@ -1188,22 +1198,14 @@ pub async fn cmd_ls_sessions(
     count: usize,
     kind: Option<&str>,
     filters: SessionFilters,
+    uuid: bool,
     json: bool,
 ) -> Result<()> {
     let mut sessions = babel::native_sessions::scan_all(kind, &filters);
 
     // Filter hidden sessions unless --all
     if !filters.all {
-        let conn = init_db().ok();
-        sessions.retain(|s| {
-            let key = s.agent_kind.session_key(&s.native_id);
-            let hidden = conn
-                .as_ref()
-                .and_then(|c| babel::babel_storage::get_metadata(c, &key).ok().flatten())
-                .map(|m| m.hidden)
-                .unwrap_or(false);
-            !hidden
-        });
+        filter_hidden_sessions(&mut sessions);
     }
 
     let total = sessions.len();
@@ -1223,6 +1225,7 @@ pub async fn cmd_ls_sessions(
                     "display_name": s.display_name,
                     "last_prompt": s.last_prompt,
                     "turn_count": s.turn_count,
+                    "created_at": s.created_at,
                     "last_seen_at": s.last_seen_at,
                     "running": live.is_some(),
                     "live_panes": live.map(|panes| {
@@ -1280,7 +1283,13 @@ pub async fn cmd_ls_sessions(
         })
         .collect();
 
-    print_session_rows(&rows);
+    print_session_rows(
+        &rows,
+        SessionTableOptions {
+            uuid,
+            uuid_replaces_cwd: false,
+        },
+    );
 
     println!();
     let mut kinds = std::collections::HashSet::new();
@@ -1298,10 +1307,116 @@ pub async fn cmd_ls_sessions(
     );
     println!(
         "{}",
-        dim.apply_to("  leading glyph = live pane state (⚡ thinking, ⚙ tool, ● working, ○ idle); underlined row = running; blank = not running")
+        dim.apply_to("  leading glyph = live pane state (↯ thinking, ⚙ tool, ● working, ○ idle); underlined row = running; blank = not running")
     );
 
     Ok(())
+}
+
+/// List historical conversations for the current directory.
+///
+/// This is `babel ls -h/-H`: a cwd-scoped history mode on the familiar `ls`
+/// verb, not the older global `babel history` surface. `-h` keeps the scope
+/// exact; `-H` includes subdirectories. UUID display replaces the cwd column in
+/// this mode because the directory is already implied by the command.
+#[instrument(level = "debug", skip(core))]
+pub async fn cmd_ls_history(
+    core: &BabelCore,
+    recursive: bool,
+    uuid: bool,
+    json: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let filters = SessionFilters::default();
+    let mut sessions = babel::native_sessions::scan_all(None, &filters);
+    filter_hidden_sessions(&mut sessions);
+    sessions.retain(|session| {
+        let Some(project_path) = session.project_path.as_deref() else {
+            return false;
+        };
+        let Ok(project) = std::path::Path::new(project_path).canonicalize() else {
+            return false;
+        };
+        if recursive {
+            project.starts_with(&cwd)
+        } else {
+            project == cwd
+        }
+    });
+
+    let total = sessions.len();
+    sessions.truncate(50);
+    let live_sessions = live_session_index(core).await.unwrap_or_default();
+
+    if json {
+        let json_out: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "agent_kind": s.agent_kind.slug(),
+                    "native_id": s.native_id,
+                    "project_path": s.project_path,
+                    "display_name": s.display_name,
+                    "last_prompt": s.last_prompt,
+                    "turn_count": s.turn_count,
+                    "created_at": s.created_at,
+                    "last_seen_at": s.last_seen_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
+        return Ok(());
+    }
+
+    if sessions.is_empty() {
+        println!("No sessions found for {}", cwd.display());
+        return Ok(());
+    }
+
+    println!(
+        "Sessions ({} of {} for {}{}):",
+        sessions.len(),
+        total,
+        style(cwd.display()).bold(),
+        if recursive { " recursively" } else { "" }
+    );
+    println!();
+
+    let conn = init_db()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let rows = sessions
+        .iter()
+        .map(|s| {
+            let session_key = s.agent_kind.session_key(&s.native_id);
+            session_row(s, &conn, now, live_sessions.get(&session_key))
+        })
+        .collect::<Vec<_>>();
+
+    print_session_rows(
+        &rows,
+        SessionTableOptions {
+            uuid,
+            uuid_replaces_cwd: uuid,
+        },
+    );
+
+    Ok(())
+}
+
+fn filter_hidden_sessions(sessions: &mut Vec<NativeSession>) {
+    let conn = init_db().ok();
+    sessions.retain(|s| {
+        let key = s.agent_kind.session_key(&s.native_id);
+        let hidden = conn
+            .as_ref()
+            .and_then(|c| babel::babel_storage::get_metadata(c, &key).ok().flatten())
+            .map(|m| m.hidden)
+            .unwrap_or(false);
+        !hidden
+    });
 }
 
 pub(super) fn sanitize_display(s: &str, max_chars: usize) -> String {
@@ -1322,25 +1437,61 @@ fn state_style(state_kind: StateKind) -> Style {
     }
 }
 
-fn print_session_rows(rows: &[SessionRow]) {
+fn age_style(tone: AgeTone, bright: bool) -> TruecolorStyle {
+    TruecolorStyle::new(tone.rgb())
+        .bold(tone.is_bold())
+        .dim(tone.should_dim(bright))
+}
+
+fn turn_style(tone: TurnTone, bright: bool) -> TruecolorStyle {
+    TruecolorStyle::new(tone.rgb())
+        .bold(tone.is_bold())
+        .dim(tone.should_dim(bright))
+}
+
+#[derive(Clone, Copy)]
+struct SessionTableOptions {
+    uuid: bool,
+    uuid_replaces_cwd: bool,
+}
+
+fn print_session_rows(rows: &[SessionRow], options: SessionTableOptions) {
     let show_workspace = rows.iter().any(|row| !row.workspace.is_empty());
     let show_prompt = rows.iter().any(|row| !row.last_prompt.is_empty());
-    let columns = vec![
+    let mut columns = vec![
         ColumnSpec::fixed("state", "s", 1, Align::Left),
         ColumnSpec::fit("harness", "harness", 5, 8, Align::Left),
         ColumnSpec::fit("workspace", "ws", 1, 3, Align::Right).hidden(!show_workspace),
-        ColumnSpec::fit("cwd", "cwd", 3, 42, Align::Left),
-        ColumnSpec::fixed("filter", "f", 1, Align::Left),
-        ColumnSpec::fit("age", "age", 2, 5, Align::Right),
-        ColumnSpec::fit("turns", "turns", 2, 6, Align::Right),
-        ColumnSpec::fit("#", "#", 1, rows.len().max(1).to_string().len(), Align::Right),
-        ColumnSpec::flex("thread", "thread", 12, 3),
-        ColumnSpec::flex("prompt", "prompt", 12, 2).hidden(!show_prompt),
     ];
+    if options.uuid_replaces_cwd {
+        columns.push(ColumnSpec::fixed("uuid", "uuid", 36, Align::Left).snip(false));
+    } else {
+        columns.push(ColumnSpec::fit("cwd", "cwd", 3, 42, Align::Left));
+        if options.uuid {
+            columns.push(ColumnSpec::fixed("uuid", "uuid", 36, Align::Left).snip(false));
+        }
+    }
+    columns.extend([
+        ColumnSpec::fixed("filter", "f", 1, Align::Left),
+        ColumnSpec::fit("created", "ct", 2, 5, Align::Right),
+        ColumnSpec::fit("modified", "mt", 2, 5, Align::Right),
+        ColumnSpec::fit("turns", "turns", 2, 6, Align::Right),
+        ColumnSpec::fit(
+            "#",
+            "#",
+            1,
+            rows.len().max(1).to_string().len(),
+            Align::Right,
+        ),
+        ColumnSpec::flex("thread", "thread", 12, 3).snip(false),
+        ColumnSpec::flex("prompt", "prompt", 12, 2)
+            .snip(false)
+            .hidden(!show_prompt),
+    ]);
     let table_rows = rows
         .iter()
         .enumerate()
-        .map(|(idx, row)| session_table_row(idx + 1, row))
+        .map(|(idx, row)| session_table_row(idx + 1, row, options))
         .collect::<Vec<_>>();
     print_table(
         &columns,
@@ -1352,7 +1503,7 @@ fn print_session_rows(rows: &[SessionRow]) {
     );
 }
 
-fn session_table_row(idx: usize, row: &SessionRow) -> TableRow {
+fn session_table_row(idx: usize, row: &SessionRow, options: SessionTableOptions) -> TableRow {
     let accent_c = session_row::closest_ansi256_from_hex(row.accent);
     let harness_style = if row.bright {
         Style::new().color256(accent_c)
@@ -1379,21 +1530,32 @@ fn session_table_row(idx: usize, row: &SessionRow) -> TableRow {
         Style::new().dim()
     };
     let dim = Style::new().dim();
-    TableRow::new(
-        vec![
-            TableCell::new(row.state_icon, state_style),
-            TableCell::new(row.harness.clone(), harness_style),
-            TableCell::new(row.workspace.clone(), dim.clone()),
-            TableCell::new(row.cwd.clone(), dim.clone()),
-            TableCell::new(row.filter_tag, dim.clone()),
-            TableCell::new(row.time.clone(), dim.clone()),
-            TableCell::new(row.turns.clone(), dim),
-            TableCell::new(idx.to_string(), Style::new()),
-            TableCell::new(row.title.clone(), title_style),
-            TableCell::new(row.last_prompt.clone(), text_style),
-        ],
-        row.is_running(),
-    )
+    let created_style = age_style(row.created_time_tone, row.bright);
+    let modified_style = age_style(row.modified_time_tone, row.bright);
+    let turn_style = turn_style(row.turn_tone, row.bright);
+    let mut cells = vec![
+        TableCell::new(row.state_icon, state_style),
+        TableCell::new(row.harness.clone(), harness_style),
+        TableCell::new(row.workspace.clone(), dim.clone()),
+    ];
+    if options.uuid_replaces_cwd {
+        cells.push(TableCell::new(row.native_id.clone(), dim.clone()));
+    } else {
+        cells.push(TableCell::new(row.cwd.clone(), dim.clone()));
+        if options.uuid {
+            cells.push(TableCell::new(row.native_id.clone(), dim.clone()));
+        }
+    }
+    cells.extend([
+        TableCell::new(row.filter_tag, dim.clone()),
+        TableCell::truecolor(row.created_time.clone(), created_style),
+        TableCell::truecolor(row.modified_time.clone(), modified_style),
+        TableCell::truecolor(row.turns.clone(), turn_style),
+        TableCell::new(idx.to_string(), Style::new()),
+        TableCell::new(row.title.clone(), title_style),
+        TableCell::new(row.last_prompt.clone(), text_style),
+    ]);
+    TableRow::new(cells, row.is_running())
 }
 
 fn session_row(
@@ -1425,6 +1587,7 @@ fn session_row(
             generated_title: generated.as_deref(),
             last_prompt: s.last_prompt.as_deref(),
             turn_count: s.turn_count,
+            created_at: s.created_at,
             last_seen_at: s.last_seen_at,
             interactive: s.interactive,
             command_only: s.command_only,

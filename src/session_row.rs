@@ -30,6 +30,123 @@ pub enum StateKind {
     NotRunning,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgeTone {
+    Fresh,
+    Recent,
+    Today,
+    Week,
+    Month,
+    Old,
+    Unknown,
+}
+
+const ANSI_RED: (u8, u8, u8) = (170, 0, 0);
+const ANSI_GREEN: (u8, u8, u8) = (0, 170, 0);
+const ANSI_YELLOW: (u8, u8, u8) = (170, 170, 0);
+const ANSI_BRIGHT_BLACK: (u8, u8, u8) = (128, 128, 128);
+
+impl AgeTone {
+    pub fn from_elapsed_seconds(seconds_ago: i64) -> Self {
+        if seconds_ago < 0 {
+            return Self::Fresh;
+        }
+
+        const FIVE_MINUTES: i64 = 5 * 60;
+        const ONE_HOUR: i64 = 60 * 60;
+        const ONE_DAY: i64 = 24 * ONE_HOUR;
+        const ONE_WEEK: i64 = 7 * ONE_DAY;
+        const ONE_MONTH: i64 = 30 * ONE_DAY;
+
+        if seconds_ago < FIVE_MINUTES {
+            Self::Fresh
+        } else if seconds_ago < ONE_HOUR {
+            Self::Recent
+        } else if seconds_ago < ONE_DAY {
+            Self::Today
+        } else if seconds_ago < ONE_WEEK {
+            Self::Week
+        } else if seconds_ago < ONE_MONTH {
+            Self::Month
+        } else {
+            Self::Old
+        }
+    }
+
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Fresh => mute(ANSI_GREEN, 70),
+            Self::Recent => mute(lerp_rgb(ANSI_GREEN, ANSI_YELLOW, 25), 62),
+            Self::Today => mute(ANSI_YELLOW, 58),
+            Self::Week => mute(lerp_rgb(ANSI_YELLOW, ANSI_RED, 50), 56),
+            Self::Month => mute(ANSI_RED, 54),
+            Self::Old | Self::Unknown => ANSI_BRIGHT_BLACK,
+        }
+    }
+
+    pub fn is_bold(self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+
+    pub fn should_dim(self, row_bright: bool) -> bool {
+        !row_bright || matches!(self, Self::Old | Self::Unknown)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnTone {
+    count: u32,
+}
+
+impl TurnTone {
+    pub const MAX_GRADIENT_TURNS: u32 = 150;
+
+    pub fn from_turn_count(count: u32) -> Self {
+        Self { count }
+    }
+
+    pub fn rgb(self) -> (u8, u8, u8) {
+        if self.count == 0 {
+            return ANSI_BRIGHT_BLACK;
+        }
+
+        let pct =
+            ((self.count.min(Self::MAX_GRADIENT_TURNS) * 100) / Self::MAX_GRADIENT_TURNS) as u8;
+        let hot = if pct <= 50 {
+            lerp_rgb(ANSI_GREEN, ANSI_YELLOW, pct * 2)
+        } else {
+            lerp_rgb(ANSI_YELLOW, ANSI_RED, (pct - 50) * 2)
+        };
+        mute(hot, 52 + pct / 4)
+    }
+
+    pub fn is_bold(self) -> bool {
+        self.count >= Self::MAX_GRADIENT_TURNS
+    }
+
+    pub fn should_dim(self, row_bright: bool) -> bool {
+        !row_bright || self.count == 0
+    }
+}
+
+fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), to_percent: u8) -> (u8, u8, u8) {
+    (
+        lerp_channel(from.0, to.0, to_percent),
+        lerp_channel(from.1, to.1, to_percent),
+        lerp_channel(from.2, to.2, to_percent),
+    )
+}
+
+fn lerp_channel(from: u8, to: u8, to_percent: u8) -> u8 {
+    let from = from as i16;
+    let to = to as i16;
+    (from + ((to - from) * to_percent as i16) / 100) as u8
+}
+
+fn mute(rgb: (u8, u8, u8), color_percent: u8) -> (u8, u8, u8) {
+    lerp_rgb(ANSI_BRIGHT_BLACK, rgb, color_percent)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct LiveSessionState {
     pub workspace: Option<i32>,
@@ -46,6 +163,7 @@ pub struct SessionRowInput<'a> {
     pub generated_title: Option<&'a str>,
     pub last_prompt: Option<&'a str>,
     pub turn_count: u32,
+    pub created_at: i64,
     pub last_seen_at: i64,
     pub interactive: bool,
     pub command_only: bool,
@@ -64,11 +182,19 @@ pub struct SessionRow {
     pub state_icon: &'static str,
     pub state_kind: StateKind,
     pub harness: String,
+    pub native_id: String,
     /// Filter category sigil: ◇ oneshot, / command-only, ⊞ subagent, ▪ hidden.
     pub filter_tag: &'static str,
     pub workspace: String,
     pub cwd: String,
+    pub created_time: String,
+    pub created_time_tone: AgeTone,
+    pub modified_time: String,
+    pub modified_time_tone: AgeTone,
     pub time: String,
+    pub time_tone: AgeTone,
+    pub turn_count: u32,
+    pub turn_tone: TurnTone,
     pub turns: String,
     pub title: String,
     pub last_prompt: String,
@@ -132,8 +258,12 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         .map(|ws| format!("{}", ws + 1))
         .unwrap_or_default();
 
-    let elapsed = now - input.last_seen_at;
-    let time = relative_time(elapsed);
+    let created_elapsed = now - input.created_at;
+    let modified_elapsed = now - input.last_seen_at;
+    let created_time = relative_time(created_elapsed);
+    let created_time_tone = AgeTone::from_elapsed_seconds(created_elapsed);
+    let modified_time = relative_time(modified_elapsed);
+    let modified_time_tone = AgeTone::from_elapsed_seconds(modified_elapsed);
 
     let filter_tag = if input.hidden {
         "▪"
@@ -155,10 +285,18 @@ pub fn session_row(input: SessionRowInput<'_>, now: i64) -> SessionRow {
         state_icon,
         state_kind,
         harness: input.agent_kind.slug().to_string(),
+        native_id: input.native_id.to_string(),
         filter_tag,
         workspace,
         cwd,
-        time,
+        created_time: created_time.clone(),
+        created_time_tone,
+        modified_time: modified_time.clone(),
+        modified_time_tone,
+        time: modified_time,
+        time_tone: modified_time_tone,
+        turn_count: input.turn_count,
+        turn_tone: TurnTone::from_turn_count(input.turn_count),
         turns,
         title,
         last_prompt,
@@ -177,18 +315,18 @@ pub fn live_state_icon(live: Option<LiveSessionState>) -> (&'static str, StateKi
     match (live.hook_state, live.activity_state) {
         (Some(HookState::Idle), _) => ("○", StateKind::Idle),
         (Some(HookState::ToolRunning), _) => ("⚙", StateKind::ToolRunning),
-        (Some(HookState::Working), Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
+        (Some(HookState::Working), Some(ActivityState::Thinking)) => ("↯", StateKind::Thinking),
         (Some(HookState::Working), Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
         (Some(HookState::Working), Some(ActivityState::PlanApproval)) => {
-            ("📋", StateKind::PlanApproval)
+            ("▣", StateKind::PlanApproval)
         }
         (Some(HookState::Working), Some(ActivityState::BackgroundTask)) => {
             ("◐", StateKind::BackgroundTask)
         }
         (Some(HookState::Working), _) => ("●", StateKind::Working),
-        (None, Some(ActivityState::Thinking)) => ("⚡", StateKind::Thinking),
+        (None, Some(ActivityState::Thinking)) => ("↯", StateKind::Thinking),
         (None, Some(ActivityState::ToolUse)) => ("⚙", StateKind::ToolRunning),
-        (None, Some(ActivityState::PlanApproval)) => ("📋", StateKind::PlanApproval),
+        (None, Some(ActivityState::PlanApproval)) => ("▣", StateKind::PlanApproval),
         (None, Some(ActivityState::AwaitingInput)) => ("◆", StateKind::AwaitingInput),
         (None, Some(ActivityState::BackgroundTask)) => ("◐", StateKind::BackgroundTask),
         (None, Some(ActivityState::Idle)) => ("○", StateKind::Idle),
@@ -296,4 +434,20 @@ pub fn closest_ansi256_from_hex(hex: &str) -> u8 {
     let gi = ((g as u16) * 5 / 255) as u8;
     let bi = ((b as u16) * 5 / 255) as u8;
     16 + 36 * ri + 6 * gi + bi
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnTone;
+
+    #[test]
+    fn turn_tone_caps_gradient_at_150_turns() {
+        let max = TurnTone::from_turn_count(TurnTone::MAX_GRADIENT_TURNS);
+        let over = TurnTone::from_turn_count(999);
+        let lower = TurnTone::from_turn_count(75);
+
+        assert_eq!(max.rgb(), over.rgb());
+        assert_ne!(lower.rgb(), max.rgb());
+        assert!(max.is_bold());
+    }
 }

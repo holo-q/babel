@@ -9,6 +9,7 @@
 
 mod buffer;
 pub mod rolling_prompts;
+pub mod session_title;
 pub mod splice;
 
 pub use buffer::*;

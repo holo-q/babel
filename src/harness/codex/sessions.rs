@@ -103,7 +103,7 @@ fn scan() -> Result<Vec<NativeSession>> {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             let mut stmt = conn.prepare(
-                "SELECT id, cwd, title, first_user_message, updated_at, has_user_event, agent_nickname
+                "SELECT id, cwd, title, first_user_message, updated_at, has_user_event, agent_nickname, created_at
                  FROM threads
                  WHERE archived = 0
                  ORDER BY updated_at DESC",
@@ -118,12 +118,22 @@ fn scan() -> Result<Vec<NativeSession>> {
                     row.get::<_, i64>(4)?,
                     row.get::<_, bool>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })?;
 
             let mut out = Vec::new();
             for row in rows.flatten() {
-                let (id, cwd, title, first_msg, updated_at, has_user_event, thread_name) = row;
+                let (
+                    id,
+                    cwd,
+                    title,
+                    first_msg,
+                    updated_at,
+                    has_user_event,
+                    thread_name,
+                    created_at,
+                ) = row;
                 let prompts = prompt_data.remove(&id);
                 let turn_count = prompts.as_ref().map(|p| p.turns).unwrap_or(0);
                 let cmd_only = prompts.as_ref().map(|p| p.all_commands).unwrap_or(false);
@@ -149,6 +159,7 @@ fn scan() -> Result<Vec<NativeSession>> {
                     display_name,
                     last_prompt,
                     turn_count,
+                    created_at,
                     last_seen_at: updated_at,
                     has_title,
                     interactive: has_user_event || turn_count > 0,
@@ -168,6 +179,7 @@ fn scan() -> Result<Vec<NativeSession>> {
             display_name: acc.first_real,
             last_prompt: if acc.turns > 1 { acc.last_real } else { None },
             turn_count: acc.turns,
+            created_at: 0,
             last_seen_at: 0,
             interactive: true,
             command_only: acc.all_commands,

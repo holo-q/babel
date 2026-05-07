@@ -18,6 +18,7 @@ pub struct NativeSession {
     pub display_name: Option<String>,
     pub last_prompt: Option<String>,
     pub turn_count: u32,
+    pub created_at: i64,
     pub last_seen_at: i64,
     pub interactive: bool,
     /// Every user prompt was a slash command (/model, /usage, etc.).
@@ -43,6 +44,7 @@ pub(crate) struct HarnessTranscriptFacts {
     pub first_user: Option<String>,
     pub last_user: Option<String>,
     pub user_turns: u32,
+    pub first_seen_at: i64,
     pub last_seen_at: i64,
     pub line_count: u32,
 }
@@ -274,6 +276,9 @@ pub(crate) fn update_facts_from_record(
             "time_created",
         ],
     ) {
+        if facts.first_seen_at == 0 || ts < facts.first_seen_at {
+            facts.first_seen_at = ts;
+        }
         facts.last_seen_at = facts.last_seen_at.max(ts);
     }
 
@@ -367,6 +372,11 @@ pub(crate) fn session_from_facts(
             None
         },
         turn_count: facts.user_turns,
+        created_at: if facts.first_seen_at > 0 {
+            facts.first_seen_at
+        } else {
+            fallback_seen
+        },
         last_seen_at: facts.last_seen_at.max(fallback_seen),
         interactive: facts.user_turns > 0 || facts.line_count > 0,
         command_only: false,
@@ -539,6 +549,10 @@ fn query_sqlite_session_table(
                     .and_then(|text| json_epoch_secs(&serde_json::Value::String(text.clone())))
             })
             .unwrap_or_else(|| modified_secs(db_path));
+        let created_at = created
+            .as_ref()
+            .and_then(|text| json_epoch_secs(&serde_json::Value::String(text.clone())))
+            .unwrap_or(last_seen_at);
         out.push(NativeSession {
             agent_kind: kind,
             native_id,
@@ -546,6 +560,7 @@ fn query_sqlite_session_table(
             display_name: display_name.and_then(|text| clean_session_text(&text)),
             last_prompt: None,
             turn_count: 0,
+            created_at,
             last_seen_at,
             interactive: true,
             command_only: false,

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use babel::core::BabelCore;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 // Re-export submodules
 pub mod action;
@@ -18,8 +18,10 @@ pub mod legend;
 pub mod mcp;
 pub mod mmdc;
 pub mod mv;
+pub mod prompts;
 pub mod query;
 pub mod resume;
+pub mod table;
 pub mod tmux;
 pub mod wset;
 
@@ -140,6 +142,7 @@ const QUERY_COMMANDS: &[&str] = &[
     "get-pane",
     "get-scrollback",
     "history",
+    "prompts",
     "target",
     "plan",
     "resume",
@@ -239,8 +242,20 @@ pub enum Commands {
     /// Automatically scans all kitty instances on the system. Windows from
     /// non-current sockets are shown but some operations (focus, send) only
     /// work on the current socket.
-    #[command()]
+    #[command(disable_help_flag = true)]
     Ls {
+        /// Show session history for the current directory
+        #[arg(short = 'h', long = "history")]
+        history: bool,
+
+        /// Show session history recursively under the current directory
+        #[arg(short = 'H', long = "history-recursive")]
+        history_recursive: bool,
+
+        /// Show session UUIDs for direct conversation addressing
+        #[arg(long)]
+        uuid: bool,
+
         /// Show detailed multiline info for each session
         #[arg(short, long)]
         details: bool,
@@ -248,6 +263,10 @@ pub enum Commands {
         /// Also show ordinary or unrecognized terminal panes
         #[arg(short, long)]
         all: bool,
+
+        /// Print help
+        #[arg(long = "help", action = ArgAction::HelpLong)]
+        _help: Option<bool>,
     },
 
     /// List all kitty terminals (not just agents)
@@ -309,6 +328,10 @@ pub enum Commands {
         /// Include everything: hidden + non-interactive + oneshot + command-only
         #[arg(short, long)]
         all: bool,
+
+        /// Add a UUID column next to the path column
+        #[arg(long)]
+        uuid: bool,
     },
 
     /// Hide sessions from ls-sessions by index
@@ -405,6 +428,36 @@ pub enum Commands {
         all: bool,
     },
 
+    /// Show user prompt history for a directory context
+    ///
+    /// Positional arguments are interchangeable: pass a count/time window and
+    /// optionally a path in either order.
+    ///
+    /// Examples:
+    ///   babel prompts                 # Last 20 prompts for cwd
+    ///   babel prompts 50              # Last 50 prompts for cwd
+    ///   babel prompts 2d              # Prompts from sessions active in 2d
+    ///   babel prompts ./subdir 20     # Last 20 prompts for ./subdir
+    ///   babel prompts -r . 1w -c 2    # Include two prior transcript rows
+    #[command()]
+    Prompts {
+        /// Count/time/path atoms in any order
+        #[arg(value_name = "ARG")]
+        args: Vec<String>,
+
+        /// Include sessions whose project paths are under the target directory
+        #[arg(short, long)]
+        recursive: bool,
+
+        /// Include this many previous transcript rows before each prompt
+        #[arg(short = 'c', long, conflicts_with = "tokens")]
+        context: Option<usize>,
+
+        /// Allocate this many approximate tokens of previous transcript context
+        #[arg(short = 't', long)]
+        tokens: Option<usize>,
+    },
+
     /// Point-and-click window selection via slop
     ///
     /// Click any kitty window to get the pane IDs contained within it.
@@ -472,6 +525,17 @@ pub enum Commands {
     ///   babel c                   # Shorthand
     #[command(visible_alias = "c")]
     Continue,
+
+    /// Output a one-line transcript preview for a session UUID
+    ///
+    /// Uses the same collapsed transcript shape as the TUI preview, but without
+    /// middle snips: each message is a single row truncated from the start to
+    /// the first 60 display characters.
+    #[command()]
+    Cat {
+        /// Session UUID/native ID from `babel ls --uuid` or `babel ls-sessions --uuid`
+        uuid: String,
+    },
 
     /// Output recent transcript from a session
     ///

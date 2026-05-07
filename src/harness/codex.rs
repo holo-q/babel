@@ -4,4 +4,5 @@
 //! feature code never has to know which Codex file carries which native detail.
 
 pub mod spec;
+pub mod title;
 pub mod transcript;

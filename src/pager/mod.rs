@@ -7,6 +7,7 @@
 //!   - `babel continue` - Resume most recent non-running session
 
 mod app;
+mod identity;
 mod preferences;
 mod project_metrics;
 mod session_list;
@@ -18,7 +19,10 @@ pub use app::{
     launch_harness_resume, run_resume_pager, ResumeApp, ResumeSelection, ResumeSessionSource,
 };
 pub use session_list::{EnrichedSession, RunningStatus};
-pub use transcript::TranscriptView;
+pub use transcript::{TranscriptRoleFilter, TranscriptView};
+pub use ui::{
+    prepare_transcript_messages, transcript_palette, transcript_visible_lines, TranscriptPalette,
+};
 
 /// Collapse whitespace runs into a single space -- used by both
 /// tool-call preview formatting (ui.rs) and transcript summaries.

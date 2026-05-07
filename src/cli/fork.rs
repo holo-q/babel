@@ -10,6 +10,7 @@
 //! - Debugging by observing what another agent did
 //! - Meta-analysis of patterns and decisions
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -17,6 +18,7 @@ use tracing::instrument;
 use vtr::{boundary, checkpoint};
 
 use babel::core::BabelCore;
+use babel::native_sessions::SessionFilters;
 use babel::pager::parse_transcript;
 use babel::utility::claude_storage::{
     find_session_transcript, get_recent_sessions, get_session_info,
@@ -171,6 +173,112 @@ pub async fn cmd_tail(core: &BabelCore, target: &str, lines: usize, json: bool) 
     }
 
     Ok(())
+}
+
+/// Output the transcript for an explicit session UUID/native ID.
+///
+/// `cat` is intentionally UUID-first instead of index-first: it pairs with the
+/// `--uuid` history columns so conversations remain addressable even when list
+/// ordering changes. The text mode mirrors the TUI's collapsed transcript
+/// shape, but uses leading truncation only: no middle snip glyphs in a command
+/// meant for piping and grep.
+#[instrument(level = "debug")]
+pub async fn cmd_cat(uuid: &str, json: bool) -> Result<()> {
+    let filters = SessionFilters {
+        sub: true,
+        oneshot: true,
+        commands: true,
+        all: true,
+    };
+    let matches = babel::native_sessions::scan_all(None, &filters)
+        .into_iter()
+        .filter(|session| session.native_id == uuid)
+        .collect::<Vec<_>>();
+
+    let session = match matches.as_slice() {
+        [session] => session,
+        [] => return Err(anyhow!("Session not found: {uuid}")),
+        _ => return Err(anyhow!("Session UUID is ambiguous: {uuid}")),
+    };
+    let transcript_path = babel::harness::find_session_transcript(session.agent_kind, uuid)?
+        .ok_or_else(|| anyhow!("Transcript not found for session: {uuid}"))?;
+    let messages = babel::harness::parse_transcript(session.agent_kind, &transcript_path)?;
+
+    if json {
+        let output = messages
+            .iter()
+            .map(|message| {
+                let (role, content) = message_cat_parts(message);
+                serde_json::json!({
+                    "role": role,
+                    "content": content,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    eprintln!(
+        "─── {} {} ───",
+        session.agent_kind.display_name(),
+        &uuid[..8.min(uuid.len())]
+    );
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    for message in &messages {
+        let (role, content) = message_cat_parts(message);
+        let prefix = match role {
+            "user" => "> ",
+            "assistant" | "tool_call" => "● ",
+            "tool_output" => "  ⎿ ",
+            "status" => "",
+            _ => "",
+        };
+        if let Err(err) = writeln!(
+            out,
+            "{prefix}{}",
+            truncate_start(&collapse_ws(&content), 60)
+        ) {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(err.into());
+        }
+    }
+
+    Ok(())
+}
+
+fn message_cat_parts(message: &scrollparse::Message) -> (&'static str, String) {
+    match &message.kind {
+        MessageKind::User => ("user", message.content.clone()),
+        MessageKind::Assistant => ("assistant", message.content.clone()),
+        MessageKind::ToolCall { name, args } => {
+            let args = collapse_ws(args.as_str());
+            (
+                "tool_call",
+                format!("{name}({})", truncate_start(&args, 60)),
+            )
+        }
+        MessageKind::ToolOutput => ("tool_output", message.content.clone()),
+        MessageKind::Status => ("status", message.content.clone()),
+    }
+}
+
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_start(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

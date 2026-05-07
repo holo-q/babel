@@ -12,6 +12,7 @@ pub enum TranscriptRoleFilter {
     #[default]
     All,
     Conversation,
+    Condensed,
     UserOnly,
 }
 
@@ -19,7 +20,8 @@ impl TranscriptRoleFilter {
     pub fn cycle(self) -> Self {
         match self {
             Self::All => Self::Conversation,
-            Self::Conversation => Self::UserOnly,
+            Self::Conversation => Self::Condensed,
+            Self::Condensed => Self::UserOnly,
             Self::UserOnly => Self::All,
         }
     }
@@ -28,6 +30,7 @@ impl TranscriptRoleFilter {
         match self {
             Self::All => "all",
             Self::Conversation => "conversation",
+            Self::Condensed => "condensed",
             Self::UserOnly => "user prompts",
         }
     }
@@ -94,7 +97,8 @@ impl TranscriptView {
         self.expand_messages
     }
 
-    /// Cycle between all rows, conversation-only, and user-prompt-only transcript.
+    /// Cycle between all rows, conversation-only, condensed conversation, and
+    /// user-prompt-only transcript.
     pub fn toggle_role_filter(&mut self) -> TranscriptRoleFilter {
         self.role_filter = self.role_filter.cycle();
         self.role_filter
@@ -149,6 +153,9 @@ pub(crate) fn transcript_message_is_visible(
     match role_filter {
         TranscriptRoleFilter::All => true,
         TranscriptRoleFilter::Conversation => {
+            matches!(kind, MessageKind::User | MessageKind::Assistant)
+        }
+        TranscriptRoleFilter::Condensed => {
             matches!(kind, MessageKind::User | MessageKind::Assistant)
         }
         TranscriptRoleFilter::UserOnly => matches!(kind, MessageKind::User),

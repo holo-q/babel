@@ -632,7 +632,7 @@ impl TerminalBackend for KittyBackend {
             .await
             .ok()
             .and_then(|panes| panes.into_iter().find(|p| p.id == pane_id))
-            .and_then(|p| p.platform_window_id);
+            .map(|p| p.platform_window_id);
         Ok(super::LaunchedPane {
             pane_id,
             platform_window_id,

@@ -143,7 +143,20 @@ async fn main() -> Result<()> {
         }
 
         // ─── Query Commands (read-only, safe) ────────────────────────────────────
-        Commands::Ls { details, all } => cli::query::cmd_ls(&core, cli.json, details, all).await,
+        Commands::Ls {
+            history,
+            history_recursive,
+            uuid,
+            details,
+            all,
+            _help: _,
+        } => {
+            if history || history_recursive {
+                cli::query::cmd_ls_history(&core, history_recursive, uuid, cli.json).await
+            } else {
+                cli::query::cmd_ls(&core, cli.json, details, all).await
+            }
+        }
 
         Commands::LsTerminals => cli::query::cmd_ls_terminals(&core, cli.json).await,
 
@@ -158,6 +171,7 @@ async fn main() -> Result<()> {
             oneshot,
             commands,
             all,
+            uuid,
         } => {
             let filters = babel::native_sessions::SessionFilters {
                 sub,
@@ -165,7 +179,8 @@ async fn main() -> Result<()> {
                 commands,
                 all,
             };
-            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), filters, cli.json).await
+            cli::query::cmd_ls_sessions(&core, count, kind.as_deref(), filters, uuid, cli.json)
+                .await
         }
 
         Commands::Hide { indices } => cli::action::cmd_hide(&indices, false).await,
@@ -186,6 +201,13 @@ async fn main() -> Result<()> {
             all,
         } => cli::query::cmd_history(&core, sessions, limit, all, cli.json).await,
 
+        Commands::Prompts {
+            args,
+            recursive,
+            context,
+            tokens,
+        } => cli::prompts::cmd_prompts(args, recursive, context, tokens, cli.json).await,
+
         Commands::Target => cli::action::cmd_target(cli.json).await,
 
         Commands::Plan { target } => cli::query::cmd_plan(&core, &target, cli.json).await,
@@ -199,6 +221,8 @@ async fn main() -> Result<()> {
         }
 
         Commands::Continue => cli::resume::cmd_continue(&core).await,
+
+        Commands::Cat { uuid } => cli::fork::cmd_cat(&uuid, cli.json).await,
 
         Commands::Tail { target, lines } => {
             cli::fork::cmd_tail(&core, &target, lines, cli.json).await

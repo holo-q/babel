@@ -61,6 +61,31 @@ impl RollingPromptsPolicy {
         self.api_key.is_some()
     }
 
+    /// Generate a title directly from already-collected user prompts.
+    ///
+    /// Manual session-title refresh uses this path after the harness has read
+    /// durable transcript prompts and before it writes the harness-native title
+    /// record. It deliberately skips debounce/session bookkeeping: explicit
+    /// refresh is a direct command, not ambient daemon policy.
+    pub async fn generate_from_prompts(&self, prompts: &[String]) -> Result<Option<String>> {
+        let Some(api_key) = self.api_key.as_deref() else {
+            return Ok(None);
+        };
+
+        let prompts = prompts
+            .iter()
+            .rev()
+            .take(self.config.prompt_count)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        if prompts.is_empty() {
+            return Ok(None);
+        }
+
+        self.call_haiku(api_key, &prompts).await.map(Some)
+    }
+
     /// Call Haiku API to generate title
     async fn call_haiku(&self, api_key: &str, prompts: &[String]) -> Result<String> {
         // Format prompts for template (numbered, newest last)

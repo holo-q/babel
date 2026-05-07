@@ -623,15 +623,6 @@ fn format_summary_chips(ops: usize, blockers: usize, warnings: usize) -> String 
     )
 }
 
-fn readiness_label(readiness: &AdapterReadiness) -> String {
-    match readiness {
-        AdapterReadiness::ApplyReady => green("apply-ready"),
-        AdapterReadiness::DoctorOnly => yellow("doctor-only"),
-        AdapterReadiness::ReconOnly => blue("recon-only"),
-        AdapterReadiness::Unsupported => dim("unsupported"),
-    }
-}
-
 fn severity_label(severity: &RiskSeverity) -> String {
     match severity {
         RiskSeverity::Info => blue("info"),

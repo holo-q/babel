@@ -47,7 +47,7 @@ pub fn load_cached_session_projects(
     let source_path = format!("project-touch-v{PROJECT_CACHE_VERSION}:{}", path.display());
     let db = BabelStorage::open()?;
 
-    let cached = db.get_project_cache_state(session_key, &source_path)?;
+    let cached = db.get_project_cache_state(session_key)?;
 
     // Determine if we can do an incremental parse or need full reparse
     let (mut metrics_map, start_offset) = match &cached {
@@ -569,12 +569,22 @@ mod tests {
 
     use super::*;
 
+    fn write_test_workgroup(root: &Path) {
+        std::fs::write(
+            root.join("workgroup.toml"),
+            "[workgroup]\nname = \"project-metrics-test\"\nansi256 = 39\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn extracts_latest_touched_projects_from_tool_inputs() {
         let root = std::env::current_dir()
             .unwrap()
             .join("tmp")
             .join(format!("project-metrics-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_workgroup(&root);
         let alpha = root.join("alpha");
         let beta = root.join("beta");
         std::fs::create_dir_all(&alpha).unwrap();
@@ -674,6 +684,8 @@ mod tests {
             .unwrap()
             .join("tmp")
             .join(format!("project-metrics-relative-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_workgroup(&root);
         let project = root.join("repo");
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join("src")).unwrap();
@@ -706,6 +718,8 @@ mod tests {
             .unwrap()
             .join("tmp")
             .join(format!("project-metrics-output-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_workgroup(&root);
         let project = root.join("repo");
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join("src")).unwrap();

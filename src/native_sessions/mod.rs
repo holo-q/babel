@@ -3,6 +3,8 @@
 //! Each harness owns its storage parser behind [`NativeSessionScanner`]. The
 //! CLI list/resume surfaces only consume normalized [`NativeSession`] rows.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 
 use crate::AgentKind;
@@ -132,4 +134,34 @@ pub fn scan_all(kind: Option<&str>, filters: &SessionFilters) -> Vec<NativeSessi
         }
     }
     sessions
+}
+
+/// Return the newest Codex thread whose native cwd matches `cwd`.
+///
+/// Live Codex panes do not always expose a durable session id in argv/title.
+/// The daemon uses this narrow fallback only after process detection has
+/// identified a Codex pane, binding the pane to the newest native thread for
+/// the exact working directory.
+pub fn newest_codex_thread_for_cwd(cwd: &Path) -> Result<Option<String>> {
+    let filters = SessionFilters {
+        sub: true,
+        oneshot: true,
+        commands: true,
+        all: true,
+    };
+    let cwd = comparable_path(cwd);
+    Ok(scan_all(Some(AgentKind::Codex.slug()), &filters)
+        .into_iter()
+        .filter(|session| {
+            session
+                .project_path
+                .as_deref()
+                .is_some_and(|path| comparable_path(Path::new(path)) == cwd)
+        })
+        .max_by_key(|session| session.last_seen_at)
+        .map(|session| session.native_id))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }

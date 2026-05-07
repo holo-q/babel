@@ -29,12 +29,30 @@ impl CwdDisplayMode {
         }
     }
 
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Relative => Self::TouchedProjects,
+            Self::Absolute => Self::Relative,
+            Self::Project => Self::Absolute,
+            Self::TouchedProjects => Self::Project,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Relative => "relative",
             Self::Absolute => "absolute",
             Self::Project => "project",
             Self::TouchedProjects => "touched projects",
+        }
+    }
+
+    pub fn column_label(self) -> &'static str {
+        match self {
+            Self::Relative => "cwd",
+            Self::Absolute => "abs",
+            Self::Project => "proj",
+            Self::TouchedProjects => "touch",
         }
     }
 }
@@ -85,6 +103,89 @@ impl Default for HiddenDisplayMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    pub fn indicator(self) -> &'static str {
+        match self {
+            Self::Ascending => "↑",
+            Self::Descending => "↓",
+        }
+    }
+}
+
+impl Default for SortDirection {
+    fn default() -> Self {
+        Self::Descending
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortColumn {
+    State,
+    Harness,
+    Workspace,
+    Cwd,
+    Filter,
+    CreatedTime,
+    ModifiedTime,
+    Turns,
+    Thread,
+    Prompt,
+}
+
+impl SortColumn {
+    pub fn from_key(ch: char) -> Option<Self> {
+        match ch {
+            '1' => Some(Self::State),
+            '2' => Some(Self::Harness),
+            '3' => Some(Self::Workspace),
+            '4' => Some(Self::Cwd),
+            '5' => Some(Self::Filter),
+            '6' => Some(Self::CreatedTime),
+            '7' => Some(Self::ModifiedTime),
+            '8' => Some(Self::Turns),
+            '9' => Some(Self::Thread),
+            '0' => Some(Self::Prompt),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::Harness => "harness",
+            Self::Workspace => "workspace",
+            Self::Cwd => "cwd",
+            Self::Filter => "filter",
+            Self::CreatedTime => "ct",
+            Self::ModifiedTime => "mt",
+            Self::Turns => "turns",
+            Self::Thread => "thread",
+            Self::Prompt => "prompt",
+        }
+    }
+}
+
+impl Default for SortColumn {
+    fn default() -> Self {
+        Self::ModifiedTime
+    }
+}
+
 /// Running status of a session
 #[derive(Debug, Clone, Default)]
 pub enum RunningStatus {
@@ -113,14 +214,14 @@ impl RunningStatus {
             } => match (*hook_state, activity_state) {
                 (Some(HookState::Idle), _) => "○",
                 (Some(HookState::ToolRunning), _) => "⚙",
-                (Some(HookState::Working), ActivityState::Thinking) => "⚡",
+                (Some(HookState::Working), ActivityState::Thinking) => "↯",
                 (Some(HookState::Working), ActivityState::ToolUse) => "⚙",
-                (Some(HookState::Working), ActivityState::PlanApproval) => "📋",
+                (Some(HookState::Working), ActivityState::PlanApproval) => "▣",
                 (Some(HookState::Working), ActivityState::BackgroundTask) => "◐",
                 (Some(HookState::Working), _) => "●",
-                (None, ActivityState::Thinking) => "⚡",
+                (None, ActivityState::Thinking) => "↯",
                 (None, ActivityState::ToolUse) => "⚙",
-                (None, ActivityState::PlanApproval) => "📋",
+                (None, ActivityState::PlanApproval) => "▣",
                 (None, ActivityState::AwaitingInput) => "◆",
                 (None, ActivityState::BackgroundTask) => "◐",
                 (None, ActivityState::Idle) => "○",
@@ -146,6 +247,7 @@ pub struct EnrichedSession {
     pub generated_title: Option<String>,
     pub last_prompt: Option<String>,
     pub turn_count: u32,
+    pub created_at: i64,
     pub last_seen_at: i64,
     pub interactive: bool,
     pub command_only: bool,
@@ -213,6 +315,7 @@ impl EnrichedSession {
                 generated_title: self.generated_title.as_deref(),
                 last_prompt: self.last_prompt.as_deref(),
                 turn_count: self.turn_count,
+                created_at: self.created_at,
                 last_seen_at: self.last_seen_at,
                 interactive: self.interactive,
                 command_only: self.command_only,
@@ -256,6 +359,10 @@ pub struct SessionListState {
     pub current_cwd: Option<PathBuf>,
     /// How the cwd filter is shown in the header.
     pub cwd_display_mode: CwdDisplayMode,
+    /// Column currently sorting the visible session projection.
+    pub sort_column: SortColumn,
+    /// Direction currently sorting the visible session projection.
+    pub sort_direction: SortDirection,
     /// Search/filter query
     pub filter_query: String,
     /// Cached visible row indices. The full catalog can be large because the
@@ -274,6 +381,8 @@ impl SessionListState {
             hidden_display_mode: HiddenDisplayMode::Normal,
             current_cwd,
             cwd_display_mode: CwdDisplayMode::Relative,
+            sort_column: SortColumn::ModifiedTime,
+            sort_direction: SortDirection::Descending,
             filter_query: String::new(),
             visible_indices: Vec::new(),
             visible_dirty: true,
@@ -374,6 +483,29 @@ impl SessionListState {
         self.cwd_display_mode
     }
 
+    pub fn cycle_cwd_display_mode_reverse(&mut self) -> CwdDisplayMode {
+        self.cwd_display_mode = self.cwd_display_mode.previous();
+        self.cwd_display_mode
+    }
+
+    pub fn set_sort(&mut self, column: SortColumn, direction: SortDirection) {
+        self.sort_column = column;
+        self.sort_direction = direction;
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+    }
+
+    pub fn sort_by_column(&mut self, column: SortColumn) {
+        if self.sort_column == column {
+            self.sort_direction = self.sort_direction.toggle();
+        } else {
+            self.sort_column = column;
+            self.sort_direction = SortDirection::Descending;
+        }
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+    }
+
     /// Update filter query
     pub fn set_filter(&mut self, query: String) {
         self.filter_query = query.to_lowercase();
@@ -431,6 +563,17 @@ impl SessionListState {
                 self.visible_indices.push(idx);
             }
         }
+        let sessions = &self.sessions;
+        let sort_column = self.sort_column;
+        let sort_direction = self.sort_direction;
+        self.visible_indices.sort_by(|left, right| {
+            compare_sessions(
+                &sessions[*left],
+                &sessions[*right],
+                sort_column,
+                sort_direction,
+            )
+        });
         self.visible_dirty = false;
     }
 
@@ -486,5 +629,59 @@ impl SessionListState {
         }
 
         true
+    }
+}
+
+fn compare_sessions(
+    left: &EnrichedSession,
+    right: &EnrichedSession,
+    column: SortColumn,
+    direction: SortDirection,
+) -> std::cmp::Ordering {
+    let ordering = match column {
+        SortColumn::State => running_rank(left).cmp(&running_rank(right)),
+        SortColumn::Harness => left.agent_kind.slug().cmp(right.agent_kind.slug()),
+        SortColumn::Workspace => workspace_rank(left).cmp(&workspace_rank(right)),
+        SortColumn::Cwd => left.project_path.cmp(&right.project_path),
+        SortColumn::Filter => left.filter_tag().cmp(right.filter_tag()),
+        SortColumn::CreatedTime => left.created_at.cmp(&right.created_at),
+        SortColumn::ModifiedTime => left.last_seen_at.cmp(&right.last_seen_at),
+        SortColumn::Turns => left.turn_count.cmp(&right.turn_count),
+        SortColumn::Thread => left.title().cmp(&right.title()),
+        SortColumn::Prompt => left.last_prompt.cmp(&right.last_prompt),
+    }
+    .then_with(|| left.session_key.cmp(&right.session_key));
+
+    match direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
+    }
+}
+
+fn running_rank(session: &EnrichedSession) -> u8 {
+    match &session.running_status {
+        RunningStatus::Active {
+            focused: true,
+            activity_state: ActivityState::AwaitingInput,
+            ..
+        } => 6,
+        RunningStatus::Active { focused: true, .. } => 5,
+        RunningStatus::Active {
+            activity_state: ActivityState::AwaitingInput,
+            ..
+        } => 4,
+        RunningStatus::Active {
+            activity_state: ActivityState::Thinking | ActivityState::ToolUse,
+            ..
+        } => 3,
+        RunningStatus::Active { .. } => 2,
+        RunningStatus::Inactive => 1,
+    }
+}
+
+fn workspace_rank(session: &EnrichedSession) -> Option<i32> {
+    match &session.running_status {
+        RunningStatus::Active { workspace, .. } => *workspace,
+        RunningStatus::Inactive => None,
     }
 }

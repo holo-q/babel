@@ -28,8 +28,8 @@ use tracing::instrument;
 use vtr::{boundary, checkpoint, effect, trace_error};
 
 use crate::agent_kind::AgentKind;
-use crate::fingerprint::{MatchConfidence, SessionFingerprint};
 use crate::backend::Pane;
+use crate::fingerprint::{MatchConfidence, SessionFingerprint};
 use crate::kitty::{
     close_pane, get_pane, get_recent_scrollback, list_panes, move_window_to_workspace,
     set_user_var, set_user_var_on_socket, set_window_geometry, PaneAddr,
@@ -67,6 +67,9 @@ pub struct AgentMarkers {
     /// matched — caller can ignore those panes via `is_agent()` returning false.
     #[serde(default)]
     pub agent: AgentKind,
+    /// Harness is running but did not expose a direct resume/session id, so the
+    /// daemon should fall back to native storage keyed by cwd.
+    pub infer_session_from_cwd: bool,
 }
 
 impl AgentMarkers {
@@ -146,12 +149,16 @@ pub fn detect_agent_signals(window: &Pane) -> AgentMarkers {
         })
         .unwrap_or_default();
 
+    let infer_session_from_cwd =
+        process_running && session_id.is_none() && matches!(detected_agent, Some(AgentKind::Codex));
+
     AgentMarkers {
         process_running,
         title_indicator,
         babel_tagged,
         session_id,
         agent,
+        infer_session_from_cwd,
     }
 }
 
@@ -396,7 +403,9 @@ pub async fn discover_agent_panes() -> Result<Vec<AgentPane>> {
                 .cloned();
 
             // Look up workspace for this OS window
-            let workspace = pane.platform_window_id.and_then(|pid| workspaces.get(&pid).copied());
+            let workspace = pane
+                .platform_window_id
+                .and_then(|pid| workspaces.get(&pid).copied());
 
             AgentPane {
                 addr: pane.addr(),

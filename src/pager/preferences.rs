@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::session_list::{CwdDisplayMode, HiddenDisplayMode};
+use super::session_list::{CwdDisplayMode, HiddenDisplayMode, SortColumn, SortDirection};
 use super::transcript::TranscriptRoleFilter;
 
 const RESUME_DISPLAY_PREFS: &str = "resume-display.json";
@@ -21,6 +21,9 @@ pub struct ResumeDisplayOptions {
     pub show_all: bool,
     pub hidden_display_mode: HiddenDisplayMode,
     pub cwd_display_mode: CwdDisplayMode,
+    pub sort_column: SortColumn,
+    pub sort_direction: SortDirection,
+    pub snip_columns: bool,
     pub show_transcript: bool,
     pub expand_messages: bool,
     pub transcript_role_filter: TranscriptRoleFilter,
@@ -32,6 +35,9 @@ impl Default for ResumeDisplayOptions {
             show_all: false,
             hidden_display_mode: HiddenDisplayMode::Normal,
             cwd_display_mode: CwdDisplayMode::Relative,
+            sort_column: SortColumn::ModifiedTime,
+            sort_direction: SortDirection::Descending,
+            snip_columns: true,
             show_transcript: true,
             expand_messages: false,
             transcript_role_filter: TranscriptRoleFilter::All,
@@ -90,6 +96,9 @@ mod tests {
             show_all: true,
             hidden_display_mode: HiddenDisplayMode::All,
             cwd_display_mode: CwdDisplayMode::TouchedProjects,
+            sort_column: SortColumn::Thread,
+            sort_direction: SortDirection::Ascending,
+            snip_columns: false,
             show_transcript: false,
             expand_messages: true,
             transcript_role_filter: TranscriptRoleFilter::UserOnly,

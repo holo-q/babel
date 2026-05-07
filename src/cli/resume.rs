@@ -4,11 +4,11 @@
 //! - `babel resume 3 6 9` - Resume sessions by ls-sessions index
 //! - `babel continue` / `babel c` - Resume most recent non-running session
 
+use anyhow::{anyhow, Context, Result};
+use console::style;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use anyhow::{anyhow, Context, Result};
-use console::style;
 use tracing::instrument;
 use vtr::{boundary, checkpoint};
 
@@ -132,7 +132,7 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
     }
 
     // Enrichment (SQLite queries + pre-sanitization) off the async executor.
-    let mut enriched: Vec<EnrichedSession> = tokio::task::spawn_blocking(move || {
+    let enriched: Vec<EnrichedSession> = tokio::task::spawn_blocking(move || {
         let conn = babel::babel_storage::init_db().ok();
         let mut enriched: Vec<EnrichedSession> = sessions
             .into_iter()
@@ -157,6 +157,7 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
                     generated_title,
                     last_prompt: session.last_prompt,
                     turn_count: session.turn_count,
+                    created_at: session.created_at,
                     last_seen_at: session.last_seen_at,
                     interactive: session.interactive,
                     command_only: session.command_only,

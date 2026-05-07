@@ -51,9 +51,16 @@ pub struct ResumeSelection {
 pub enum ResumeAction {
     None,
     Quit,
-    Launch(ResumeSelection),
+    Launch {
+        selection: ResumeSelection,
+        keep_focus: bool,
+    },
+    YankIdentity(EnrichedSession),
     Refresh,
-    SetHidden { session_key: String, hidden: bool },
+    SetHidden {
+        session_key: String,
+        hidden: bool,
+    },
 }
 
 enum TranscriptLoadResult {
@@ -301,9 +308,17 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Cycle cwd display label: relative -> absolute -> project name.
+            // Cycle cwd display label: relative -> absolute -> project name -> touched projects.
             KeyCode::Char('c') => {
                 let mode = self.sessions.cycle_cwd_display_mode();
+                self.status_message = format!("cwd display: {}", mode.label());
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Reverse cwd display cycle.
+            KeyCode::Char('C') => {
+                let mode = self.sessions.cycle_cwd_display_mode_reverse();
                 self.status_message = format!("cwd display: {}", mode.label());
                 self.mark_display_options_dirty();
                 ResumeAction::None
@@ -378,15 +393,26 @@ impl ResumeApp {
             // Resume selected session
             KeyCode::Enter => {
                 if let Some(session) = self.sessions.selected() {
-                    return ResumeAction::Launch(ResumeSelection {
-                        agent_kind: session.agent_kind,
-                        native_id: session.native_id.clone(),
-                        session_key: session.session_key.clone(),
-                        project_path: session.project_path.clone(),
-                    });
+                    return ResumeAction::Launch {
+                        selection: ResumeSelection {
+                            agent_kind: session.agent_kind,
+                            native_id: session.native_id.clone(),
+                            session_key: session.session_key.clone(),
+                            project_path: session.project_path.clone(),
+                        },
+                        keep_focus: key.modifiers.contains(KeyModifiers::SHIFT),
+                    };
                 }
                 ResumeAction::None
             }
+
+            // Yank full disk/native identity for debugging the selected row.
+            KeyCode::Char('y') => self
+                .sessions
+                .selected()
+                .cloned()
+                .map(ResumeAction::YankIdentity)
+                .unwrap_or(ResumeAction::None),
 
             // Sort session list by visible column index. `#` is a generated
             // row number, not source data; `0` covers the tenth data column.
@@ -520,7 +546,10 @@ where
                         match app.handle_key(key) {
                             ResumeAction::None => {}
                             ResumeAction::Quit => {}
-                            ResumeAction::Launch(selection) => {
+                            ResumeAction::Launch {
+                                selection,
+                                keep_focus,
+                            } => {
                                 let short_id: String =
                                     selection.native_id.chars().take(8).collect();
                                 app.status_message = format!(
@@ -528,7 +557,7 @@ where
                                     selection.agent_kind.slug(),
                                 );
                                 let tx = launch_tx.clone();
-                                let refocus = refocus_ctx.clone();
+                                let refocus = keep_focus.then(|| refocus_ctx.clone()).flatten();
                                 tokio::spawn(async move {
                                     let msg = match launch_harness_resume(&selection).await {
                                         Ok(msg) => {
@@ -548,6 +577,22 @@ where
                                     };
                                     let _ = tx.send(msg).await;
                                 });
+                            }
+                            ResumeAction::YankIdentity(session) => {
+                                match super::identity::session_identity_json(&session).and_then(
+                                    |text| {
+                                        super::identity::copy_to_clipboard(&text)
+                                            .map(|target| (target, text.len()))
+                                    },
+                                ) {
+                                    Ok((target, bytes)) => {
+                                        app.status_message =
+                                            format!("yanked identity ({bytes} bytes via {target})");
+                                    }
+                                    Err(e) => {
+                                        app.status_message = format!("yank failed: {e}");
+                                    }
+                                }
                             }
                             ResumeAction::Refresh => {
                                 refresh_app_sessions(&mut app, source, true, "refreshed").await?;

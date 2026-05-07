@@ -45,7 +45,8 @@ fn scan() -> Result<Vec<NativeSession>> {
                 .map(str::to_string);
             let mut cwd = None;
             let mut title = None;
-            let mut last_seen = modified_secs(&workspace);
+            let mut created_at = modified_secs(&workspace);
+            let mut last_seen = created_at;
             for line in text.lines() {
                 let Some((key, value)) = line.split_once(':') else {
                     continue;
@@ -57,7 +58,15 @@ fn scan() -> Result<Vec<NativeSession>> {
                         cwd = Some(value.to_string())
                     }
                     "summary" | "title" if !value.is_empty() => title = clean_session_text(value),
-                    "updated_at" | "created_at" => {
+                    "created_at" => {
+                        if let Some(ts) =
+                            json_epoch_secs(&serde_json::Value::String(value.to_string()))
+                        {
+                            created_at = ts;
+                            last_seen = last_seen.max(ts);
+                        }
+                    }
+                    "updated_at" => {
                         if let Some(ts) =
                             json_epoch_secs(&serde_json::Value::String(value.to_string()))
                         {
@@ -75,6 +84,7 @@ fn scan() -> Result<Vec<NativeSession>> {
                     display_name: title,
                     last_prompt: None,
                     turn_count: 0,
+                    created_at,
                     last_seen_at: last_seen,
                     interactive: true,
                     command_only: false,

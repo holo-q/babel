@@ -2109,8 +2109,12 @@ async fn warm_daemon_state(
     readiness: &Arc<RwLock<DaemonReadiness>>,
     enable_scrollparse: bool,
 ) -> Result<()> {
+    let warmup_started = Instant::now();
+
     // ── Step 1: Summary index (spawn_blocking + rayon parallel scan) ─────
     // Heavy CPU+IO work over 3000+ JSONL files — runs off the async executor.
+    let phase_started = Instant::now();
+    tracing::info!("daemon warmup: summary_index started");
     let (summary_index, session_paths) =
         tokio::task::spawn_blocking(|| rebuild_summary_index_blocking())
             .await
@@ -2118,6 +2122,7 @@ async fn warm_daemon_state(
             .context("Failed to build summary index")?;
 
     let total_summaries = summary_index.len();
+    let total_session_paths = session_paths.len();
     {
         let mut s = state.write().await;
         s.summary_index = summary_index;
@@ -2133,8 +2138,19 @@ async fn warm_daemon_state(
         Some(format!("{} summaries", total_summaries)),
     )
     .await;
+    tracing::info!(
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        summaries = total_summaries,
+        session_paths = total_session_paths,
+        "daemon warmup: summary_index done"
+    );
 
     // ── Step 2: Fingerprint index (spawn_blocking) ──────────────────────
+    let phase_started = Instant::now();
+    tracing::info!(
+        limit = config::FINGERPRINT_INDEX_LIMIT,
+        "daemon warmup: fingerprint_index started"
+    );
     let fp_limit = config::FINGERPRINT_INDEX_LIMIT;
     let (fingerprint_index, sessions_with_fingerprints) =
         tokio::task::spawn_blocking(move || rebuild_fingerprint_index_blocking(fp_limit))
@@ -2157,13 +2173,24 @@ async fn warm_daemon_state(
         Some(format!("{} fingerprints", sessions_with_fingerprints)),
     )
     .await;
+    tracing::info!(
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        fingerprints = sessions_with_fingerprints,
+        "daemon warmup: fingerprint_index done"
+    );
 
     // ── Step 3: Pane refresh (async — needs backend IO) ─────────────────
+    let phase_started = Instant::now();
+    tracing::info!("daemon warmup: pane_refresh started");
     let (windows_found, windows_identified, workspaces_count);
     {
         let mut s = state.write().await;
+        // Startup readiness should establish the structural pane cache. The
+        // scrollback/activity scan is intentionally left to the split
+        // background poll path below; doing it serially here makes daemon
+        // startup latency scale with live pane count and terminal I/O.
         let _ = s
-            .refresh_panes(!enable_scrollparse)
+            .refresh_panes(true)
             .await
             .context("Failed initial window scan")?;
         windows_found = s.panes.len();
@@ -2188,8 +2215,18 @@ async fn warm_daemon_state(
         )),
     )
     .await;
+    tracing::info!(
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        panes = windows_found,
+        identified = windows_identified,
+        workspaces = workspaces_count,
+        scrollparse_deferred = enable_scrollparse,
+        "daemon warmup: pane_refresh done"
+    );
 
     // ── Step 4: Hook state reconciliation ───────────────────────────────
+    let phase_started = Instant::now();
+    tracing::info!("daemon warmup: hook_reconcile started");
     {
         let live_sids: Vec<String> = {
             let s = state.read().await;
@@ -2237,6 +2274,10 @@ async fn warm_daemon_state(
             .await;
         }
     }
+    tracing::info!(
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "daemon warmup: hook_reconcile done"
+    );
 
     // ── Final: Log summary + mark ready ─────────────────────────────────
     if windows_found > 0 {
@@ -2275,6 +2316,10 @@ async fn warm_daemon_state(
         s.mark_daemon_ready();
     }
     mark_warmup_ready(readiness).await;
+    tracing::info!(
+        elapsed_ms = warmup_started.elapsed().as_millis(),
+        "daemon warmup: ready"
+    );
     Ok(())
 }
 

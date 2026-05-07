@@ -4,6 +4,7 @@
 //! - Session list with running indicators
 //! - Optional transcript preview with message rendering
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use ratatui::prelude::*;
@@ -13,11 +14,11 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent_kind::AgentKind;
-use crate::session_row::{self, AgeTone, SessionRow, StateKind};
+use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 
 use super::app::{PaneFocus, ResumeApp, TouchedProjectsState};
 use super::one_line;
-use super::project_metrics::ProjectTouchMetric;
+use super::project_metrics::{workgroup_style_for_path, ProjectTouchMetric, WorkgroupStyle};
 use super::session_list::{CwdDisplayMode, EnrichedSession};
 use super::transcript::{
     transcript_message_is_visible, transcript_message_row_count, TranscriptRoleFilter,
@@ -85,7 +86,14 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         ));
     }
     let header = Rect { height: 1, ..area };
-    frame.render_widget(Paragraph::new(Line::from(title_spans)), header);
+    frame.render_widget(
+        Paragraph::new(session_header_line(
+            title_spans,
+            app.status_message.as_str(),
+            header.width as usize,
+        )),
+        header,
+    );
     let body = Rect {
         y: area.y.saturating_add(1),
         height: area.height.saturating_sub(1),
@@ -133,13 +141,18 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         })
         .collect();
     let measured_widths = RowWidths::measure(
+        app.sessions.cwd_display_mode,
         viewport_rows
             .iter()
             .map(|rendered| (rendered.idx, &rendered.row, rendered.cwd.measure_width())),
     );
     let widths = measured_widths.fit(inner.width as usize);
     frame.render_widget(
-        Paragraph::new(render_session_header(&widths, inner.width as usize)),
+        Paragraph::new(render_session_header(
+            &widths,
+            app.sessions.cwd_display_mode,
+            inner.width as usize,
+        )),
         column_header,
     );
 
@@ -148,7 +161,13 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .enumerate()
         .map(|(idx, rendered)| {
             let is_selected = idx + scroll_offset == app.sessions.cursor;
-            render_session_item(rendered, &widths, inner.width as usize, is_selected)
+            render_session_item(
+                rendered,
+                &widths,
+                inner.width as usize,
+                is_selected,
+                app.snip_columns,
+            )
         })
         .collect();
 
@@ -173,7 +192,11 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
 }
 
 /// Render a single session item with the same cell order as `ls-sessions`.
-fn render_session_header(widths: &RowWidths, row_width: usize) -> Line<'static> {
+fn render_session_header(
+    widths: &RowWidths,
+    cwd_display_mode: CwdDisplayMode,
+    row_width: usize,
+) -> Line<'static> {
     let header_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
@@ -205,7 +228,7 @@ fn render_session_header(widths: &RowWidths, row_width: usize) -> Line<'static> 
     push_right_cell(
         &mut spans,
         &mut line_width,
-        "cwd",
+        cwd_display_mode.column_label(),
         widths.cwd,
         header_style,
         pad_style,
@@ -216,8 +239,17 @@ fn render_session_header(widths: &RowWidths, row_width: usize) -> Line<'static> 
     push_left_cell(
         &mut spans,
         &mut line_width,
-        "age",
-        widths.time,
+        "ct",
+        widths.created_time,
+        header_style,
+        pad_style,
+    );
+    push_span(&mut spans, &mut line_width, " ", pad_style);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        "mt",
+        widths.modified_time,
         header_style,
         pad_style,
     );
@@ -265,12 +297,14 @@ fn render_session_item(
     widths: &RowWidths,
     row_width: usize,
     is_selected: bool,
+    snip_columns: bool,
 ) -> ListItem<'static> {
     ListItem::new(render_session_line(
         rendered,
         widths,
         row_width,
         is_selected,
+        snip_columns,
     ))
 }
 
@@ -279,6 +313,7 @@ fn render_session_line(
     widths: &RowWidths,
     row_width: usize,
     is_selected: bool,
+    snip_columns: bool,
 ) -> Line<'static> {
     let idx = rendered.idx;
     let row = &rendered.row;
@@ -308,8 +343,16 @@ fn render_session_line(
         row_style(Style::default().fg(Color::DarkGray), running),
         selected_bg,
     );
-    let time_style = selected_style(
-        row_style(age_style(row.time_tone, row.bright), running),
+    let created_time_style = selected_style(
+        row_style(age_style(row.created_time_tone, row.bright), running),
+        selected_bg,
+    );
+    let modified_time_style = selected_style(
+        row_style(age_style(row.modified_time_tone, row.bright), running),
+        selected_bg,
+    );
+    let turns_style = selected_style(
+        row_style(turn_style(row.turn_tone, row.bright), running),
         selected_bg,
     );
     let pad_style = selected_style(Style::default(), selected_bg);
@@ -374,9 +417,18 @@ fn render_session_line(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        &row.time,
-        widths.time,
-        time_style,
+        &row.created_time,
+        widths.created_time,
+        created_time_style,
+        pad_style,
+    );
+    push_span(&mut spans, &mut line_width, " ", gap);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        &row.modified_time,
+        widths.modified_time,
+        modified_time_style,
         pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
@@ -385,7 +437,7 @@ fn render_session_line(
         &mut line_width,
         &row.turns,
         widths.turns,
-        row_dim,
+        turns_style,
         pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
@@ -398,22 +450,24 @@ fn render_session_line(
         pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_right_cell(
+    push_right_cell_mode(
         &mut spans,
         &mut line_width,
         &row.title,
         widths.title,
         title_style,
         pad_style,
+        snip_columns,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_right_cell(
+    push_right_cell_mode(
         &mut spans,
         &mut line_width,
         &row.last_prompt,
         widths.prompt,
         text_style,
         pad_style,
+        snip_columns,
     );
     finish_row_line(spans, line_width, row_width, gap)
 }
@@ -510,13 +564,8 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "c",
-            match app.sessions.cwd_display_mode {
-                CwdDisplayMode::Relative => "rel",
-                CwdDisplayMode::Absolute => "abs",
-                CwdDisplayMode::Project => "project",
-                CwdDisplayMode::TouchedProjects => "touch",
-            },
+            "c/C",
+            app.sessions.cwd_display_mode.column_label(),
             app.sessions.cwd_display_mode != CwdDisplayMode::Relative,
         );
         push_status_button(
@@ -557,16 +606,6 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
             app.transcript.role_filter.label(),
             app.transcript.role_filter != TranscriptRoleFilter::All,
         );
-
-        if !app.status_message.is_empty() {
-            push_span(&mut left_spans, &mut left_width, "  ", Style::default());
-            push_span(
-                &mut left_spans,
-                &mut left_width,
-                app.status_message.clone(),
-                Style::default().fg(Color::DarkGray),
-            );
-        }
     } else if !app.search_buffer.is_empty() {
         push_span(&mut left_spans, &mut left_width, "  /", base_style);
         push_span(
@@ -580,7 +619,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let keybinds = if app.is_searching {
         "Enter confirm  Esc cancel"
     } else {
-        "H hide  r refresh  j/k nav  J/K transcript  Enter launch  / search  q quit"
+        "H hide  y yank  r refresh  c/C cwd  j/k nav  J/K transcript  Enter launch  S-Enter keep  / search  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);
@@ -619,6 +658,36 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     frame.render_widget(para, area);
 }
 
+fn session_header_line(
+    left_spans: Vec<Span<'static>>,
+    status_message: &str,
+    width: usize,
+) -> Line<'static> {
+    if width == 0 || status_message.is_empty() {
+        return Line::from(clamp_spans_to_width(left_spans, width));
+    }
+
+    const LEFT_FLOOR: usize = 10;
+    let status_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let status_budget = width.saturating_sub(LEFT_FLOOR + 1);
+    if status_budget == 0 {
+        return Line::from(clamp_spans_to_width(left_spans, width));
+    }
+
+    let status = middle_truncate_str(status_message, status_budget);
+    let status_width = display_width(&status);
+    let left_budget = width.saturating_sub(status_width + 1);
+    let mut spans = clamp_spans_to_width(left_spans, left_budget);
+    let left_width = spans_display_width(&spans);
+    let padding = width.saturating_sub(left_width + status_width);
+
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::styled(status, status_style));
+    Line::from(clamp_spans_to_width(spans, width))
+}
+
 fn push_status_button(
     spans: &mut Vec<Span<'static>>,
     line_width: &mut usize,
@@ -643,36 +712,46 @@ fn push_status_button(
     let label_style = Style::default().fg(fg).bg(bg);
 
     push_span(spans, line_width, "  ", Style::default());
+    push_span(spans, line_width, " ", label_style);
     push_span(spans, line_width, key.to_string(), key_style);
     push_span(spans, line_width, " ", label_style);
     push_span(spans, line_width, label.to_string(), label_style);
+    push_span(spans, line_width, " ", label_style);
 }
 
 // === Helper functions ===
 
 fn transcript_title(app: &ResumeApp) -> String {
     let filter = app.transcript.role_filter.label();
+    let cwd = app
+        .transcript
+        .session_id
+        .as_deref()
+        .and_then(|id| {
+            app.sessions
+                .sessions
+                .iter()
+                .find(|session| session.native_id == id)
+        })
+        .and_then(|session| session.project_path.as_ref())
+        .map(|path| format!(" cwd:{}", path.display()))
+        .unwrap_or_default();
+
     match &app.transcript.session_id {
-        Some(id) => format!("Transcript [{}] [{filter}]", &id[..8.min(id.len())]),
-        None => format!("Transcript [{filter}]"),
+        Some(id) => format!("Transcript [{}] [{filter}]{cwd}", &id[..8.min(id.len())]),
+        None => format!("Transcript [{filter}]{cwd}"),
     }
 }
 
 fn session_filter_label_spans(app: &mut ResumeApp, title_style: Style) -> Vec<Span<'static>> {
-    let cwd_label = if app.sessions.cwd_display_mode == CwdDisplayMode::TouchedProjects {
-        "cwd:projects".to_string()
+    let base = if app.sessions.show_all {
+        "all".to_string()
     } else {
         app.sessions
             .current_cwd
             .as_deref()
-            .map(|cwd| cwd_label(cwd, app.sessions.cwd_display_mode))
+            .map(cwd_scope_label)
             .unwrap_or_else(|| "cwd:?".to_string())
-    };
-
-    let base = if app.sessions.show_all {
-        "all".to_string()
-    } else {
-        cwd_label
     };
     let label = if let Some(suffix) = app.sessions.hidden_display_mode.suffix() {
         format!("{base}{suffix}")
@@ -701,11 +780,46 @@ fn frequency_rgb(count: u32, max_count: u32, normal: (u8, u8, u8)) -> Color {
 fn style_rgb(style: Style) -> Option<(u8, u8, u8)> {
     match style.fg {
         Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+        Some(Color::Indexed(ansi)) => ansi256_to_rgb(ansi),
         Some(Color::Cyan) => Some((0, 255, 255)),
         Some(Color::White) => Some((255, 255, 255)),
         Some(Color::Gray) => Some((160, 160, 160)),
         Some(Color::DarkGray) => Some((80, 80, 80)),
         _ => None,
+    }
+}
+
+fn ansi256_to_rgb(ansi: u8) -> Option<(u8, u8, u8)> {
+    const ANSI16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+
+    match ansi {
+        0..=15 => Some(ANSI16[ansi as usize]),
+        16..=231 => {
+            let idx = ansi - 16;
+            let channel = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            Some((channel(idx / 36), channel((idx / 6) % 6), channel(idx % 6)))
+        }
+        232..=255 => {
+            let shade = 8 + (ansi - 232) * 10;
+            Some((shade, shade, shade))
+        }
     }
 }
 
@@ -720,18 +834,8 @@ fn hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
-fn cwd_label(cwd: &Path, mode: CwdDisplayMode) -> String {
-    let value = match mode {
-        CwdDisplayMode::Relative => relative_cwd_label(cwd),
-        CwdDisplayMode::Absolute => cwd.display().to_string(),
-        CwdDisplayMode::Project => cwd
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| cwd.display().to_string()),
-        CwdDisplayMode::TouchedProjects => relative_cwd_label(cwd),
-    };
-    format!("cwd:{value}")
+fn cwd_scope_label(cwd: &Path) -> String {
+    format!("cwd:{}", relative_cwd_label(cwd))
 }
 
 fn relative_cwd_label(cwd: &Path) -> String {
@@ -755,6 +859,7 @@ struct RenderedSessionRow {
 #[derive(Clone)]
 enum CwdCell {
     Text(String),
+    WorkgroupText(StyledCwdLabel),
     TouchlessText(String),
     Projects(Vec<ProjectTouchMetric>),
     Loading,
@@ -762,16 +867,30 @@ enum CwdCell {
     Error,
 }
 
+#[derive(Clone)]
+struct StyledCwdLabel {
+    workgroup_prefix: String,
+    suffix: String,
+    ansi256: u8,
+}
+
+impl StyledCwdLabel {
+    fn plain_text(&self) -> String {
+        format!("{}{}", self.workgroup_prefix, self.suffix)
+    }
+}
+
 impl CwdCell {
     fn plain_text(&self) -> String {
         match self {
             Self::Text(text) => text.clone(),
+            Self::WorkgroupText(label) => label.plain_text(),
             Self::TouchlessText(text) => text.clone(),
             Self::Projects(projects) if projects.is_empty() => String::new(),
             Self::Projects(projects) => projects
                 .iter()
                 .take(4)
-                .map(|project| relative_cwd_label(&project.path))
+                .map(|project| project_leaf_label(&project.path))
                 .collect::<Vec<_>>()
                 .join(", "),
             Self::Loading => "projects:loading".to_string(),
@@ -799,19 +918,17 @@ fn cwd_cell_for_session(
         CwdDisplayMode::Relative => session
             .project_path
             .as_deref()
-            .map(relative_cwd_label)
-            .map(CwdCell::Text)
+            .map(|path| styled_cwd_cell(path, *mode))
             .unwrap_or(CwdCell::Empty),
         CwdDisplayMode::Absolute => session
             .project_path
             .as_ref()
-            .map(|path| CwdCell::Text(path.display().to_string()))
+            .map(|path| styled_cwd_cell(path, *mode))
             .unwrap_or(CwdCell::Empty),
         CwdDisplayMode::Project => session
             .project_path
-            .as_deref()
-            .and_then(|path| path.file_name().and_then(|name| name.to_str()))
-            .map(|name| CwdCell::Text(name.to_string()))
+            .as_ref()
+            .map(|path| styled_cwd_cell(path, *mode))
             .unwrap_or_else(|| {
                 session
                     .project_path
@@ -835,6 +952,80 @@ fn cwd_cell_for_session(
     }
 }
 
+fn styled_cwd_cell(path: &Path, mode: CwdDisplayMode) -> CwdCell {
+    let label = match mode {
+        CwdDisplayMode::Relative | CwdDisplayMode::TouchedProjects => relative_cwd_label(path),
+        CwdDisplayMode::Absolute => path.display().to_string(),
+        CwdDisplayMode::Project => project_leaf_label(path),
+    };
+
+    let Some(style) = workgroup_style_for_path(path) else {
+        return CwdCell::Text(label);
+    };
+    styled_cwd_label(path, mode, label.clone(), &style)
+        .map(CwdCell::WorkgroupText)
+        .unwrap_or(CwdCell::Text(label))
+}
+
+fn styled_cwd_label(
+    _path: &Path,
+    mode: CwdDisplayMode,
+    label: String,
+    style: &WorkgroupStyle,
+) -> Option<StyledCwdLabel> {
+    if label.is_empty() {
+        return None;
+    }
+
+    if mode == CwdDisplayMode::Project {
+        return Some(StyledCwdLabel {
+            workgroup_prefix: label,
+            suffix: String::new(),
+            ansi256: style.ansi256,
+        });
+    }
+
+    let workgroup_label = match mode {
+        CwdDisplayMode::Absolute => style.root.display().to_string(),
+        CwdDisplayMode::Relative | CwdDisplayMode::TouchedProjects => {
+            relative_cwd_label(&style.root)
+        }
+        CwdDisplayMode::Project => unreachable!("project mode returned above"),
+    };
+
+    if workgroup_label.is_empty() {
+        return None;
+    }
+
+    if let Some(suffix) = label.strip_prefix(&workgroup_label) {
+        if !(suffix.is_empty() || suffix.starts_with(std::path::MAIN_SEPARATOR)) {
+            return Some(StyledCwdLabel {
+                workgroup_prefix: label,
+                suffix: String::new(),
+                ansi256: style.ansi256,
+            });
+        }
+        return Some(StyledCwdLabel {
+            workgroup_prefix: workgroup_label,
+            suffix: suffix.to_string(),
+            ansi256: style.ansi256,
+        });
+    }
+
+    Some(StyledCwdLabel {
+        workgroup_prefix: label,
+        suffix: String::new(),
+        ansi256: style.ansi256,
+    })
+}
+
+fn project_leaf_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 #[derive(Clone, Copy, Default)]
 struct RowWidths {
     state: usize,
@@ -842,7 +1033,8 @@ struct RowWidths {
     harness: usize,
     workspace: usize,
     cwd: usize,
-    time: usize,
+    created_time: usize,
+    modified_time: usize,
     turns: usize,
     title: usize,
     prompt: usize,
@@ -852,8 +1044,11 @@ impl RowWidths {
     const TITLE_BUDGET_PERCENT: usize = 42;
     const PROMPT_FLOOR_PERCENT: usize = 35;
 
-    fn measure<'a>(rows: impl Iterator<Item = (usize, &'a SessionRow, usize)>) -> Self {
-        let mut widths = Self::header_minimums();
+    fn measure<'a>(
+        cwd_display_mode: CwdDisplayMode,
+        rows: impl Iterator<Item = (usize, &'a SessionRow, usize)>,
+    ) -> Self {
+        let mut widths = Self::header_minimums(cwd_display_mode);
 
         for (idx, row, cwd_width) in rows {
             widths.state = widths.state.max(display_width(row.state_icon));
@@ -861,7 +1056,8 @@ impl RowWidths {
             widths.harness = widths.harness.max(row.harness.len());
             widths.workspace = widths.workspace.max(display_width(&row.workspace));
             widths.cwd = widths.cwd.max(cwd_width);
-            widths.time = widths.time.max(display_width(&row.time));
+            widths.created_time = widths.created_time.max(display_width(&row.created_time));
+            widths.modified_time = widths.modified_time.max(display_width(&row.modified_time));
             widths.turns = widths.turns.max(display_width(&row.turns));
             widths.title = widths.title.max(display_width(&row.title));
             widths.prompt = widths.prompt.max(display_width(&row.last_prompt));
@@ -872,14 +1068,15 @@ impl RowWidths {
         widths
     }
 
-    fn header_minimums() -> Self {
+    fn header_minimums(cwd_display_mode: CwdDisplayMode) -> Self {
         Self {
             state: 1,
             index: display_width("#"),
             harness: display_width("harness"),
             workspace: display_width("ws"),
-            cwd: display_width("cwd"),
-            time: display_width("age"),
+            cwd: display_width(cwd_display_mode.column_label()),
+            created_time: display_width("ct"),
+            modified_time: display_width("mt"),
             turns: display_width("turns"),
             title: display_width("thread"),
             prompt: display_width("prompt"),
@@ -900,7 +1097,7 @@ impl RowWidths {
     fn total_width(&self) -> usize {
         // Leading state cluster:
         // " " + state icon + " " + harness + "  " + workspace + "  " + cwd
-        // + "  " + filter + " " + time + "  " + turns + "  " + index + "  "
+        // + "  " + filter + " " + ct + " " + mt + "  " + turns + "  " + index + "  "
         // + title + "  " + prompt.
         1 + self.state
             + 1
@@ -912,7 +1109,9 @@ impl RowWidths {
             + 2
             + 1
             + 1
-            + self.time
+            + self.created_time
+            + 1
+            + self.modified_time
             + 2
             + self.turns
             + 2
@@ -972,7 +1171,18 @@ impl RowWidths {
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.workspace, 1);
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.harness, 1);
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.turns, 1);
-        self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.time, 1);
+        self.shrink_fixed_column(
+            row_width,
+            min_text_width,
+            |widths| &mut widths.created_time,
+            1,
+        );
+        self.shrink_fixed_column(
+            row_width,
+            min_text_width,
+            |widths| &mut widths.modified_time,
+            1,
+        );
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.index, 1);
     }
 
@@ -983,7 +1193,8 @@ impl RowWidths {
         self.shrink_column(row_width, |widths| &mut widths.workspace, 1);
         self.shrink_column(row_width, |widths| &mut widths.harness, 1);
         self.shrink_column(row_width, |widths| &mut widths.turns, 1);
-        self.shrink_column(row_width, |widths| &mut widths.time, 1);
+        self.shrink_column(row_width, |widths| &mut widths.created_time, 1);
+        self.shrink_column(row_width, |widths| &mut widths.modified_time, 1);
         self.shrink_column(row_width, |widths| &mut widths.index, 1);
     }
 
@@ -1075,6 +1286,13 @@ fn clamp_spans_to_width(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span
     out
 }
 
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum()
+}
+
 fn push_left_cell(
     spans: &mut Vec<Span<'static>>,
     line_width: &mut usize,
@@ -1083,7 +1301,19 @@ fn push_left_cell(
     text_style: Style,
     pad_style: Style,
 ) {
-    let fitted = fit_cell_text(text, width);
+    push_left_cell_mode(spans, line_width, text, width, text_style, pad_style, true);
+}
+
+fn push_left_cell_mode(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: &str,
+    width: usize,
+    text_style: Style,
+    pad_style: Style,
+    snip: bool,
+) {
+    let fitted = fit_cell_text(text, width, snip);
     let text_width = display_width(&fitted);
     if text_width < width {
         push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
@@ -1099,7 +1329,19 @@ fn push_right_cell(
     text_style: Style,
     pad_style: Style,
 ) {
-    let fitted = fit_cell_text(text, width);
+    push_right_cell_mode(spans, line_width, text, width, text_style, pad_style, true);
+}
+
+fn push_right_cell_mode(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: &str,
+    width: usize,
+    text_style: Style,
+    pad_style: Style,
+    snip: bool,
+) {
+    let fitted = fit_cell_text(text, width, snip);
     push_span(spans, line_width, fitted.clone(), text_style);
     let text_width = display_width(&fitted);
     if text_width < width {
@@ -1123,11 +1365,10 @@ fn push_cwd_cell(
                 .map(|project| project.touch_count)
                 .max()
                 .unwrap_or(1);
-            let normal = style_rgb(text_style).unwrap_or((120, 120, 120));
             let mut used = 0;
             for (idx, project) in projects.iter().take(4).enumerate() {
                 let prefix = if idx == 0 { "" } else { ", " };
-                let label = relative_cwd_label(&project.path);
+                let label = project_leaf_label(&project.path);
                 let segment = format!("{prefix}{label}");
                 let segment_width = display_width(&segment);
                 if used + segment_width > width {
@@ -1137,6 +1378,11 @@ fn push_cwd_cell(
                     break;
                 }
                 used += segment_width;
+                let normal = project
+                    .ansi256
+                    .and_then(ansi256_to_rgb)
+                    .or_else(|| style_rgb(text_style))
+                    .unwrap_or((120, 120, 120));
                 push_span(
                     spans,
                     line_width,
@@ -1153,6 +1399,9 @@ fn push_cwd_cell(
                     pad_style,
                 );
             }
+        }
+        CwdCell::WorkgroupText(label) => {
+            push_styled_cwd_label(spans, line_width, label, width, text_style, pad_style);
         }
         CwdCell::TouchlessText(text) => push_right_cell(
             spans,
@@ -1173,11 +1422,50 @@ fn push_cwd_cell(
     }
 }
 
-fn fit_cell_text(text: &str, width: usize) -> String {
+fn push_styled_cwd_label(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    label: &StyledCwdLabel,
+    width: usize,
+    text_style: Style,
+    pad_style: Style,
+) {
+    let full = label.plain_text();
+    let fitted = fit_cell_text(&full, width, true);
+    let styled = text_style.fg(Color::Indexed(label.ansi256));
+    let text_width = display_width(&fitted);
+
+    if fitted == full {
+        push_span(spans, line_width, label.workgroup_prefix.clone(), styled);
+        push_span(spans, line_width, label.suffix.clone(), text_style);
+    } else if let Some(suffix) = fitted.strip_prefix(&label.workgroup_prefix) {
+        push_span(spans, line_width, label.workgroup_prefix.clone(), styled);
+        push_span(spans, line_width, suffix.to_string(), text_style);
+    } else {
+        // Middle truncation preserves the left edge, which is where the workgroup
+        // root appears in relative/absolute labels. If the split point no longer
+        // matches cleanly, keep the visible cwd token workgroup-colored instead of
+        // losing scope color completely.
+        push_span(spans, line_width, fitted, styled);
+    }
+
+    if text_width < width {
+        push_span(
+            spans,
+            line_width,
+            " ".repeat(width.saturating_sub(text_width)),
+            pad_style,
+        );
+    }
+}
+
+fn fit_cell_text(text: &str, width: usize, snip: bool) -> String {
     if width == 0 {
         String::new()
-    } else {
+    } else if snip {
         middle_truncate_str(text, width)
+    } else {
+        take_width_from_start(text, width)
     }
 }
 
@@ -1395,7 +1683,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 
 /// Pre-sanitize transcript messages at load time so per-frame rendering
 /// skips ANSI stripping and tool-call preview formatting entirely.
-pub(super) fn prepare_transcript_messages(messages: &mut [Message]) {
+pub fn prepare_transcript_messages(messages: &mut [Message]) {
     for msg in messages.iter_mut() {
         match &msg.kind {
             MessageKind::ToolCall { name, args } => {
@@ -1425,13 +1713,13 @@ fn transcript_rendered_row_count(
     expand_messages: bool,
     role_filter: TranscriptRoleFilter,
 ) -> usize {
-    messages
+    transcript_render_items(messages, role_filter)
         .iter()
-        .map(|msg| transcript_message_row_count(msg, expand_messages, role_filter))
+        .map(|item| transcript_render_item_row_count(item, expand_messages, role_filter))
         .sum()
 }
 
-fn transcript_visible_lines(
+pub fn transcript_visible_lines(
     messages: &[Message],
     expand_messages: bool,
     scroll_offset: usize,
@@ -1442,40 +1730,171 @@ fn transcript_visible_lines(
 ) -> Vec<Line<'static>> {
     let mut remaining_skip = scroll_offset;
     let mut lines = Vec::new();
+    for item in transcript_render_items(messages, role_filter) {
+        let row_count = transcript_render_item_row_count(&item, expand_messages, role_filter);
+        if remaining_skip >= row_count {
+            remaining_skip -= row_count;
+            continue;
+        }
+
+        match item {
+            TranscriptRenderItem::Message { msg, gap_before } => {
+                let message_lines =
+                    transcript_message_lines(msg, expand_messages, row_width, palette, gap_before);
+                for line in message_lines.into_iter().skip(remaining_skip) {
+                    if lines.len() >= height {
+                        return lines;
+                    }
+                    lines.push(line);
+                }
+            }
+            TranscriptRenderItem::Gap => {
+                if remaining_skip == 0 {
+                    if lines.len() >= height {
+                        return lines;
+                    }
+                    lines.push(transcript_gap_line());
+                }
+            }
+        }
+        remaining_skip = 0;
+    }
+
+    lines
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptRenderItem<'a> {
+    Message { msg: &'a Message, gap_before: bool },
+    Gap,
+}
+
+fn transcript_render_items(
+    messages: &[Message],
+    role_filter: TranscriptRoleFilter,
+) -> Vec<TranscriptRenderItem<'_>> {
+    match role_filter {
+        TranscriptRoleFilter::All => messages
+            .iter()
+            .map(|msg| TranscriptRenderItem::Message {
+                msg,
+                gap_before: false,
+            })
+            .collect(),
+        TranscriptRoleFilter::Conversation => conversation_transcript_render_items(messages),
+        TranscriptRoleFilter::Condensed => condensed_transcript_render_items(messages),
+        TranscriptRoleFilter::UserOnly => messages
+            .iter()
+            .filter(|msg| matches!(msg.kind, MessageKind::User))
+            .map(|msg| TranscriptRenderItem::Message {
+                msg,
+                gap_before: false,
+            })
+            .collect(),
+    }
+}
+
+fn conversation_transcript_render_items(messages: &[Message]) -> Vec<TranscriptRenderItem<'_>> {
+    let mut items = Vec::new();
     let mut seen_visible = false;
     let mut hidden_since_visible = false;
 
     for msg in messages {
-        if !transcript_message_is_visible(&msg.kind, role_filter) {
-            if seen_visible && role_filter == TranscriptRoleFilter::Conversation {
+        if !transcript_message_is_visible(&msg.kind, TranscriptRoleFilter::Conversation) {
+            if seen_visible {
                 hidden_since_visible = true;
             }
             continue;
         }
 
-        let row_count = transcript_message_row_count(msg, expand_messages, role_filter);
-        if remaining_skip >= row_count {
-            remaining_skip -= row_count;
-            seen_visible = true;
-            hidden_since_visible = false;
-            continue;
-        }
-
-        let gap_before = hidden_since_visible;
-        let message_lines =
-            transcript_message_lines(msg, expand_messages, row_width, palette, gap_before);
-        for line in message_lines.into_iter().skip(remaining_skip) {
-            if lines.len() >= height {
-                return lines;
-            }
-            lines.push(line);
-        }
-        remaining_skip = 0;
+        items.push(TranscriptRenderItem::Message {
+            msg,
+            gap_before: hidden_since_visible,
+        });
         seen_visible = true;
         hidden_since_visible = false;
     }
 
-    lines
+    items
+}
+
+fn condensed_transcript_render_items(messages: &[Message]) -> Vec<TranscriptRenderItem<'_>> {
+    let mut items = Vec::new();
+    let mut idx = 0;
+
+    while idx < messages.len() {
+        if matches!(messages[idx].kind, MessageKind::User) {
+            items.push(TranscriptRenderItem::Message {
+                msg: &messages[idx],
+                gap_before: false,
+            });
+            idx += 1;
+            continue;
+        }
+
+        let block_start = idx;
+        while idx < messages.len() && !matches!(messages[idx].kind, MessageKind::User) {
+            idx += 1;
+        }
+        push_condensed_assistant_block(&messages[block_start..idx], &mut items);
+    }
+
+    items
+}
+
+fn push_condensed_assistant_block<'a>(
+    block: &'a [Message],
+    items: &mut Vec<TranscriptRenderItem<'a>>,
+) {
+    let assistant_positions: Vec<usize> = block
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, msg)| matches!(msg.kind, MessageKind::Assistant).then_some(idx))
+        .collect();
+
+    let Some(&first) = assistant_positions.first() else {
+        return;
+    };
+    let last = *assistant_positions.last().unwrap_or(&first);
+
+    items.push(TranscriptRenderItem::Message {
+        msg: &block[first],
+        gap_before: false,
+    });
+
+    if last == first {
+        return;
+    }
+
+    if last > first + 1 {
+        items.push(TranscriptRenderItem::Gap);
+    }
+    items.push(TranscriptRenderItem::Message {
+        msg: &block[last],
+        gap_before: false,
+    });
+}
+
+fn transcript_render_item_row_count(
+    item: &TranscriptRenderItem<'_>,
+    expand_messages: bool,
+    role_filter: TranscriptRoleFilter,
+) -> usize {
+    match item {
+        TranscriptRenderItem::Message { msg, .. } => {
+            transcript_message_row_count(msg, expand_messages, role_filter)
+        }
+        TranscriptRenderItem::Gap => 1,
+    }
+}
+
+fn transcript_gap_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "⋮",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    ))
 }
 
 fn transcript_message_lines(
@@ -1487,44 +1906,45 @@ fn transcript_message_lines(
 ) -> Vec<Line<'static>> {
     // Content is pre-sanitized at load time by prepare_transcript_messages.
     // ToolCall content holds the pre-computed preview string.
+    let content = transcript_render_content(&msg.content);
     let assistant_prefix = if gap_before { "⋮ " } else { "● " };
     match &msg.kind {
         MessageKind::User if expand_messages => {
-            expanded_message_lines("> ", &msg.content, palette.user_style(), row_width)
+            expanded_message_lines("> ", &content, palette.user_style(), row_width)
         }
         MessageKind::Assistant if expand_messages => expanded_message_lines(
             assistant_prefix,
-            &msg.content,
+            &content,
             palette.assistant_style(),
             row_width,
         ),
         MessageKind::User => vec![collapsed_message_line(
             "> ",
-            &msg.content,
+            &content,
             palette.user_style(),
             row_width,
         )],
         MessageKind::Assistant => vec![collapsed_message_line(
             assistant_prefix,
-            &msg.content,
+            &content,
             palette.assistant_style(),
             row_width,
         )],
         MessageKind::ToolCall { .. } => vec![collapsed_message_line(
             "● ",
-            &msg.content,
+            &content,
             Style::default().fg(Color::Yellow),
             row_width,
         )],
         MessageKind::ToolOutput => vec![collapsed_message_line(
             "  ⎿ ",
-            &msg.content,
+            &content,
             Style::default().fg(Color::DarkGray),
             row_width,
         )],
         MessageKind::Status => vec![collapsed_message_line(
             "",
-            &msg.content,
+            &content,
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -1533,8 +1953,19 @@ fn transcript_message_lines(
     }
 }
 
+fn transcript_render_content(content: &str) -> Cow<'_, str> {
+    if content
+        .chars()
+        .any(|ch| ch == '\x1b' || ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        Cow::Owned(sanitize_transcript_text(content))
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
 #[derive(Clone, Copy)]
-struct TranscriptPalette {
+pub struct TranscriptPalette {
     assistant_text: Color,
     user_text: Color,
     user_highlight_bg: Color,
@@ -1581,7 +2012,7 @@ fn normal_text_fg() -> Color {
     Color::White
 }
 
-fn transcript_palette(agent_kind: AgentKind) -> TranscriptPalette {
+pub fn transcript_palette(agent_kind: AgentKind) -> TranscriptPalette {
     let (r, g, b) = hex_rgb(agent_kind.accent_color()).unwrap_or((160, 160, 160));
     let accent = Color::Rgb(r, g, b);
 
@@ -1843,6 +2274,21 @@ fn age_style(tone: AgeTone, bright: bool) -> Style {
     }
 }
 
+fn turn_style(tone: TurnTone, bright: bool) -> Style {
+    let (r, g, b) = tone.rgb();
+    let style = Style::default().fg(Color::Rgb(r, g, b));
+    let style = if tone.is_bold() {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    };
+    if tone.should_dim(bright) {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
 fn state_style(state_kind: StateKind) -> Style {
     match state_kind {
         StateKind::Idle => Style::default().fg(Color::DarkGray),
@@ -1873,7 +2319,7 @@ mod tests {
 
     #[test]
     fn formats_codex_exec_command_with_cmd() {
-        let args = r#"{"cmd":"git status --short","workdir":"/home/nuck/holoq/repo-os/babel"}"#;
+        let args = r#"{"cmd":"git status --short","workdir":"/workspace/babel"}"#;
         assert_eq!(
             tool_call_preview("exec_command", args),
             "exec: git status --short"
@@ -1882,7 +2328,7 @@ mod tests {
 
     #[test]
     fn formats_edit_tool_call_with_short_path_and_replace_count() {
-        let args = r#"{"file_path":"/home/nuck/holoq/repo-os/babel/src/pager/ui.rs","old_string":"a\nb\n","new_string":"c\n"}"#;
+        let args = r#"{"file_path":"/workspace/babel/src/pager/ui.rs","old_string":"a\nb\n","new_string":"c\n"}"#;
         assert_eq!(
             tool_call_preview("Edit", args),
             "Edit: …/src/pager/ui.rs replace 2L"
@@ -1891,7 +2337,7 @@ mod tests {
 
     #[test]
     fn formats_read_tool_call_with_line_range() {
-        let args = r#"{"file_path":"/home/nuck/holoq/repo-os/babel/src/pager/ui.rs","offset":120,"limit":20}"#;
+        let args = r#"{"file_path":"/workspace/babel/src/pager/ui.rs","offset":120,"limit":20}"#;
         assert_eq!(
             tool_call_preview("Read", args),
             "Read: …/src/pager/ui.rs L120-139"
@@ -1915,7 +2361,8 @@ mod tests {
             harness: 6,
             workspace: 1,
             cwd: 12,
-            time: 2,
+            created_time: 2,
+            modified_time: 2,
             turns: 3,
             title: 10,
             prompt: 10,
@@ -1928,13 +2375,14 @@ mod tests {
 
     #[test]
     fn row_width_measurement_includes_column_header_labels() {
-        let widths = RowWidths::measure(std::iter::empty());
+        let widths = RowWidths::measure(CwdDisplayMode::Relative, std::iter::empty());
 
         assert_eq!(widths.state, 1);
         assert_eq!(widths.harness, "harness".len());
         assert_eq!(widths.workspace, "ws".len());
         assert_eq!(widths.cwd, "cwd".len());
-        assert_eq!(widths.time, "age".len());
+        assert_eq!(widths.created_time, "ct".len());
+        assert_eq!(widths.modified_time, "mt".len());
         assert_eq!(widths.turns, "turns".len());
         assert_eq!(widths.index, "#".len());
         assert_eq!(widths.title, "thread".len());
@@ -1949,7 +2397,8 @@ mod tests {
             harness: 6,
             workspace: 1,
             cwd: 40,
-            time: 2,
+            created_time: 2,
+            modified_time: 2,
             turns: 4,
             title: 80,
             prompt: 80,
@@ -1968,7 +2417,8 @@ mod tests {
             harness: 6,
             workspace: 28,
             cwd: 54,
-            time: 4,
+            created_time: 4,
+            modified_time: 4,
             turns: 4,
             title: 90,
             prompt: 120,
@@ -1990,7 +2440,8 @@ mod tests {
             harness: 6,
             workspace: 1,
             cwd: 20,
-            time: 4,
+            created_time: 4,
+            modified_time: 4,
             turns: 4,
             title: 240,
             prompt: 160,
@@ -2013,13 +2464,14 @@ mod tests {
             harness: 12,
             workspace: 28,
             cwd: 70,
-            time: 6,
+            created_time: 6,
+            modified_time: 6,
             turns: 6,
             title: 120,
             prompt: 120,
         };
 
-        let line = render_session_header(&widths, 50);
+        let line = render_session_header(&widths, CwdDisplayMode::Relative, 50);
 
         assert!(line_display_width(&line) <= 50);
     }
@@ -2030,11 +2482,18 @@ mod tests {
             state_icon: "●",
             state_kind: StateKind::Working,
             harness: "codex".to_string(),
+            native_id: "abc123".to_string(),
             filter_tag: " ",
             workspace: "123456789".to_string(),
             cwd: "~/holoq/repo-os/babel".to_string(),
+            created_time: "456h".to_string(),
+            created_time_tone: AgeTone::Month,
+            modified_time: "123h".to_string(),
+            modified_time_tone: AgeTone::Week,
             time: "123h".to_string(),
             time_tone: AgeTone::Week,
+            turn_count: 999,
+            turn_tone: TurnTone::from_turn_count(999),
             turns: "999t".to_string(),
             title: "a very long generated title that should never cross into transcript"
                 .to_string(),
@@ -2056,14 +2515,15 @@ mod tests {
             harness: 12,
             workspace: 28,
             cwd: 70,
-            time: 6,
+            created_time: 6,
+            modified_time: 6,
             turns: 6,
             title: 120,
             prompt: 120,
         }
         .fit(60);
 
-        let line = render_session_line(&rendered, &widths, 60, true);
+        let line = render_session_line(&rendered, &widths, 60, true, true);
 
         assert!(line_display_width(&line) <= 60);
     }
@@ -2386,13 +2846,88 @@ mod tests {
     }
 
     #[test]
-    fn transcript_role_filter_cycles_through_all_conversation_user() {
+    fn condensed_transcript_filter_collapses_middle_assistant_nodes() {
+        let messages = vec![
+            Message {
+                kind: MessageKind::User,
+                content: "user prompt".to_string(),
+                line: 0,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "first assistant".to_string(),
+                line: 1,
+            },
+            Message {
+                kind: MessageKind::ToolCall {
+                    name: "Bash".to_string(),
+                    args: "{\"command\":\"echo hidden\"}".to_string(),
+                },
+                content: "ignored".to_string(),
+                line: 2,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "middle assistant".to_string(),
+                line: 3,
+            },
+            Message {
+                kind: MessageKind::Status,
+                content: "status".to_string(),
+                line: 4,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "last assistant".to_string(),
+                line: 5,
+            },
+        ];
+
+        assert_eq!(
+            transcript_rendered_row_count(&messages, false, TranscriptRoleFilter::Condensed),
+            4
+        );
+        let lines = transcript_visible_lines(
+            &messages,
+            false,
+            0,
+            8,
+            80,
+            transcript_palette(AgentKind::Claude),
+            TranscriptRoleFilter::Condensed,
+        );
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert_eq!(rendered.len(), 4);
+        assert!(rendered[0].contains("> user prompt"));
+        assert!(rendered[1].contains("first assistant"));
+        assert_eq!(rendered[2], "⋮");
+        assert!(rendered[3].contains("last assistant"));
+        assert!(!rendered.join("\n").contains("middle assistant"));
+        assert!(!rendered.join("\n").contains("echo hidden"));
+        assert!(!rendered.join("\n").contains("status"));
+    }
+
+    #[test]
+    fn transcript_role_filter_cycles_through_all_conversation_condensed_user() {
         assert_eq!(
             TranscriptRoleFilter::All.cycle(),
             TranscriptRoleFilter::Conversation
         );
         assert_eq!(
             TranscriptRoleFilter::Conversation.cycle(),
+            TranscriptRoleFilter::Condensed
+        );
+        assert_eq!(
+            TranscriptRoleFilter::Condensed.cycle(),
             TranscriptRoleFilter::UserOnly
         );
         assert_eq!(
@@ -2404,30 +2939,88 @@ mod tests {
     #[test]
     fn transcript_title_includes_role_filter_label() {
         let mut app = ResumeApp::new(Vec::new(), None);
-        assert_eq!(transcript_title(&app), "Transcript [all]");
+        assert_eq!(transcript_title(&mut app), "Transcript [all]");
 
         app.transcript.session_id = Some("abcdef123456".to_string());
         app.transcript.role_filter = TranscriptRoleFilter::Conversation;
 
         assert_eq!(
-            transcript_title(&app),
+            transcript_title(&mut app),
             "Transcript [abcdef12] [conversation]"
         );
     }
 
     #[test]
-    fn cwd_label_can_show_absolute_path() {
-        let path = Path::new("/home/nuck/holoq/repo-os/babel");
+    fn transcript_title_includes_selected_session_cwd() {
+        let session = EnrichedSession {
+            agent_kind: AgentKind::Codex,
+            native_id: "abcdef123456".to_string(),
+            session_key: "codex:abcdef123456".to_string(),
+            project_path: Some(Path::new("/workspace/babel").to_path_buf()),
+            display_name: Some("thread".to_string()),
+            generated_title: None,
+            last_prompt: None,
+            turn_count: 1,
+            created_at: 1,
+            last_seen_at: 2,
+            interactive: true,
+            command_only: false,
+            has_title: false,
+            hidden: false,
+            custom_icon: None,
+            unread: false,
+            running_status: super::super::session_list::RunningStatus::Inactive,
+        };
+        let mut app = ResumeApp::new(vec![session], None);
+        app.transcript.session_id = Some("abcdef123456".to_string());
+
         assert_eq!(
-            cwd_label(path, CwdDisplayMode::Absolute),
-            "cwd:/home/nuck/holoq/repo-os/babel"
+            transcript_title(&mut app),
+            "Transcript [abcdef12] [all] cwd:/workspace/babel"
         );
     }
 
     #[test]
-    fn cwd_label_can_show_project_name() {
-        let path = Path::new("/home/nuck/holoq/repo-os/babel");
-        assert_eq!(cwd_label(path, CwdDisplayMode::Project), "cwd:babel");
+    fn cwd_scope_label_uses_filter_scope_not_display_mode() {
+        let path = Path::new("/workspace/project");
+        assert_eq!(cwd_scope_label(path), "cwd:/workspace/project");
+    }
+
+    #[test]
+    fn cwd_display_mode_column_labels_are_status_bar_labels() {
+        assert_eq!(
+            [
+                CwdDisplayMode::Relative.column_label(),
+                CwdDisplayMode::Absolute.column_label(),
+                CwdDisplayMode::Project.column_label(),
+                CwdDisplayMode::TouchedProjects.column_label(),
+            ],
+            ["cwd", "abs", "proj", "touch"]
+        );
+    }
+
+    #[test]
+    fn session_header_uses_cwd_display_mode_column_label() {
+        let widths = RowWidths {
+            state: 1,
+            index: 1,
+            harness: 7,
+            workspace: 2,
+            cwd: 5,
+            created_time: 2,
+            modified_time: 2,
+            turns: 5,
+            title: 6,
+            prompt: 6,
+        };
+        let line = render_session_header(&widths, CwdDisplayMode::TouchedProjects, 80);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("touch"));
     }
 
     fn line_display_width(line: &Line<'_>) -> usize {

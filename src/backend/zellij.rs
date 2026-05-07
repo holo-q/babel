@@ -223,16 +223,12 @@ fn parse_list_panes_json(json_str: &str, conn: &str, session_name: &str) -> Vec<
     let parsed: Result<ZellijListPanesOutput, _> = serde_json::from_str(json_str);
 
     let pane_infos: Vec<(ZellijPaneInfo, Option<String>)> = match parsed {
-        Ok(ZellijListPanesOutput::Flat(panes)) => {
-            panes.into_iter().map(|p| (p, None)).collect()
-        }
+        Ok(ZellijListPanesOutput::Flat(panes)) => panes.into_iter().map(|p| (p, None)).collect(),
         Ok(ZellijListPanesOutput::Tabs(tabs)) => tabs
             .into_iter()
             .flat_map(|tab| {
                 let tab_name = tab.name.clone();
-                tab.panes
-                    .into_iter()
-                    .map(move |p| (p, tab_name.clone()))
+                tab.panes.into_iter().map(move |p| (p, tab_name.clone()))
             })
             .collect(),
         Err(e) => {
@@ -387,12 +383,7 @@ impl TerminalBackend for ZellijBackend {
         let session = session_from_conn(conn);
 
         // Try JSON output first for structured data
-        let output = run_zellij(
-            session,
-            &["list-panes"],
-            ZELLIJ_TIMEOUT_SHORT,
-        )
-        .await?;
+        let output = run_zellij(session, &["list-panes"], ZELLIJ_TIMEOUT_SHORT).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -455,12 +446,7 @@ impl TerminalBackend for ZellijBackend {
         let session = session_from_conn(conn);
         let target = pane_target(id);
 
-        let output = run_zellij(
-            session,
-            &["focus-pane-id", &target],
-            ZELLIJ_TIMEOUT_SHORT,
-        )
-        .await?;
+        let output = run_zellij(session, &["focus-pane-id", &target], ZELLIJ_TIMEOUT_SHORT).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

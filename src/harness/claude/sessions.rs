@@ -119,6 +119,7 @@ fn scan() -> Result<Vec<NativeSession>> {
                 display_name,
                 last_prompt,
                 turn_count: acc.turns,
+                created_at: acc.first_ts,
                 last_seen_at: acc.last_ts,
                 interactive: true,
                 command_only: acc.all_commands,

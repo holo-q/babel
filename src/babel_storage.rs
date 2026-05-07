@@ -16,7 +16,7 @@
 //! Claude's conversation files to keep the memories clean and independently preservable.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -746,10 +746,7 @@ impl BabelStorage {
     }
 
     /// Get incremental cache state: projects + byte offset parsed so far.
-    pub fn get_project_cache_state(
-        &self,
-        session_key: &str,
-    ) -> Result<Option<ProjectCacheState>> {
+    pub fn get_project_cache_state(&self, session_key: &str) -> Result<Option<ProjectCacheState>> {
         let mut stmt = self.conn.prepare(
             "SELECT projects_json, parsed_bytes
              FROM session_project_cache
@@ -763,8 +760,7 @@ impl BabelStorage {
 
         let raw: String = row.get(0)?;
         let parsed_bytes: u64 = row.get::<_, i64>(1)? as u64;
-        let projects =
-            serde_json::from_str(&raw).context("Failed to parse project cache JSON")?;
+        let projects = serde_json::from_str(&raw).context("Failed to parse project cache JSON")?;
         Ok(Some(ProjectCacheState {
             projects,
             parsed_bytes,
@@ -1459,10 +1455,9 @@ mod tests {
                 .unwrap(),
             Some(projects)
         );
-        assert!(
-            db.get_session_project_cache(session_key, source_path, 11)
-                .unwrap()
-                .is_none()
-        );
+        assert!(db
+            .get_session_project_cache(session_key, source_path, 11)
+            .unwrap()
+            .is_none());
     }
 }
