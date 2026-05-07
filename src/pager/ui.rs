@@ -233,11 +233,15 @@ fn selected_display_row(rows: &[VisibleListRow], cursor: usize) -> usize {
 }
 
 fn render_group_header(label: &str, row_width: usize) -> ListItem<'static> {
+    ListItem::new(group_header_line(label, row_width))
+}
+
+fn group_header_line(label: &str, row_width: usize) -> Line<'static> {
     let mut line_width = 0;
     let mut spans = Vec::new();
     let style = Style::default()
         .fg(Color::DarkGray)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD | Modifier::DIM);
     push_span(&mut spans, &mut line_width, "─ ", style);
     push_span(&mut spans, &mut line_width, label.to_string(), style);
     push_span(&mut spans, &mut line_width, " ", style);
@@ -245,7 +249,7 @@ fn render_group_header(label: &str, row_width: usize) -> ListItem<'static> {
     if fill > 0 {
         push_span(&mut spans, &mut line_width, "─".repeat(fill), style);
     }
-    ListItem::new(Line::from(spans))
+    Line::from(spans)
 }
 
 /// Render a single session item with the same cell order as `ls-sessions`.
@@ -2959,6 +2963,17 @@ mod tests {
         ] {
             assert!(text.contains(label), "missing header sort label {label:?}");
         }
+    }
+
+    #[test]
+    fn group_header_day_splitter_is_dimmed() {
+        let line = group_header_line("mt 2026-05-07", 24);
+
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
+        );
     }
 
     #[test]
