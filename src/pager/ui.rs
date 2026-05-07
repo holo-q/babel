@@ -19,7 +19,9 @@ use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
 use super::one_line;
 use super::project_metrics::{ProjectTouchMetric, WorkgroupStyle, workgroup_style_for_path};
-use super::session_list::{CwdDisplayMode, EnrichedSession, VisibleListRow};
+use super::session_list::{
+    CwdDisplayMode, EnrichedSession, SortColumn, SortDirection, VisibleListRow,
+};
 use super::transcript::{
     TranscriptBodyMode, TranscriptRoleFilter, distill_prompt_thoughtstream,
     transcript_message_is_visible, transcript_message_row_count,
@@ -155,6 +157,8 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .collect();
     let measured_widths = RowWidths::measure(
         app.sessions.cwd_display_mode,
+        app.sessions.sort_column,
+        app.sessions.sort_direction,
         app.braille_turns,
         viewport_rows
             .iter()
@@ -165,6 +169,8 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         Paragraph::new(render_session_header(
             &widths,
             app.sessions.cwd_display_mode,
+            app.sessions.sort_column,
+            app.sessions.sort_direction,
             app.braille_turns,
             inner.width as usize,
         )),
@@ -246,6 +252,8 @@ fn render_group_header(label: &str, row_width: usize) -> ListItem<'static> {
 fn render_session_header(
     widths: &RowWidths,
     cwd_display_mode: CwdDisplayMode,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
     braille_turns: bool,
     row_width: usize,
 ) -> Line<'static> {
@@ -257,12 +265,25 @@ fn render_session_header(
     let mut line_width = 0;
     let mut spans = Vec::new();
     push_span(&mut spans, &mut line_width, " ", pad_style);
-    push_span(&mut spans, &mut line_width, "s", header_style);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        &sort_header_label(SortColumn::State, "1", "s", sort_column, sort_direction),
+        widths.state,
+        header_style,
+        pad_style,
+    );
     push_span(&mut spans, &mut line_width, " ", pad_style);
     push_right_cell(
         &mut spans,
         &mut line_width,
-        "harness",
+        &sort_header_label(
+            SortColumn::Harness,
+            "2",
+            "harness",
+            sort_column,
+            sort_direction,
+        ),
         widths.harness,
         header_style,
         pad_style,
@@ -271,7 +292,13 @@ fn render_session_header(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        "ws",
+        &sort_header_label(
+            SortColumn::Workspace,
+            "3",
+            "ws",
+            sort_column,
+            sort_direction,
+        ),
         widths.workspace,
         header_style,
         pad_style,
@@ -280,18 +307,37 @@ fn render_session_header(
     push_right_cell(
         &mut spans,
         &mut line_width,
-        cwd_display_mode.column_label(),
+        &sort_header_label(
+            SortColumn::Cwd,
+            "4",
+            cwd_display_mode.column_label(),
+            sort_column,
+            sort_direction,
+        ),
         widths.cwd,
         header_style,
         pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", pad_style);
-    push_span(&mut spans, &mut line_width, "f", header_style);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        &sort_header_label(SortColumn::Filter, "5", "f", sort_column, sort_direction),
+        widths.filter,
+        header_style,
+        pad_style,
+    );
     push_span(&mut spans, &mut line_width, " ", pad_style);
     push_left_cell(
         &mut spans,
         &mut line_width,
-        "ct",
+        &sort_header_label(
+            SortColumn::CreatedTime,
+            "6",
+            "ct",
+            sort_column,
+            sort_direction,
+        ),
         widths.created_time,
         header_style,
         pad_style,
@@ -300,7 +346,13 @@ fn render_session_header(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        "mt",
+        &sort_header_label(
+            SortColumn::ModifiedTime,
+            "7",
+            "mt",
+            sort_column,
+            sort_direction,
+        ),
         widths.modified_time,
         header_style,
         pad_style,
@@ -309,7 +361,13 @@ fn render_session_header(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        turn_column_label(braille_turns),
+        &sort_header_label(
+            SortColumn::Turns,
+            "8",
+            turn_column_label(braille_turns),
+            sort_column,
+            sort_direction,
+        ),
         widths.turns,
         header_style,
         pad_style,
@@ -327,7 +385,13 @@ fn render_session_header(
     push_right_cell(
         &mut spans,
         &mut line_width,
-        "thread",
+        &sort_header_label(
+            SortColumn::Thread,
+            "9",
+            "thread",
+            sort_column,
+            sort_direction,
+        ),
         widths.title,
         header_style,
         pad_style,
@@ -336,7 +400,13 @@ fn render_session_header(
     push_right_cell(
         &mut spans,
         &mut line_width,
-        "prompt",
+        &sort_header_label(
+            SortColumn::Prompt,
+            "0",
+            "prompt",
+            sort_column,
+            sort_direction,
+        ),
         widths.prompt,
         header_style,
         pad_style,
@@ -441,7 +511,14 @@ fn render_session_line(
     let mut line_width = 0;
     let mut spans = Vec::new();
     push_span(&mut spans, &mut line_width, " ", gap);
-    push_span(&mut spans, &mut line_width, row.state_icon, state_style);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        row.state_icon,
+        widths.state,
+        state_style,
+        pad_style,
+    );
     push_span(&mut spans, &mut line_width, " ", gap);
     push_right_cell(
         &mut spans,
@@ -470,7 +547,14 @@ fn render_session_line(
         pad_style,
     );
     push_span(&mut spans, &mut line_width, "  ", gap);
-    push_span(&mut spans, &mut line_width, row.filter_tag, row_dim);
+    push_left_cell(
+        &mut spans,
+        &mut line_width,
+        row.filter_tag,
+        widths.filter,
+        row_dim,
+        pad_style,
+    );
     push_span(&mut spans, &mut line_width, " ", gap);
     push_left_cell(
         &mut spans,
@@ -1124,6 +1208,7 @@ fn project_leaf_label(path: &Path) -> String {
 #[derive(Clone, Copy, Default)]
 struct RowWidths {
     state: usize,
+    filter: usize,
     index: usize,
     harness: usize,
     workspace: usize,
@@ -1141,14 +1226,18 @@ impl RowWidths {
 
     fn measure<'a>(
         cwd_display_mode: CwdDisplayMode,
+        sort_column: SortColumn,
+        sort_direction: SortDirection,
         braille_turns: bool,
         rows: impl Iterator<Item = (usize, &'a SessionRow, usize)>,
     ) -> Self {
-        let mut widths = Self::header_minimums(cwd_display_mode, braille_turns);
+        let mut widths =
+            Self::header_minimums(cwd_display_mode, sort_column, sort_direction, braille_turns);
         let rows: Vec<_> = rows.collect();
 
         for (idx, row, cwd_width) in rows {
             widths.state = widths.state.max(display_width(row.state_icon));
+            widths.filter = widths.filter.max(display_width(row.filter_tag));
             widths.index = widths.index.max(format!("{}", idx + 1).len());
             widths.harness = widths.harness.max(row.harness.len());
             widths.workspace = widths.workspace.max(display_width(&row.workspace));
@@ -1165,22 +1254,89 @@ impl RowWidths {
         }
 
         widths.state = widths.state.max(1);
+        widths.filter = widths.filter.max(1);
         widths.index = widths.index.max(1);
         widths
     }
 
-    fn header_minimums(cwd_display_mode: CwdDisplayMode, braille_turns: bool) -> Self {
+    fn header_minimums(
+        cwd_display_mode: CwdDisplayMode,
+        sort_column: SortColumn,
+        sort_direction: SortDirection,
+        braille_turns: bool,
+    ) -> Self {
         Self {
-            state: 1,
+            state: display_width(&sort_header_label(
+                SortColumn::State,
+                "1",
+                "s",
+                sort_column,
+                sort_direction,
+            )),
+            filter: display_width(&sort_header_label(
+                SortColumn::Filter,
+                "5",
+                "f",
+                sort_column,
+                sort_direction,
+            )),
             index: display_width("#"),
-            harness: display_width("harness"),
-            workspace: display_width("ws"),
-            cwd: display_width(cwd_display_mode.column_label()),
-            created_time: display_width("ct"),
-            modified_time: display_width("mt"),
-            turns: display_width(turn_column_label(braille_turns)),
-            title: display_width("thread"),
-            prompt: display_width("prompt"),
+            harness: display_width(&sort_header_label(
+                SortColumn::Harness,
+                "2",
+                "harness",
+                sort_column,
+                sort_direction,
+            )),
+            workspace: display_width(&sort_header_label(
+                SortColumn::Workspace,
+                "3",
+                "ws",
+                sort_column,
+                sort_direction,
+            )),
+            cwd: display_width(&sort_header_label(
+                SortColumn::Cwd,
+                "4",
+                cwd_display_mode.column_label(),
+                sort_column,
+                sort_direction,
+            )),
+            created_time: display_width(&sort_header_label(
+                SortColumn::CreatedTime,
+                "6",
+                "ct",
+                sort_column,
+                sort_direction,
+            )),
+            modified_time: display_width(&sort_header_label(
+                SortColumn::ModifiedTime,
+                "7",
+                "mt",
+                sort_column,
+                sort_direction,
+            )),
+            turns: display_width(&sort_header_label(
+                SortColumn::Turns,
+                "8",
+                turn_column_label(braille_turns),
+                sort_column,
+                sort_direction,
+            )),
+            title: display_width(&sort_header_label(
+                SortColumn::Thread,
+                "9",
+                "thread",
+                sort_column,
+                sort_direction,
+            )),
+            prompt: display_width(&sort_header_label(
+                SortColumn::Prompt,
+                "0",
+                "prompt",
+                sort_column,
+                sort_direction,
+            )),
         }
     }
 
@@ -1208,7 +1364,7 @@ impl RowWidths {
             + 2
             + self.cwd
             + 2
-            + 1
+            + self.filter
             + 1
             + self.created_time
             + 1
@@ -1271,6 +1427,7 @@ impl RowWidths {
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.cwd, 1);
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.workspace, 1);
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.harness, 1);
+        self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.filter, 1);
         self.shrink_fixed_column(row_width, min_text_width, |widths| &mut widths.turns, 1);
         self.shrink_fixed_column(
             row_width,
@@ -1293,6 +1450,7 @@ impl RowWidths {
         self.shrink_column(row_width, |widths| &mut widths.cwd, 1);
         self.shrink_column(row_width, |widths| &mut widths.workspace, 1);
         self.shrink_column(row_width, |widths| &mut widths.harness, 1);
+        self.shrink_column(row_width, |widths| &mut widths.filter, 1);
         self.shrink_column(row_width, |widths| &mut widths.turns, 1);
         self.shrink_column(row_width, |widths| &mut widths.created_time, 1);
         self.shrink_column(row_width, |widths| &mut widths.modified_time, 1);
@@ -1604,6 +1762,20 @@ fn fit_cell_text(text: &str, width: usize, snip: bool) -> String {
 
 fn turn_column_label(_braille_turns: bool) -> &'static str {
     "turns"
+}
+
+fn sort_header_label(
+    column: SortColumn,
+    key: &'static str,
+    label: &str,
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+) -> String {
+    if column == sort_column {
+        format!("{key}{label}{}", sort_direction.indicator())
+    } else {
+        format!("{key}{label}")
+    }
 }
 
 fn turn_cell_text(turn_count: u32, column_width: usize, braille_turns: bool) -> String {
@@ -2591,6 +2763,7 @@ mod tests {
     fn row_widths_expand_title_and_prompt_to_fill_row() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 2,
             harness: 6,
             workspace: 1,
@@ -2609,18 +2782,25 @@ mod tests {
 
     #[test]
     fn row_width_measurement_includes_column_header_labels() {
-        let widths = RowWidths::measure(CwdDisplayMode::Relative, false, std::iter::empty());
+        let widths = RowWidths::measure(
+            CwdDisplayMode::Relative,
+            SortColumn::ModifiedTime,
+            SortDirection::Descending,
+            false,
+            std::iter::empty(),
+        );
 
-        assert_eq!(widths.state, 1);
-        assert_eq!(widths.harness, "harness".len());
-        assert_eq!(widths.workspace, "ws".len());
-        assert_eq!(widths.cwd, "cwd".len());
-        assert_eq!(widths.created_time, "ct".len());
-        assert_eq!(widths.modified_time, "mt".len());
-        assert_eq!(widths.turns, "turns".len());
+        assert_eq!(widths.state, "1s".len());
+        assert_eq!(widths.filter, "5f".len());
+        assert_eq!(widths.harness, "2harness".len());
+        assert_eq!(widths.workspace, "3ws".len());
+        assert_eq!(widths.cwd, "4cwd".len());
+        assert_eq!(widths.created_time, "6ct".len());
+        assert_eq!(widths.modified_time, display_width("7mt↓"));
+        assert_eq!(widths.turns, "8turns".len());
         assert_eq!(widths.index, "#".len());
-        assert_eq!(widths.title, "thread".len());
-        assert_eq!(widths.prompt, "prompt".len());
+        assert_eq!(widths.title, "9thread".len());
+        assert_eq!(widths.prompt, "0prompt".len());
     }
 
     #[test]
@@ -2651,6 +2831,7 @@ mod tests {
     fn row_widths_shrink_flexible_text_cells_to_viewport() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 2,
             harness: 6,
             workspace: 1,
@@ -2671,6 +2852,7 @@ mod tests {
     fn row_widths_respect_narrow_split_pane_width() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 3,
             harness: 6,
             workspace: 28,
@@ -2694,6 +2876,7 @@ mod tests {
     fn row_widths_cap_thread_so_prompt_keeps_room() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 3,
             harness: 6,
             workspace: 1,
@@ -2718,6 +2901,7 @@ mod tests {
     fn session_header_is_clamped_to_render_budget() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 3,
             harness: 12,
             workspace: 28,
@@ -2729,9 +2913,52 @@ mod tests {
             prompt: 120,
         };
 
-        let line = render_session_header(&widths, CwdDisplayMode::Relative, false, 50);
+        let line = render_session_header(
+            &widths,
+            CwdDisplayMode::Relative,
+            SortColumn::ModifiedTime,
+            SortDirection::Descending,
+            false,
+            50,
+        );
 
         assert!(line_display_width(&line) <= 50);
+    }
+
+    #[test]
+    fn session_header_renders_sort_key_affordances() {
+        let widths = RowWidths {
+            state: 3,
+            filter: 2,
+            index: 1,
+            harness: 9,
+            workspace: 3,
+            cwd: 5,
+            created_time: 3,
+            modified_time: 4,
+            turns: 6,
+            title: 8,
+            prompt: 8,
+        };
+        let line = render_session_header(
+            &widths,
+            CwdDisplayMode::Relative,
+            SortColumn::ModifiedTime,
+            SortDirection::Descending,
+            false,
+            80,
+        );
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        for label in [
+            "1s", "2harness", "3ws", "4cwd", "5f", "6ct", "7mt↓", "8turns", "9thread",
+        ] {
+            assert!(text.contains(label), "missing header sort label {label:?}");
+        }
     }
 
     #[test]
@@ -2769,6 +2996,7 @@ mod tests {
         };
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 3,
             harness: 12,
             workspace: 28,
@@ -3392,24 +3620,32 @@ mod tests {
     fn session_header_uses_cwd_display_mode_column_label() {
         let widths = RowWidths {
             state: 1,
+            filter: 2,
             index: 1,
             harness: 7,
             workspace: 2,
-            cwd: 5,
+            cwd: 6,
             created_time: 2,
             modified_time: 2,
             turns: 5,
             title: 6,
             prompt: 6,
         };
-        let line = render_session_header(&widths, CwdDisplayMode::TouchedProjects, false, 80);
+        let line = render_session_header(
+            &widths,
+            CwdDisplayMode::TouchedProjects,
+            SortColumn::ModifiedTime,
+            SortDirection::Descending,
+            false,
+            80,
+        );
         let text = line
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert!(text.contains("touch"));
+        assert!(text.contains("4touch"));
     }
 
     fn line_display_width(line: &Line<'_>) -> usize {

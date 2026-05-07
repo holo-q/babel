@@ -516,8 +516,8 @@ impl ResumeApp {
 
             // Sort session list by visible column index. `#` is a generated
             // row number, not source data; `0` covers the tenth data column.
-            // 1 state, 2 harness, 3 workspace, 4 cwd, 5 filter, 6 mt,
-            // 7 ct, 8 turns, 9 thread, 0 prompt.
+            // 1 state, 2 harness, 3 workspace, 4 cwd, 5 filter, 6 ct,
+            // 7 mt, 8 turns, 9 thread, 0 prompt.
             KeyCode::Char(ch) if self.focus == PaneFocus::Sessions => {
                 let Some(column) = SortColumn::from_key(ch) else {
                     return ResumeAction::None;
