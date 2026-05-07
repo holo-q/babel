@@ -21,12 +21,13 @@ use serde::Serialize;
 use babel::harness;
 use babel::native_sessions::{NativeSession, SessionFilters};
 use babel::pager::{
-    distill_prompt_thoughtstream, distilled_human_prompt, prepare_transcript_messages,
-    transcript_palette, transcript_visible_lines, TranscriptBodyMode, TranscriptRoleFilter,
-    TRANSCRIPT_SNIP_MARKER,
+    distill_prompt_thoughtstream, distilled_human_prompt, load_session_projects_from_cache,
+    prepare_transcript_messages, transcript_palette, transcript_visible_lines, ProjectTouchMetric,
+    TranscriptBodyMode, TranscriptRoleFilter, TRANSCRIPT_SNIP_MARKER,
 };
 
 const DEFAULT_PROMPT_COUNT: usize = 20;
+const PROMPT_CONTEXT_TOUCH_RATE_PER_MILLE: u32 = 825;
 
 #[derive(Clone, Copy, Debug)]
 enum PromptWindow {
@@ -207,12 +208,47 @@ fn sessions_for_context(root: &Path, recursive: bool) -> Vec<NativeSession> {
     let root = comparable_path(root);
     babel::native_sessions::scan_all(None, &filters)
         .into_iter()
-        .filter(|session| {
-            session.project_path.as_deref().is_some_and(|path| {
-                project_matches(&comparable_path(Path::new(path)), &root, recursive)
-            })
-        })
+        .filter(|session| session_matches_context(session, &root, recursive))
         .collect()
+}
+
+fn session_matches_context(session: &NativeSession, root: &Path, recursive: bool) -> bool {
+    if session
+        .project_path
+        .as_deref()
+        .is_some_and(|path| project_matches(&comparable_path(Path::new(path)), root, recursive))
+    {
+        return true;
+    }
+
+    load_session_projects_from_cache(
+        session.agent_kind,
+        &session.native_id,
+        &session.agent_kind.session_key(&session.native_id),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|projects| touched_project_rate_matches(&projects, root, recursive))
+}
+
+fn touched_project_rate_matches(
+    projects: &[ProjectTouchMetric],
+    root: &Path,
+    recursive: bool,
+) -> bool {
+    let mut target_touches = 0u32;
+    let mut total_touches = 0u32;
+
+    for project in projects {
+        total_touches = total_touches.saturating_add(project.touch_count);
+        if project_matches(&comparable_path(&project.path), root, recursive) {
+            target_touches = target_touches.saturating_add(project.touch_count);
+        }
+    }
+
+    total_touches > 0
+        && target_touches.saturating_mul(1000)
+            >= total_touches.saturating_mul(PROMPT_CONTEXT_TOUCH_RATE_PER_MILLE)
 }
 
 fn project_matches(project: &Path, root: &Path, recursive: bool) -> bool {

@@ -18,6 +18,9 @@ pub use crate::harness::claude::transcript::parse_transcript;
 pub use app::{
     launch_harness_resume, run_resume_pager, ResumeApp, ResumeSelection, ResumeSessionSource,
 };
+pub use project_metrics::{
+    load_cached_session_projects, load_session_projects_from_cache, ProjectTouchMetric,
+};
 pub use session_list::{EnrichedSession, RunningStatus};
 pub use transcript::{
     distill_prompt_thoughtstream, distilled_human_prompt, TranscriptBodyMode, TranscriptRoleFilter,

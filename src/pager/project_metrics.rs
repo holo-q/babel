@@ -177,6 +177,37 @@ pub fn load_cached_session_projects(
     Ok(result)
 }
 
+pub fn load_session_projects_from_cache(
+    agent_kind: AgentKind,
+    native_id: &str,
+    session_key: &str,
+) -> Result<Option<Vec<ProjectTouchMetric>>> {
+    let Some(path) = crate::harness::find_session_transcript(agent_kind, native_id)? else {
+        return Ok(None);
+    };
+
+    let source_path = format!("project-touch-v{PROJECT_CACHE_VERSION}:{}", path.display());
+    let Some(state) = BabelStorage::open()?.get_project_cache_state(session_key, &source_path)?
+    else {
+        return Ok(None);
+    };
+
+    let mut projects: Vec<ProjectTouchMetric> = state
+        .projects
+        .iter()
+        .map(|p| {
+            let path = PathBuf::from(&p.path);
+            ProjectTouchMetric {
+                ansi256: workgroup_ansi256_for_project(&path),
+                path,
+                touch_count: p.touch_count,
+            }
+        })
+        .collect();
+    sort_touch_metrics_by_frequency(&mut projects);
+    Ok(Some(projects))
+}
+
 pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open transcript {}", path.display()))?;
