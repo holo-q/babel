@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -24,8 +24,9 @@ use crate::events::BabelEvent;
 use crate::ipc::{Request, Response};
 use crate::utility::ipc::socket_path;
 
+use super::demo::DemoMode;
 use super::preferences::{
-    ResumeDisplayOptions, load_resume_display_options, save_resume_display_options,
+    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
 };
 use super::project_metrics::ProjectTouchMetric;
 use super::session_list::{
@@ -163,6 +164,8 @@ pub struct ResumeApp {
     pub status_message: String,
     /// Cached/async per-session project-touch metric for cwd-column rendering.
     pub touched_projects: HashMap<String, TouchedProjectsState>,
+    /// Display-only anonymizer used for screenshots/demos.
+    pub demo: Option<DemoMode>,
     /// Display preferences changed and should be persisted after the key event.
     display_options_dirty: bool,
     /// Should exit
@@ -171,6 +174,14 @@ pub struct ResumeApp {
 
 impl ResumeApp {
     pub fn new(sessions: Vec<EnrichedSession>, current_cwd: Option<PathBuf>) -> Self {
+        Self::new_with_demo(sessions, current_cwd, None)
+    }
+
+    pub fn new_with_demo(
+        sessions: Vec<EnrichedSession>,
+        current_cwd: Option<PathBuf>,
+        demo: Option<DemoMode>,
+    ) -> Self {
         Self {
             sessions: SessionListState::new(sessions, current_cwd),
             transcript: TranscriptView::new(),
@@ -182,6 +193,7 @@ impl ResumeApp {
             braille_turns: false,
             status_message: "Enter: launch  r: refresh".to_string(),
             touched_projects: HashMap::new(),
+            demo,
             display_options_dirty: false,
             should_exit: false,
         }
@@ -712,6 +724,7 @@ pub async fn run_resume_pager<S>(
     source: &mut S,
     show_all: bool,
     sessions: Vec<EnrichedSession>,
+    demo: Option<DemoMode>,
 ) -> anyhow::Result<()>
 where
     S: ResumeSessionSource,
@@ -732,7 +745,7 @@ where
     let mut terminal = Terminal::new(backend)?;
 
     // Create app with current_cwd for filtering
-    let mut app = ResumeApp::new(sessions, current_cwd);
+    let mut app = ResumeApp::new_with_demo(sessions, current_cwd, demo);
     let mut display_options = load_resume_display_options();
     // `--all` is an explicit launch-time request. The saved preference still
     // seeds ordinary runs, while this flag can force the broader list open.

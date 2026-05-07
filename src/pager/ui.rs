@@ -17,14 +17,15 @@ use crate::agent_kind::AgentKind;
 use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 
 use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
+use super::demo::DemoMode;
 use super::one_line;
-use super::project_metrics::{ProjectTouchMetric, WorkgroupStyle, workgroup_style_for_path};
+use super::project_metrics::{workgroup_style_for_path, WorkgroupStyle};
 use super::session_list::{
     CwdDisplayMode, EnrichedSession, SortColumn, SortDirection, VisibleListRow,
 };
 use super::transcript::{
-    TranscriptBodyMode, TranscriptRoleFilter, distill_prompt_thoughtstream,
-    transcript_message_is_visible, transcript_message_row_count,
+    distill_prompt_thoughtstream, transcript_message_is_visible, transcript_message_row_count,
+    TranscriptBodyMode, TranscriptRoleFilter,
 };
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
@@ -675,7 +676,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         return;
     }
 
-    let lines = transcript_visible_lines(
+    let lines = transcript_visible_lines_with_demo(
         &app.transcript.messages,
         app.transcript.body_mode,
         app.transcript.scroll_offset,
@@ -684,6 +685,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         palette,
         app.transcript.role_filter,
         &app.transcript.search_query,
+        app.demo.as_ref(),
     );
 
     let para = Paragraph::new(lines);
@@ -1044,10 +1046,17 @@ enum CwdCell {
     Text(String),
     WorkgroupText(StyledCwdLabel),
     TouchlessText(String),
-    Projects(Vec<ProjectTouchMetric>),
+    Projects(Vec<ProjectCwdMetric>),
     Loading,
     Empty,
     Error,
+}
+
+#[derive(Clone)]
+struct ProjectCwdMetric {
+    label: String,
+    touch_count: u32,
+    ansi256: Option<u8>,
 }
 
 #[derive(Clone)]
@@ -1073,7 +1082,7 @@ impl CwdCell {
             Self::Projects(projects) => projects
                 .iter()
                 .take(4)
-                .map(|project| project_leaf_label(&project.path))
+                .map(|project| project.label.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
             Self::Loading => "projects:loading".to_string(),
@@ -1101,17 +1110,17 @@ fn cwd_cell_for_session(
         CwdDisplayMode::Relative => session
             .project_path
             .as_deref()
-            .map(|path| styled_cwd_cell(path, *mode))
+            .map(|path| styled_cwd_cell(path, *mode, app.demo.as_ref()))
             .unwrap_or(CwdCell::Empty),
         CwdDisplayMode::Absolute => session
             .project_path
             .as_ref()
-            .map(|path| styled_cwd_cell(path, *mode))
+            .map(|path| styled_cwd_cell(path, *mode, app.demo.as_ref()))
             .unwrap_or(CwdCell::Empty),
         CwdDisplayMode::Project => session
             .project_path
             .as_ref()
-            .map(|path| styled_cwd_cell(path, *mode))
+            .map(|path| styled_cwd_cell(path, *mode, app.demo.as_ref()))
             .unwrap_or_else(|| {
                 session
                     .project_path
@@ -1123,10 +1132,19 @@ fn cwd_cell_for_session(
             Some(TouchedProjectsState::Loaded(projects)) if projects.is_empty() => session
                 .project_path
                 .as_deref()
-                .map(relative_cwd_label)
+                .map(|path| demo_cwd_label(path, app.demo.as_ref(), CwdDisplayMode::Relative))
                 .map(CwdCell::TouchlessText)
                 .unwrap_or(CwdCell::Empty),
-            Some(TouchedProjectsState::Loaded(projects)) => CwdCell::Projects(projects.clone()),
+            Some(TouchedProjectsState::Loaded(projects)) => CwdCell::Projects(
+                projects
+                    .iter()
+                    .map(|project| ProjectCwdMetric {
+                        label: project_label_for_path(&project.path, app.demo.as_ref()),
+                        touch_count: project.touch_count,
+                        ansi256: project.ansi256,
+                    })
+                    .collect(),
+            ),
             Some(TouchedProjectsState::Notice(_)) => CwdCell::Error,
             Some(TouchedProjectsState::Empty | TouchedProjectsState::Loading) | None => {
                 CwdCell::Loading
@@ -1135,12 +1153,14 @@ fn cwd_cell_for_session(
     }
 }
 
-fn styled_cwd_cell(path: &Path, mode: CwdDisplayMode) -> CwdCell {
-    let label = match mode {
-        CwdDisplayMode::Relative | CwdDisplayMode::TouchedProjects => relative_cwd_label(path),
-        CwdDisplayMode::Absolute => path.display().to_string(),
-        CwdDisplayMode::Project => project_leaf_label(path),
-    };
+fn styled_cwd_cell(path: &Path, mode: CwdDisplayMode, demo: Option<&DemoMode>) -> CwdCell {
+    let label = demo_cwd_label(path, demo, mode);
+    if demo
+        .and_then(|demo| demo.repo_label_for_path(path))
+        .is_some()
+    {
+        return CwdCell::Text(label);
+    }
 
     let Some(style) = workgroup_style_for_path(path) else {
         return CwdCell::Text(label);
@@ -1148,6 +1168,20 @@ fn styled_cwd_cell(path: &Path, mode: CwdDisplayMode) -> CwdCell {
     styled_cwd_label(path, mode, label.clone(), &style)
         .map(CwdCell::WorkgroupText)
         .unwrap_or(CwdCell::Text(label))
+}
+
+fn demo_cwd_label(path: &Path, demo: Option<&DemoMode>, mode: CwdDisplayMode) -> String {
+    demo.and_then(|demo| demo.repo_label_for_path(path))
+        .unwrap_or_else(|| match mode {
+            CwdDisplayMode::Relative | CwdDisplayMode::TouchedProjects => relative_cwd_label(path),
+            CwdDisplayMode::Absolute => path.display().to_string(),
+            CwdDisplayMode::Project => project_leaf_label(path),
+        })
+}
+
+fn project_label_for_path(path: &Path, demo: Option<&DemoMode>) -> String {
+    demo.and_then(|demo| demo.repo_label_for_path(path))
+        .unwrap_or_else(|| project_leaf_label(path))
 }
 
 fn styled_cwd_label(
@@ -1663,8 +1697,7 @@ fn push_cwd_cell(
             let mut used = 0;
             for (idx, project) in projects.iter().take(4).enumerate() {
                 let prefix = if idx == 0 { "" } else { ", " };
-                let label = project_leaf_label(&project.path);
-                let segment = format!("{prefix}{label}");
+                let segment = format!("{prefix}{}", project.label);
                 let segment_width = display_width(&segment);
                 if used + segment_width > width {
                     if used < width {
@@ -2097,6 +2130,30 @@ pub fn transcript_visible_lines(
     role_filter: TranscriptRoleFilter,
     search_query: &str,
 ) -> Vec<Line<'static>> {
+    transcript_visible_lines_with_demo(
+        messages,
+        body_mode,
+        scroll_offset,
+        height,
+        row_width,
+        palette,
+        role_filter,
+        search_query,
+        None,
+    )
+}
+
+fn transcript_visible_lines_with_demo(
+    messages: &[Message],
+    body_mode: TranscriptBodyMode,
+    scroll_offset: usize,
+    height: usize,
+    row_width: usize,
+    palette: TranscriptPalette,
+    role_filter: TranscriptRoleFilter,
+    search_query: &str,
+    demo: Option<&DemoMode>,
+) -> Vec<Line<'static>> {
     let mut remaining_skip = scroll_offset;
     let mut lines = Vec::new();
     for item in transcript_render_items(messages, role_filter, search_query) {
@@ -2109,7 +2166,7 @@ pub fn transcript_visible_lines(
         match item {
             TranscriptRenderItem::Message { msg, gap_before } => {
                 let message_lines =
-                    transcript_message_lines(msg, body_mode, row_width, palette, gap_before);
+                    transcript_message_lines(msg, body_mode, row_width, palette, gap_before, demo);
                 for line in message_lines.into_iter().skip(remaining_skip) {
                     if lines.len() >= height {
                         return lines;
@@ -2294,10 +2351,13 @@ fn transcript_message_lines(
     row_width: usize,
     palette: TranscriptPalette,
     gap_before: bool,
+    demo: Option<&DemoMode>,
 ) -> Vec<Line<'static>> {
     // Content is pre-sanitized at load time by prepare_transcript_messages.
     // ToolCall content holds the pre-computed preview string.
-    let content = transcript_render_content(&msg.content);
+    let content = demo
+        .map(|demo| Cow::Owned(demo.scramble_text(&transcript_render_content(&msg.content))))
+        .unwrap_or_else(|| transcript_render_content(&msg.content));
     let assistant_prefix = if gap_before { "⋮ " } else { "● " };
     match &msg.kind {
         MessageKind::User if body_mode == TranscriptBodyMode::Full => {
@@ -2969,11 +3029,10 @@ mod tests {
     fn group_header_day_splitter_is_dimmed() {
         let line = group_header_line("mt 2026-05-07", 24);
 
-        assert!(
-            line.spans
-                .iter()
-                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
-        );
+        assert!(line
+            .spans
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::DIM)));
     }
 
     #[test]
@@ -3107,6 +3166,7 @@ mod tests {
             80,
             transcript_palette(AgentKind::Codex),
             false,
+            None,
         );
         let rendered = lines[0]
             .spans
@@ -3199,12 +3259,10 @@ mod tests {
         assert_eq!(palette.assistant_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().bg, Some(Color::Rgb(0, 0, 0)));
-        assert!(
-            !palette
-                .user_style()
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        );
+        assert!(!palette
+            .user_style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -3216,12 +3274,10 @@ mod tests {
             palette.user_style().bg,
             Some(inverted_rgb_color(normal_text_fg()))
         );
-        assert!(
-            !palette
-                .user_style()
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        );
+        assert!(!palette
+            .user_style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]

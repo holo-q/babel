@@ -7,6 +7,7 @@
 //!   - `babel continue` - Resume most recent non-running session
 
 mod app;
+mod demo;
 mod identity;
 mod preferences;
 mod project_metrics;
@@ -18,6 +19,7 @@ pub use crate::harness::claude::transcript::parse_transcript;
 pub use app::{
     launch_harness_resume, run_resume_pager, ResumeApp, ResumeSelection, ResumeSessionSource,
 };
+pub use demo::DemoMode;
 pub use project_metrics::{
     load_cached_session_projects, load_session_projects_from_cache, ProjectTouchMetric,
 };

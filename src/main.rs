@@ -242,9 +242,11 @@ async fn main() -> Result<()> {
 
         Commands::Plan { target } => cli::query::cmd_plan(&core, &target, cli.json).await,
 
-        Commands::Resume { indices, all } => {
+        Commands::Resume { indices, all, demo } => {
             if indices.is_empty() {
-                cli::resume::cmd_resume(&mut core, all, cli.json).await
+                cli::resume::cmd_resume(&mut core, all, demo, cli.json).await
+            } else if demo {
+                anyhow::bail!("--demo is only supported in interactive resume mode")
             } else {
                 cli::resume::cmd_resume_by_index(&indices).await
             }

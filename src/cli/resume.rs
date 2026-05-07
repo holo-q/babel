@@ -13,7 +13,9 @@ use tracing::instrument;
 use vtr::{boundary, checkpoint};
 
 use babel::core::BabelCore;
-use babel::pager::{EnrichedSession, ResumeSelection, ResumeSessionSource, RunningStatus};
+use babel::pager::{
+    DemoMode, EnrichedSession, ResumeSelection, ResumeSessionSource, RunningStatus,
+};
 
 /// Interactive pager for browsing and resuming sessions
 ///
@@ -21,10 +23,14 @@ use babel::pager::{EnrichedSession, ResumeSelection, ResumeSessionSource, Runnin
 /// Tab toggles between cwd-only and all projects.
 /// Enter launches selected sessions in external terminals without closing the pager.
 #[instrument(level = "debug", skip(core))]
-pub async fn cmd_resume(core: &mut BabelCore, all: bool, _json: bool) -> Result<()> {
-    let mut source = CliResumeSessionSource { core };
+pub async fn cmd_resume(core: &mut BabelCore, all: bool, demo: bool, _json: bool) -> Result<()> {
+    let demo = demo.then(DemoMode::load_default);
+    let mut source = CliResumeSessionSource {
+        core,
+        demo: demo.clone(),
+    };
     let sessions = source.refresh_sessions(false).await?;
-    babel::pager::run_resume_pager(&mut source, all, sessions).await
+    babel::pager::run_resume_pager(&mut source, all, sessions, demo).await
 }
 
 /// Resume sessions by their ls-sessions index.
@@ -183,6 +189,7 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
 
 struct CliResumeSessionSource<'a> {
     core: &'a mut BabelCore,
+    demo: Option<DemoMode>,
 }
 
 #[async_trait::async_trait]
@@ -191,7 +198,11 @@ impl ResumeSessionSource for CliResumeSessionSource<'_> {
         if force {
             self.core.refresh().await?;
         }
-        build_resume_sessions(self.core).await
+        let mut sessions = build_resume_sessions(self.core).await?;
+        if let Some(demo) = &self.demo {
+            demo.anonymize_sessions(&mut sessions);
+        }
+        Ok(sessions)
     }
 
     async fn launch_resume(&mut self, selection: &ResumeSelection) -> Result<String> {

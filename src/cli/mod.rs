@@ -519,6 +519,10 @@ pub enum Commands {
         /// Show all projects (not just current directory) in TUI mode
         #[arg(short, long)]
         all: bool,
+
+        /// Demo-safe display: scramble text and private repo labels
+        #[arg(long)]
+        demo: bool,
     },
 
     /// Continue the most recent non-running session
