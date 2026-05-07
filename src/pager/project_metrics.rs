@@ -1,26 +1,35 @@
 //! Cached transcript metrics for the resume pager.
 //!
-//! The session list is a launcher surface: cursor movement must stay hot even
-//! when a transcript contains thousands of tool calls. Project touch history is
-//! therefore a derived metric stored in Babel's database, keyed by the transcript
-//! source mtime observed by the background parser.
+//! Incremental: on first load we parse the full transcript and cache the byte
+//! offset. Subsequent loads seek to the cached offset and only parse new lines,
+//! merging into the existing project-touch map. Full reparse only on file
+//! truncation (session replaced or rotated).
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::agent_kind::AgentKind;
-use crate::babel_storage::{BabelStorage, SessionProjectCacheEntry};
+use crate::babel_storage::BabelStorage;
+use crate::session_row;
+
+const PROJECT_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTouchMetric {
     pub path: PathBuf,
     pub touch_count: u32,
+    pub ansi256: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkgroupStyle {
+    pub root: PathBuf,
+    pub ansi256: u8,
 }
 
 pub fn load_cached_session_projects(
@@ -28,37 +37,134 @@ pub fn load_cached_session_projects(
     native_id: &str,
     session_key: &str,
 ) -> Result<Vec<ProjectTouchMetric>> {
+    use crate::babel_storage::{ProjectCacheState, SessionProjectCacheEntry};
+
     let Some(path) = find_session_transcript(agent_kind, native_id)? else {
         anyhow::bail!("transcript not found");
     };
 
-    let source_mtime_ns = source_mtime_ns(&path)?;
-    let source_path = path.display().to_string();
+    let file_size = std::fs::metadata(&path)?.len();
+    let source_path = format!("project-touch-v{PROJECT_CACHE_VERSION}:{}", path.display());
     let db = BabelStorage::open()?;
 
-    if let Some(projects) =
-        db.get_session_project_cache(session_key, &source_path, source_mtime_ns)?
-    {
-        return Ok(projects
-            .into_iter()
-            .map(|project| ProjectTouchMetric {
-                path: PathBuf::from(project.path),
-                touch_count: project.touch_count,
-            })
-            .collect());
+    let cached = db.get_project_cache_state(session_key)?;
+
+    // Determine if we can do an incremental parse or need full reparse
+    let (mut metrics_map, start_offset) = match &cached {
+        Some(state) if state.parsed_bytes == file_size => {
+            // Fully up to date — return cached directly
+            return Ok(state
+                .projects
+                .iter()
+                .map(|p| ProjectTouchMetric {
+                    path: PathBuf::from(&p.path),
+                    touch_count: p.touch_count,
+                    ansi256: p.ansi256,
+                })
+                .collect());
+        }
+        Some(state) if state.parsed_bytes < file_size => {
+            // File grew — incremental parse from offset
+            let map: HashMap<PathBuf, ProjectAccumulator> = state
+                .projects
+                .iter()
+                .enumerate()
+                .map(|(idx, p)| {
+                    (
+                        PathBuf::from(&p.path),
+                        ProjectAccumulator {
+                            latest_line: idx,
+                            touch_count: p.touch_count,
+                        },
+                    )
+                })
+                .collect();
+            (map, state.parsed_bytes)
+        }
+        _ => {
+            // No cache or file shrank (truncated/replaced) — full reparse
+            (HashMap::new(), 0)
+        }
+    };
+
+    // Parse from start_offset
+    let file = File::open(&path)?;
+    let mut reader = BufReader::new(file);
+    if start_offset > 0 {
+        reader.seek(SeekFrom::Start(start_offset))?;
     }
 
-    let projects = parse_touched_projects(&path)?;
-    let project_cache: Vec<SessionProjectCacheEntry> = projects
+    let base_line = metrics_map.values().map(|a| a.latest_line).max().unwrap_or(0);
+    let mut line_buf = String::new();
+    let mut line_index = base_line;
+
+    loop {
+        line_buf.clear();
+        let bytes_read = reader.read_line(&mut line_buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        if line_buf.trim().is_empty() {
+            continue;
+        }
+
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line_buf) else {
+            continue;
+        };
+
+        let base_cwd = record_base_cwd(&record);
+        let mut candidates = Vec::new();
+        collect_path_candidates(&record, base_cwd.as_deref(), &mut candidates);
+
+        line_index += 1;
+        for candidate in candidates {
+            let Some(project) = project_root_for_path(&candidate) else {
+                continue;
+            };
+            let entry = metrics_map.entry(project).or_default();
+            entry.latest_line = entry.latest_line.max(line_index);
+            entry.touch_count = entry.touch_count.saturating_add(1);
+        }
+    }
+
+    // Build sorted result
+    let mut projects: Vec<(PathBuf, ProjectAccumulator)> = metrics_map.into_iter().collect();
+    projects.sort_by(|(lp, la), (rp, ra)| {
+        ra.latest_line
+            .cmp(&la.latest_line)
+            .then_with(|| lp.cmp(rp))
+    });
+
+    let result: Vec<ProjectTouchMetric> = projects
         .iter()
-        .map(|project| SessionProjectCacheEntry {
-            path: project.path.display().to_string(),
-            touch_count: project.touch_count,
+        .map(|(path, metric)| ProjectTouchMetric {
+            ansi256: workgroup_ansi256_for_project(path),
+            path: path.clone(),
+            touch_count: metric.touch_count,
         })
         .collect();
-    db.set_session_project_cache(session_key, &source_path, source_mtime_ns, &project_cache)?;
 
-    Ok(projects)
+    // Persist incremental state
+    let cache_entries: Vec<SessionProjectCacheEntry> = result
+        .iter()
+        .map(|p| SessionProjectCacheEntry {
+            path: p.path.display().to_string(),
+            touch_count: p.touch_count,
+            ansi256: p.ansi256,
+        })
+        .collect();
+
+    let _ = db.set_project_cache_state(
+        session_key,
+        &source_path,
+        &ProjectCacheState {
+            projects: cache_entries,
+            parsed_bytes: file_size,
+        },
+    );
+
+    Ok(result)
 }
 
 pub fn find_session_transcript(agent_kind: AgentKind, native_id: &str) -> Result<Option<PathBuf>> {
@@ -89,7 +195,9 @@ pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
         collect_path_candidates(&record, base_cwd.as_deref(), &mut candidates);
 
         for candidate in candidates {
-            let project = project_root_for_path(&candidate);
+            let Some(project) = project_root_for_path(&candidate) else {
+                continue;
+            };
             let entry = metrics_by_project.entry(project).or_default();
             entry.latest_line = entry.latest_line.max(line_index);
             entry.touch_count = entry.touch_count.saturating_add(1);
@@ -107,6 +215,7 @@ pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
     Ok(projects
         .into_iter()
         .map(|(path, metric)| ProjectTouchMetric {
+            ansi256: workgroup_ansi256_for_project(&path),
             path,
             touch_count: metric.touch_count,
         })
@@ -119,15 +228,7 @@ struct ProjectAccumulator {
     touch_count: u32,
 }
 
-fn source_mtime_ns(path: &Path) -> Result<i64> {
-    let modified = std::fs::metadata(path)?
-        .modified()
-        .context("transcript file has no modified timestamp")?;
-    let duration = modified
-        .duration_since(UNIX_EPOCH)
-        .context("transcript modified timestamp predates unix epoch")?;
-    Ok(duration.as_secs() as i64 * 1_000_000_000 + duration.subsec_nanos() as i64)
-}
+
 
 fn record_base_cwd(record: &Value) -> Option<PathBuf> {
     first_string_for_keys(record, &["cwd", "workdir"]).and_then(|cwd| candidate_path(cwd, None))
@@ -159,17 +260,9 @@ fn collect_path_candidates(value: &Value, base: Option<&Path>, out: &mut Vec<Pat
     match value {
         Value::Object(map) => {
             for (key, child) in map {
-                if key == "arguments" {
-                    if let Some(parsed) = child
-                        .as_str()
-                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                    {
-                        collect_path_candidates(&parsed, base, out);
-                    }
-                }
-
-                if is_path_key(key) {
-                    collect_path_value(child, base, out);
+                if matches!(key.as_str(), "input" | "arguments" | "params") {
+                    collect_tool_payload_paths(child, base, out);
+                    continue;
                 }
 
                 collect_path_candidates(child, base, out);
@@ -178,6 +271,39 @@ fn collect_path_candidates(value: &Value, base: Option<&Path>, out: &mut Vec<Pat
         Value::Array(values) => {
             for child in values {
                 collect_path_candidates(child, base, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_tool_payload_paths(value: &Value, base: Option<&Path>, out: &mut Vec<PathBuf>) {
+    if let Some(parsed) = value
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    {
+        collect_tool_payload_paths(&parsed, base, out);
+        return;
+    }
+
+    match value {
+        Value::Object(map) => {
+            let payload_base = first_string_for_keys(value, &["cwd", "workdir"])
+                .and_then(|cwd| candidate_path(cwd, base))
+                .or_else(|| base.map(Path::to_path_buf));
+            for (key, child) in map {
+                if is_path_key(key) {
+                    collect_path_value(child, payload_base.as_deref(), out);
+                } else if matches!(key.as_str(), "input" | "arguments" | "params") {
+                    collect_tool_payload_paths(child, payload_base.as_deref(), out);
+                } else {
+                    collect_tool_payload_paths(child, payload_base.as_deref(), out);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_tool_payload_paths(value, base, out);
             }
         }
         _ => {}
@@ -241,7 +367,7 @@ fn candidate_path(raw: &str, base: Option<&Path>) -> Option<PathBuf> {
     base.map(|base| normalize_lexical_path(&base.join(path)))
 }
 
-fn project_root_for_path(path: &Path) -> PathBuf {
+fn project_root_for_path(path: &Path) -> Option<PathBuf> {
     let normalized = normalize_lexical_path(path);
     let mut candidate =
         if normalized.is_file() || (!normalized.exists() && normalized.extension().is_some()) {
@@ -253,11 +379,11 @@ fn project_root_for_path(path: &Path) -> PathBuf {
     candidate = normalize_lexical_path(&candidate);
     for ancestor in candidate.ancestors() {
         if is_project_root(ancestor) {
-            return ancestor.to_path_buf();
+            return Some(ancestor.to_path_buf());
         }
     }
 
-    candidate
+    None
 }
 
 fn is_project_root(path: &Path) -> bool {
@@ -278,6 +404,7 @@ fn is_project_root(path: &Path) -> bool {
         "mix.exs",
         "gleam.toml",
         "Package.swift",
+        "workgroup.toml",
         "*.sln",
     ];
 
@@ -292,6 +419,121 @@ fn is_project_root(path: &Path) -> bool {
         }
         path.join(marker).exists()
     })
+}
+
+pub fn workgroup_style_for_path(path: &Path) -> Option<WorkgroupStyle> {
+    let scope = nearest_workgroup_scope(path)?;
+    Some(WorkgroupStyle {
+        root: scope.root,
+        ansi256: scope
+            .ansi256
+            .unwrap_or_else(|| auto_workgroup_ansi256(&scope.name)),
+    })
+}
+
+fn workgroup_ansi256_for_project(path: &Path) -> Option<u8> {
+    workgroup_style_for_path(path).map(|style| style.ansi256)
+}
+
+#[derive(Debug)]
+struct WorkgroupScope {
+    root: PathBuf,
+    name: String,
+    ansi256: Option<u8>,
+}
+
+fn nearest_workgroup_scope(path: &Path) -> Option<WorkgroupScope> {
+    for ancestor in path.ancestors() {
+        let workgroup_path = ancestor.join("workgroup.toml");
+        if !workgroup_path.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&workgroup_path).ok()?;
+        let value = text.parse::<toml::Value>().ok()?;
+        let table = value.get("workgroup").unwrap_or(&value);
+        let name = table
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                ancestor
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })?;
+        let ansi256 = first_workgroup_ansi(table);
+        return Some(WorkgroupScope {
+            root: ancestor.to_path_buf(),
+            name,
+            ansi256,
+        });
+    }
+    None
+}
+
+fn first_workgroup_ansi(value: &toml::Value) -> Option<u8> {
+    for key in ["ansi256", "ansi", "ansi_color"] {
+        if let Some(ansi) = value.get(key).and_then(toml_value_to_ansi256) {
+            return Some(ansi);
+        }
+    }
+    for key in ["color", "fg", "foreground"] {
+        if let Some(ansi) = value
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .and_then(color_text_to_ansi256)
+        {
+            return Some(ansi);
+        }
+    }
+    None
+}
+
+fn toml_value_to_ansi256(value: &toml::Value) -> Option<u8> {
+    match value {
+        toml::Value::Integer(i) => u8::try_from(*i).ok(),
+        toml::Value::String(text) => color_text_to_ansi256(text),
+        _ => None,
+    }
+}
+
+fn color_text_to_ansi256(text: &str) -> Option<u8> {
+    let text = text.trim();
+    if let Ok(ansi) = text.parse::<u8>() {
+        return Some(ansi);
+    }
+    if text.starts_with('#') {
+        return Some(session_row::closest_ansi256_from_hex(text));
+    }
+    match text.to_ascii_lowercase().as_str() {
+        "black" => Some(0),
+        "red" => Some(1),
+        "green" => Some(2),
+        "yellow" => Some(3),
+        "blue" => Some(4),
+        "magenta" => Some(5),
+        "cyan" => Some(6),
+        "white" => Some(7),
+        "bright_black" | "gray" | "grey" => Some(8),
+        "bright_red" => Some(9),
+        "bright_green" => Some(10),
+        "bright_yellow" => Some(11),
+        "bright_blue" => Some(12),
+        "bright_magenta" => Some(13),
+        "bright_cyan" => Some(14),
+        "bright_white" => Some(15),
+        _ => None,
+    }
+}
+
+fn auto_workgroup_ansi256(name: &str) -> u8 {
+    const PALETTE: &[u8] = &[
+        33, 39, 45, 69, 75, 81, 111, 117, 141, 147, 177, 183, 209, 215,
+    ];
+    let hash = name.bytes().fold(0usize, |acc, byte| {
+        acc.wrapping_mul(33).wrapping_add(byte as usize)
+    });
+    PALETTE[hash % PALETTE.len()]
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {
@@ -365,11 +607,13 @@ mod tests {
             vec![
                 ProjectTouchMetric {
                     path: alpha,
-                    touch_count: 3
+                    touch_count: 2,
+                    ansi256: Some(39)
                 },
                 ProjectTouchMetric {
                     path: beta,
-                    touch_count: 1
+                    touch_count: 1,
+                    ansi256: Some(39)
                 }
             ]
         );
@@ -401,7 +645,40 @@ mod tests {
             projects,
             vec![ProjectTouchMetric {
                 path: project,
-                touch_count: 2
+                touch_count: 1,
+                ansi256: Some(39)
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_path_like_tool_output_without_project_markers() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("project-metrics-output-{}", std::process::id()));
+        let project = root.join("repo");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        let transcript = root.join("session.jsonl");
+        let mut file = File::create(&transcript).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","arguments":"{{\"file_path\":\"src/lib.rs\",\"cwd\":\"{}\"}}","output":{{"path":"/usr/share/xdg-desktop-portal"}}}}}}"#,
+            project.display()
+        )
+        .unwrap();
+        drop(file);
+
+        let projects = parse_touched_projects(&transcript).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(
+            projects,
+            vec![ProjectTouchMetric {
+                path: project,
+                touch_count: 2,
+                ansi256: Some(39)
             }]
         );
     }

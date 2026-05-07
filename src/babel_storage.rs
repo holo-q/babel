@@ -16,7 +16,7 @@
 //! Claude's conversation files to keep the memories clean and independently preservable.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -122,6 +122,27 @@ pub struct SessionIndexEntry {
     pub first_seen_at: i64,
     /// Unix timestamp (seconds) of most recent activity.
     pub last_seen_at: i64,
+}
+
+/// Cached transcript-derived project touch metric.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProjectCacheEntry {
+    /// Project root path derived from .git, pyproject.toml, package manifests, etc.
+    pub path: String,
+    /// Number of transcript tool/path touches associated with this root.
+    pub touch_count: u32,
+    /// Workgroup-derived 256-color ANSI swatch for display surfaces.
+    #[serde(default)]
+    pub ansi256: Option<u8>,
+}
+
+/// Incremental cache state — how far into the transcript we've parsed.
+#[derive(Debug, Clone)]
+pub struct ProjectCacheState {
+    pub projects: Vec<SessionProjectCacheEntry>,
+    /// Byte offset into the transcript file that has been fully parsed.
+    /// New content starts here.
+    pub parsed_bytes: u64,
 }
 
 /// The Tower's Memory—What Persists When Workers Sleep
@@ -294,10 +315,55 @@ impl BabelStorage {
             )
             .context("Failed to create session_index last_seen_at index")?;
 
+        // Derived transcript metrics are too expensive to recompute in the
+        // pager render loop. Cache them by source mtime so JSONL append/update
+        // naturally invalidates the row without blocking TUI navigation.
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS session_project_cache (
+                    session_key TEXT PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    source_mtime_ns INTEGER NOT NULL,
+                    projects_json TEXT NOT NULL,
+                    cached_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .context("Failed to create session_project_cache table")?;
+
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_project_cache_source
+                 ON session_project_cache(source_path, source_mtime_ns)",
+                [],
+            )
+            .context("Failed to create session_project_cache source index")?;
+
+        self.migrate_add_parsed_bytes_column()?;
+
         // Migration: add hook_state and last_hook_at columns if they don't exist
         // These columns track state from the neural interface (Claude Code hooks)
         self.migrate_add_hook_columns()?;
 
+        Ok(())
+    }
+
+    fn migrate_add_parsed_bytes_column(&self) -> Result<()> {
+        let has_col: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_project_cache') WHERE name='parsed_bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0) > 0;
+
+        if !has_col {
+            self.conn.execute(
+                "ALTER TABLE session_project_cache ADD COLUMN parsed_bytes INTEGER NOT NULL DEFAULT 0",
+                [],
+            ).context("Failed to add parsed_bytes column")?;
+        }
         Ok(())
     }
 
@@ -336,22 +402,30 @@ impl BabelStorage {
             |row| row.get(0),
         ).unwrap_or(0) > 0;
         if !has_workspace {
-            self.conn.execute(
-                "ALTER TABLE session_metadata ADD COLUMN last_workspace INTEGER",
-                [],
-            ).context("Failed to add last_workspace column")?;
+            self.conn
+                .execute(
+                    "ALTER TABLE session_metadata ADD COLUMN last_workspace INTEGER",
+                    [],
+                )
+                .context("Failed to add last_workspace column")?;
         }
 
-        let has_hidden: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('session_metadata') WHERE name='hidden'",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0) > 0;
-        if !has_hidden {
-            self.conn.execute(
-                "ALTER TABLE session_metadata ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+        let has_hidden: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_metadata') WHERE name='hidden'",
                 [],
-            ).context("Failed to add hidden column")?;
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if !has_hidden {
+            self.conn
+                .execute(
+                    "ALTER TABLE session_metadata ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .context("Failed to add hidden column")?;
         }
 
         Ok(())
@@ -600,6 +674,142 @@ impl BabelStorage {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
+    // Transcript-Derived Metrics
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Return cached project roots touched by a native transcript at the given mtime.
+    ///
+    /// The cache is intentionally scoped to the transcript source and exact mtime,
+    /// because project extraction walks tool inputs and can be noticeably slower
+    /// than listing native sessions. The pager uses this as a background metric:
+    /// stale/missing rows trigger a worker parse, never a render-thread parse.
+    pub fn get_session_project_cache(
+        &self,
+        session_key: &str,
+        source_path: &str,
+        source_mtime_ns: i64,
+    ) -> Result<Option<Vec<SessionProjectCacheEntry>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT projects_json
+             FROM session_project_cache
+             WHERE session_key = ?1
+               AND source_path = ?2
+               AND source_mtime_ns = ?3",
+        )?;
+
+        let mut rows = stmt.query(params![session_key, source_path, source_mtime_ns])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let raw: String = row.get(0)?;
+        let projects = serde_json::from_str(&raw).context("Failed to parse project cache JSON")?;
+        Ok(Some(projects))
+    }
+
+    /// Store project roots touched by a transcript for the source mtime observed.
+    pub fn set_session_project_cache(
+        &self,
+        session_key: &str,
+        source_path: &str,
+        source_mtime_ns: i64,
+        projects: &[SessionProjectCacheEntry],
+    ) -> Result<()> {
+        let projects_json =
+            serde_json::to_string(projects).context("Failed to serialize project cache JSON")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn
+            .execute(
+                "INSERT INTO session_project_cache
+                    (session_key, source_path, source_mtime_ns, projects_json, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(session_key) DO UPDATE SET
+                    source_path = ?2,
+                    source_mtime_ns = ?3,
+                    projects_json = ?4,
+                    cached_at = ?5",
+                params![
+                    session_key,
+                    source_path,
+                    source_mtime_ns,
+                    projects_json,
+                    now,
+                ],
+            )
+            .context("Failed to store session project cache")?;
+
+        Ok(())
+    }
+
+    /// Get incremental cache state: projects + byte offset parsed so far.
+    pub fn get_project_cache_state(
+        &self,
+        session_key: &str,
+    ) -> Result<Option<ProjectCacheState>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT projects_json, parsed_bytes
+             FROM session_project_cache
+             WHERE session_key = ?1",
+        )?;
+
+        let mut rows = stmt.query(params![session_key])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let raw: String = row.get(0)?;
+        let parsed_bytes: u64 = row.get::<_, i64>(1)? as u64;
+        let projects =
+            serde_json::from_str(&raw).context("Failed to parse project cache JSON")?;
+        Ok(Some(ProjectCacheState {
+            projects,
+            parsed_bytes,
+        }))
+    }
+
+    /// Store incremental project cache state (projects + byte offset).
+    pub fn set_project_cache_state(
+        &self,
+        session_key: &str,
+        source_path: &str,
+        state: &ProjectCacheState,
+    ) -> Result<()> {
+        let projects_json = serde_json::to_string(&state.projects)
+            .context("Failed to serialize project cache JSON")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn
+            .execute(
+                "INSERT INTO session_project_cache
+                    (session_key, source_path, source_mtime_ns, projects_json, cached_at, parsed_bytes)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5)
+                 ON CONFLICT(session_key) DO UPDATE SET
+                    source_path = ?2,
+                    source_mtime_ns = 0,
+                    projects_json = ?3,
+                    cached_at = ?4,
+                    parsed_bytes = ?5",
+                params![
+                    session_key,
+                    source_path,
+                    projects_json,
+                    now,
+                    state.parsed_bytes as i64,
+                ],
+            )
+            .context("Failed to store incremental project cache")?;
+
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
     // Scrollback Cursor API
     // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -709,10 +919,7 @@ impl BabelStorage {
     ///
     /// On conflict (same session_key), updates display_name, project_path,
     /// and last_seen_at. first_seen_at is preserved from the original insert.
-    pub fn upsert_session_index(
-        &self,
-        entry: &SessionIndexEntry,
-    ) -> Result<()> {
+    pub fn upsert_session_index(&self, entry: &SessionIndexEntry) -> Result<()> {
         self.conn
             .execute(
                 "INSERT INTO session_index
@@ -752,7 +959,8 @@ impl BabelStorage {
                  ORDER BY last_seen_at DESC
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![kind, limit as i64], row_to_index_entry)?
+            let rows = stmt
+                .query_map(params![kind, limit as i64], row_to_index_entry)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         } else {
@@ -762,7 +970,8 @@ impl BabelStorage {
                  ORDER BY last_seen_at DESC
                  LIMIT ?1",
             )?;
-            let rows = stmt.query_map(params![limit as i64], row_to_index_entry)?
+            let rows = stmt
+                .query_map(params![limit as i64], row_to_index_entry)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         }
@@ -777,11 +986,8 @@ impl BabelStorage {
                 |row| row.get(0),
             )?
         } else {
-            self.conn.query_row(
-                "SELECT COUNT(*) FROM session_index",
-                [],
-                |row| row.get(0),
-            )?
+            self.conn
+                .query_row("SELECT COUNT(*) FROM session_index", [], |row| row.get(0))?
         };
         Ok(count as usize)
     }
@@ -1097,7 +1303,8 @@ pub fn query_session_index(
              ORDER BY last_seen_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![kind, limit as i64], row_to_index_entry)?
+        let rows = stmt
+            .query_map(params![kind, limit as i64], row_to_index_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     } else {
@@ -1107,7 +1314,8 @@ pub fn query_session_index(
              ORDER BY last_seen_at DESC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit as i64], row_to_index_entry)?
+        let rows = stmt
+            .query_map(params![limit as i64], row_to_index_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1223,5 +1431,38 @@ mod tests {
             .unwrap();
         let title = db.get_generated_title(session_id).unwrap();
         assert_eq!(title, Some("babel: auth complete".to_string()));
+    }
+
+    #[test]
+    fn test_session_project_cache_is_mtime_scoped() {
+        let db = test_db();
+        let session_key = "codex:session-projects";
+        let source_path = "/home/nuck/.codex/sessions/session.jsonl";
+        let projects = vec![
+            SessionProjectCacheEntry {
+                path: "/home/nuck/holoq/repo-os/babel".to_string(),
+                touch_count: 5,
+                ansi256: Some(33),
+            },
+            SessionProjectCacheEntry {
+                path: "/home/nuck/holoq/repo-agent/hsp".to_string(),
+                touch_count: 1,
+                ansi256: None,
+            },
+        ];
+
+        db.set_session_project_cache(session_key, source_path, 10, &projects)
+            .unwrap();
+
+        assert_eq!(
+            db.get_session_project_cache(session_key, source_path, 10)
+                .unwrap(),
+            Some(projects)
+        );
+        assert!(
+            db.get_session_project_cache(session_key, source_path, 11)
+                .unwrap()
+                .is_none()
+        );
     }
 }
