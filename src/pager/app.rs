@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -25,10 +25,10 @@ use crate::ipc::{Request, Response};
 use crate::utility::ipc::socket_path;
 
 use super::preferences::{
-    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
+    ResumeDisplayOptions, load_resume_display_options, save_resume_display_options,
 };
 use super::project_metrics::ProjectTouchMetric;
-use super::session_list::{CwdDisplayMode, EnrichedSession, SessionListState};
+use super::session_list::{CwdDisplayMode, EnrichedSession, SessionListState, SortColumn};
 use super::transcript::TranscriptView;
 use std::path::PathBuf;
 
@@ -131,6 +131,8 @@ pub struct ResumeApp {
     pub search_buffer: String,
     /// Whether the transcript preview pane is visible
     pub show_transcript: bool,
+    /// Whether list text cells use middle snip markers instead of edge clipping.
+    pub snip_columns: bool,
     /// Last launcher/refresh status shown in the footer
     pub status_message: String,
     /// Cached/async per-session project-touch metric for cwd-column rendering.
@@ -150,6 +152,7 @@ impl ResumeApp {
             is_searching: false,
             search_buffer: String::new(),
             show_transcript: true,
+            snip_columns: true,
             status_message: "Enter: launch  r: refresh".to_string(),
             touched_projects: HashMap::new(),
             display_options_dirty: false,
@@ -161,8 +164,11 @@ impl ResumeApp {
         self.sessions.show_all = options.show_all;
         self.sessions.hidden_display_mode = options.hidden_display_mode;
         self.sessions.cwd_display_mode = options.cwd_display_mode;
+        self.sessions
+            .set_sort(options.sort_column, options.sort_direction);
         self.sessions.invalidate_visible_indices();
         self.show_transcript = options.show_transcript;
+        self.snip_columns = options.snip_columns;
         self.transcript.expand_messages = options.expand_messages;
         self.transcript.role_filter = options.transcript_role_filter;
         if !self.show_transcript && self.focus == PaneFocus::Transcript {
@@ -175,7 +181,10 @@ impl ResumeApp {
             show_all: self.sessions.show_all,
             hidden_display_mode: self.sessions.hidden_display_mode,
             cwd_display_mode: self.sessions.cwd_display_mode,
+            sort_column: self.sessions.sort_column,
+            sort_direction: self.sessions.sort_direction,
             show_transcript: self.show_transcript,
+            snip_columns: self.snip_columns,
             expand_messages: self.transcript.expand_messages,
             transcript_role_filter: self.transcript.role_filter,
         }
@@ -310,14 +319,25 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Toggle transcript message snipping. Tool rows remain clamped.
+            // Contextual snip toggle: list focus controls column middle-snips;
+            // transcript focus controls expanded conversation bodies. Tool rows
+            // remain clamped regardless so command output never floods the pane.
             KeyCode::Char('s') => {
-                let expanded = self.transcript.toggle_message_expansion();
-                self.status_message = if expanded {
-                    "transcript messages: full".to_string()
+                if self.focus == PaneFocus::Transcript {
+                    let expanded = self.transcript.toggle_message_expansion();
+                    self.status_message = if expanded {
+                        "transcript messages: full".to_string()
+                    } else {
+                        "transcript messages: snip".to_string()
+                    };
                 } else {
-                    "transcript messages: snip".to_string()
-                };
+                    self.snip_columns = !self.snip_columns;
+                    self.status_message = if self.snip_columns {
+                        "columns: snip".to_string()
+                    } else {
+                        "columns: clip".to_string()
+                    };
+                }
                 self.mark_display_options_dirty();
                 ResumeAction::None
             }
@@ -365,6 +385,24 @@ impl ResumeApp {
                         project_path: session.project_path.clone(),
                     });
                 }
+                ResumeAction::None
+            }
+
+            // Sort session list by visible column index. `#` is a generated
+            // row number, not source data; `0` covers the tenth data column.
+            // 1 state, 2 harness, 3 workspace, 4 cwd, 5 filter, 6 mt,
+            // 7 ct, 8 turns, 9 thread, 0 prompt.
+            KeyCode::Char(ch) if self.focus == PaneFocus::Sessions => {
+                let Some(column) = SortColumn::from_key(ch) else {
+                    return ResumeAction::None;
+                };
+                self.sessions.sort_by_column(column);
+                self.status_message = format!(
+                    "sort: {} {}",
+                    self.sessions.sort_column.label(),
+                    self.sessions.sort_direction.indicator()
+                );
+                self.mark_display_options_dirty();
                 ResumeAction::None
             }
 
@@ -497,7 +535,10 @@ where
                                             if let Some(ctx) = refocus {
                                                 tokio::time::sleep(Duration::from_millis(150))
                                                     .await;
-                                                let _ = ctx.backend.focus_pane(&ctx.conn, ctx.pane_id).await;
+                                                let _ = ctx
+                                                    .backend
+                                                    .focus_pane(&ctx.conn, ctx.pane_id)
+                                                    .await;
                                             }
                                             LaunchResult::Success(msg)
                                         }
@@ -509,8 +550,7 @@ where
                                 });
                             }
                             ResumeAction::Refresh => {
-                                refresh_app_sessions(&mut app, source, true, "refreshed")
-                                    .await?;
+                                refresh_app_sessions(&mut app, source, true, "refreshed").await?;
                                 sync_selected_transcript_target(
                                     &mut app,
                                     &mut desired_transcript_key,
@@ -677,13 +717,13 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<St
     ))
 }
 
-fn detect_current_backend(
-) -> anyhow::Result<(std::sync::Arc<dyn crate::backend::TerminalBackend>, String)> {
+fn detect_current_backend()
+-> anyhow::Result<(std::sync::Arc<dyn crate::backend::TerminalBackend>, String)> {
     use crate::backend::{kitty::KittyBackend, tmux::TmuxBackend};
 
     if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        let backend =
-            std::sync::Arc::new(KittyBackend) as std::sync::Arc<dyn crate::backend::TerminalBackend>;
+        let backend = std::sync::Arc::new(KittyBackend)
+            as std::sync::Arc<dyn crate::backend::TerminalBackend>;
         return Ok((backend, crate::kitty::default_socket()));
     }
 
@@ -874,7 +914,7 @@ fn queue_visible_project_metrics(app: &mut ResumeApp, tx: &mpsc::Sender<ProjectL
         return;
     }
 
-    let scroll_offset = app.sessions.scroll_offset;
+    let scroll_offset = app.sessions.selection.scroll_offset;
     let indices: Vec<usize> = app
         .sessions
         .visible_indices()
@@ -971,7 +1011,16 @@ where
 {
     let sessions = source.refresh_sessions(force).await?;
     app.sessions.replace_sessions(sessions);
-    app.touched_projects.clear();
+    // Project metrics are keyed by stable session_key — retain across refreshes.
+    // Only prune entries for sessions that no longer exist in the catalog.
+    let live_keys: std::collections::HashSet<&str> = app
+        .sessions
+        .sessions
+        .iter()
+        .map(|s| s.session_key.as_str())
+        .collect();
+    app.touched_projects
+        .retain(|key, _| live_keys.contains(key.as_str()));
     app.status_message = format!("{label} {} sessions", app.sessions.sessions.len());
     Ok(())
 }
