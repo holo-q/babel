@@ -7,7 +7,9 @@ use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
 use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
 use crate::ActivityState;
+use chrono::{Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -193,6 +195,71 @@ impl Default for SortColumn {
     fn default() -> Self {
         Self::ModifiedTime
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupMode {
+    None,
+    CreatedDay,
+    ModifiedDay,
+}
+
+impl GroupMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::CreatedDay,
+            Self::CreatedDay => Self::ModifiedDay,
+            Self::ModifiedDay => Self::None,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::None => Self::ModifiedDay,
+            Self::CreatedDay => Self::None,
+            Self::ModifiedDay => Self::CreatedDay,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CreatedDay => "ct day",
+            Self::ModifiedDay => "mt day",
+        }
+    }
+
+    fn timestamp(self, session: &EnrichedSession) -> Option<i64> {
+        match self {
+            Self::None => None,
+            Self::CreatedDay => Some(session.created_at),
+            Self::ModifiedDay => Some(session.last_seen_at),
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::CreatedDay => "ct",
+            Self::ModifiedDay => "mt",
+        }
+    }
+}
+
+impl Default for GroupMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisibleListRow {
+    GroupHeader(String),
+    Session {
+        session_index: usize,
+        ordinal: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,6 +459,10 @@ pub struct SessionListState {
     pub sort_column: SortColumn,
     /// Direction currently sorting the visible session projection.
     pub sort_direction: SortDirection,
+    /// Optional pre-grouping by session day. Sorting applies only within each
+    /// day bucket so broad chronology stays scannable while numeric/header
+    /// sorts remain useful inside the bucket.
+    pub group_mode: GroupMode,
     /// Search/filter query
     pub filter_query: String,
     /// Structured project focus tag selected from the cwd column with `o`.
@@ -418,6 +489,7 @@ impl SessionListState {
             cwd_display_mode: CwdDisplayMode::Relative,
             sort_column: SortColumn::ModifiedTime,
             sort_direction: SortDirection::Descending,
+            group_mode: GroupMode::None,
             filter_query: String::new(),
             project_filter: None,
             touched_project_paths: HashMap::new(),
@@ -434,6 +506,30 @@ impl SessionListState {
 
     pub fn visible_count(&mut self) -> usize {
         self.visible_indices().len()
+    }
+
+    pub fn visible_rows(&mut self) -> Vec<VisibleListRow> {
+        self.ensure_visible_indices();
+        let mut rows = Vec::with_capacity(self.visible_indices.len());
+        let mut previous_group: Option<i32> = None;
+
+        for (ordinal, idx) in self.visible_indices.iter().copied().enumerate() {
+            if self.group_mode != GroupMode::None {
+                let key = self.group_key(&self.sessions[idx]);
+                if previous_group != key {
+                    previous_group = key;
+                    rows.push(VisibleListRow::GroupHeader(
+                        self.group_label(&self.sessions[idx]),
+                    ));
+                }
+            }
+            rows.push(VisibleListRow::Session {
+                session_index: idx,
+                ordinal,
+            });
+        }
+
+        rows
     }
 
     /// Get currently selected session
@@ -550,6 +646,20 @@ impl SessionListState {
         self.clamp_cursor();
     }
 
+    pub fn cycle_group_mode(&mut self) -> GroupMode {
+        self.group_mode = self.group_mode.next();
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+        self.group_mode
+    }
+
+    pub fn cycle_group_mode_reverse(&mut self) -> GroupMode {
+        self.group_mode = self.group_mode.previous();
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+        self.group_mode
+    }
+
     /// Update filter query
     pub fn set_filter(&mut self, query: String) {
         self.filter_query = query.to_lowercase();
@@ -645,15 +755,43 @@ impl SessionListState {
         let sessions = &self.sessions;
         let sort_column = self.sort_column;
         let sort_direction = self.sort_direction;
+        let group_mode = self.group_mode;
         self.visible_indices.sort_by(|left, right| {
-            compare_sessions(
+            compare_grouped_sessions(
                 &sessions[*left],
                 &sessions[*right],
+                group_mode,
                 sort_column,
                 sort_direction,
             )
         });
         self.visible_dirty = false;
+    }
+
+    fn group_key(&self, session: &EnrichedSession) -> Option<i32> {
+        group_day_key(self.group_mode, session)
+    }
+
+    fn group_label(&self, session: &EnrichedSession) -> String {
+        let Some(timestamp) = self.group_mode.timestamp(session) else {
+            return String::new();
+        };
+        let Some(date) = Local
+            .timestamp_opt(timestamp, 0)
+            .single()
+            .map(|dt| dt.date_naive())
+        else {
+            return format!("{} unknown", self.group_mode.prefix());
+        };
+        let today = Local::now().date_naive();
+        let label = if date == today {
+            "today".to_string()
+        } else if date == today - chrono::Duration::days(1) {
+            "yesterday".to_string()
+        } else {
+            date.format("%a %b %-d").to_string()
+        };
+        format!("{} {}", self.group_mode.prefix(), label)
     }
 
     fn session_is_visible(&self, session: &EnrichedSession) -> bool {
@@ -757,6 +895,33 @@ fn path_matches_any_filter_path(path: &Path, filter_paths: &[PathBuf]) -> bool {
         .any(|filter| path.starts_with(filter) || filter.starts_with(path))
 }
 
+fn compare_grouped_sessions(
+    left: &EnrichedSession,
+    right: &EnrichedSession,
+    group_mode: GroupMode,
+    column: SortColumn,
+    direction: SortDirection,
+) -> Ordering {
+    if group_mode != GroupMode::None {
+        let group_order = group_day_key(group_mode, left)
+            .cmp(&group_day_key(group_mode, right))
+            .reverse();
+        if group_order != Ordering::Equal {
+            return group_order;
+        }
+    }
+    compare_sessions(left, right, column, direction)
+}
+
+fn group_day_key(mode: GroupMode, session: &EnrichedSession) -> Option<i32> {
+    mode.timestamp(session).and_then(|timestamp| {
+        Local
+            .timestamp_opt(timestamp, 0)
+            .single()
+            .map(|dt| dt.date_naive().num_days_from_ce())
+    })
+}
+
 fn compare_sessions(
     left: &EnrichedSession,
     right: &EnrichedSession,
@@ -815,6 +980,28 @@ fn workspace_rank(session: &EnrichedSession) -> Option<i32> {
 mod tests {
     use super::*;
 
+    fn session(key: &str, created_at: i64, last_seen_at: i64, title: &str) -> EnrichedSession {
+        EnrichedSession {
+            agent_kind: AgentKind::Codex,
+            native_id: key.to_string(),
+            session_key: format!("codex:{key}"),
+            project_path: Some(PathBuf::from("/workspace/babel")),
+            display_name: Some(title.to_string()),
+            generated_title: None,
+            last_prompt: None,
+            turn_count: 2,
+            created_at,
+            last_seen_at,
+            interactive: true,
+            command_only: false,
+            has_title: true,
+            hidden: false,
+            custom_icon: None,
+            unread: false,
+            running_status: RunningStatus::Inactive,
+        }
+    }
+
     #[test]
     fn hidden_display_cycle_is_reversible() {
         assert_eq!(HiddenDisplayMode::Normal.next(), HiddenDisplayMode::Manual);
@@ -826,5 +1013,46 @@ mod tests {
             HiddenDisplayMode::Manual.previous(),
             HiddenDisplayMode::Normal
         );
+    }
+
+    #[test]
+    fn group_mode_cycle_is_reversible() {
+        assert_eq!(GroupMode::None.next(), GroupMode::CreatedDay);
+        assert_eq!(GroupMode::CreatedDay.next(), GroupMode::ModifiedDay);
+        assert_eq!(GroupMode::ModifiedDay.next(), GroupMode::None);
+        assert_eq!(GroupMode::None.previous(), GroupMode::ModifiedDay);
+        assert_eq!(GroupMode::CreatedDay.previous(), GroupMode::None);
+    }
+
+    #[test]
+    fn grouping_orders_days_before_sorting_inside_each_day() {
+        let day = 86_400;
+        let mut list = SessionListState::new(
+            vec![
+                session("old-z", day, day, "zeta"),
+                session("new-b", day * 2 + 20, day * 2 + 20, "beta"),
+                session("new-a", day * 2 + 10, day * 2 + 10, "alpha"),
+                session("old-a", day + 10, day + 10, "alpha"),
+            ],
+            None,
+        );
+        list.show_all = true;
+        list.group_mode = GroupMode::CreatedDay;
+        list.set_sort(SortColumn::Thread, SortDirection::Ascending);
+
+        let rows = list.visible_rows();
+        let visible_keys: Vec<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                VisibleListRow::GroupHeader(_) => None,
+                VisibleListRow::Session { session_index, .. } => {
+                    Some(list.sessions[*session_index].native_id.clone())
+                }
+            })
+            .collect();
+
+        assert_eq!(visible_keys, ["new-a", "new-b", "old-a", "old-z"]);
+        assert!(matches!(rows[0], VisibleListRow::GroupHeader(_)));
+        assert!(matches!(rows[3], VisibleListRow::GroupHeader(_)));
     }
 }

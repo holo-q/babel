@@ -19,7 +19,7 @@ use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
 use super::one_line;
 use super::project_metrics::{workgroup_style_for_path, ProjectTouchMetric, WorkgroupStyle};
-use super::session_list::{CwdDisplayMode, EnrichedSession};
+use super::session_list::{CwdDisplayMode, EnrichedSession, VisibleListRow};
 use super::transcript::{
     distill_prompt_thoughtstream, transcript_message_is_visible, transcript_message_row_count,
     TranscriptBodyMode, TranscriptRoleFilter,
@@ -118,13 +118,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     };
 
     let list_height = inner.height as usize;
-    let cursor = app.sessions.cursor;
     let now = unix_now();
-    let visible_len = app.sessions.visible_count();
-
-    let scroll_offset =
-        scroll_offset_for_cursor(cursor, app.sessions.scroll_offset, list_height, visible_len);
-    app.sessions.scroll_offset = scroll_offset;
 
     let visible_indices = app.sessions.visible_indices().to_vec();
     let max_visible_turn_count = visible_indices
@@ -132,23 +126,36 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .map(|idx| app.sessions.sessions[*idx].turn_count)
         .max()
         .unwrap_or(0);
-    let viewport_indices: Vec<usize> = visible_indices
+    let visible_rows = app.sessions.visible_rows();
+    let selected_display_row = selected_display_row(&visible_rows, app.sessions.cursor);
+    let scroll_offset = scroll_offset_for_cursor(
+        selected_display_row,
+        app.sessions.scroll_offset,
+        list_height,
+        visible_rows.len(),
+    );
+    app.sessions.scroll_offset = scroll_offset;
+
+    let viewport_row_model: Vec<VisibleListRow> = visible_rows
         .iter()
         .skip(scroll_offset)
         .take(list_height.max(1))
-        .copied()
+        .cloned()
         .collect();
-    let viewport_rows: Vec<RenderedSessionRow> = viewport_indices
+    let viewport_rows: Vec<RenderedSessionRow> = viewport_row_model
         .iter()
-        .map(|idx| {
-            let session = &app.sessions.sessions[*idx];
-            let mut row = session.row(now);
-            let cwd = cwd_cell_for_session(session, &app.sessions.cwd_display_mode, app);
-            row.cwd = cwd.plain_text();
-            RenderedSessionRow {
-                idx: *idx,
-                row,
-                cwd,
+        .filter_map(|row| match row {
+            VisibleListRow::GroupHeader(_) => None,
+            VisibleListRow::Session { session_index, .. } => {
+                let session = &app.sessions.sessions[*session_index];
+                let mut row = session.row(now);
+                let cwd = cwd_cell_for_session(session, &app.sessions.cwd_display_mode, app);
+                row.cwd = cwd.plain_text();
+                Some(RenderedSessionRow {
+                    idx: *session_index,
+                    row,
+                    cwd,
+                })
             }
         })
         .collect();
@@ -170,20 +177,28 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         column_header,
     );
 
-    let items: Vec<ListItem> = viewport_rows
+    let items: Vec<ListItem> = viewport_row_model
         .iter()
-        .enumerate()
-        .map(|(idx, rendered)| {
-            let is_selected = idx + scroll_offset == app.sessions.cursor;
-            render_session_item(
-                rendered,
-                &widths,
-                inner.width as usize,
-                is_selected,
-                app.snip_columns,
-                app.braille_tokens,
-                max_visible_turn_count,
-            )
+        .map(|row| match row {
+            VisibleListRow::GroupHeader(label) => render_group_header(label, inner.width as usize),
+            VisibleListRow::Session {
+                session_index,
+                ordinal,
+            } => {
+                let rendered = viewport_rows
+                    .iter()
+                    .find(|rendered| rendered.idx == *session_index)
+                    .expect("viewport session row should be prepared");
+                render_session_item(
+                    rendered,
+                    &widths,
+                    inner.width as usize,
+                    *ordinal == app.sessions.cursor,
+                    app.snip_columns,
+                    app.braille_tokens,
+                    max_visible_turn_count,
+                )
+            }
         })
         .collect();
 
@@ -202,9 +217,36 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
 
     // Render with scroll offset
     let list_state = &mut ratatui::widgets::ListState::default();
-    list_state.select(Some(cursor.saturating_sub(scroll_offset)));
+    list_state.select(Some(selected_display_row.saturating_sub(scroll_offset)));
 
     frame.render_stateful_widget(list, inner, list_state);
+}
+
+fn selected_display_row(rows: &[VisibleListRow], cursor: usize) -> usize {
+    rows.iter()
+        .position(|row| {
+            matches!(
+                row,
+                VisibleListRow::Session { ordinal, .. } if *ordinal == cursor
+            )
+        })
+        .unwrap_or(cursor)
+}
+
+fn render_group_header(label: &str, row_width: usize) -> ListItem<'static> {
+    let mut line_width = 0;
+    let mut spans = Vec::new();
+    let style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+    push_span(&mut spans, &mut line_width, "─ ", style);
+    push_span(&mut spans, &mut line_width, label.to_string(), style);
+    push_span(&mut spans, &mut line_width, " ", style);
+    let fill = row_width.saturating_sub(line_width);
+    if fill > 0 {
+        push_span(&mut spans, &mut line_width, "─".repeat(fill), style);
+    }
+    ListItem::new(Line::from(spans))
 }
 
 /// Render a single session item with the same cell order as `ls-sessions`.
@@ -618,6 +660,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
+            "d/D",
+            app.sessions.group_mode.label(),
+            app.sessions.group_mode != Default::default(),
+        );
+        push_status_button(
+            &mut left_spans,
+            &mut left_width,
             "h/A-h",
             app.sessions.hidden_display_mode.label(),
             app.sessions.hidden_display_mode != Default::default(),
@@ -668,7 +717,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let keybinds = if app.is_searching() {
         "Enter confirm  Esc cancel  C-w/C-BS word"
     } else {
-        "H hide  y yank  r refresh  c/C cwd  h/A-h hidden  s/S snip  u/U roles  o focus  b tokens  / search  Enter launch  q quit"
+        "H hide  y yank  r refresh  c/C cwd  d/D group  h/A-h hidden  s/S snip  u/U roles  o focus  b tokens  / search  Enter launch  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);

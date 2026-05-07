@@ -193,6 +193,7 @@ impl ResumeApp {
         self.sessions.cwd_display_mode = options.cwd_display_mode;
         self.sessions
             .set_sort(options.sort_column, options.sort_direction);
+        self.sessions.group_mode = options.group_mode;
         self.sessions.invalidate_visible_indices();
         self.show_transcript = options.show_transcript;
         self.snip_columns = options.snip_columns;
@@ -215,6 +216,7 @@ impl ResumeApp {
             cwd_display_mode: self.sessions.cwd_display_mode,
             sort_column: self.sessions.sort_column,
             sort_direction: self.sessions.sort_direction,
+            group_mode: self.sessions.group_mode,
             show_transcript: self.show_transcript,
             snip_columns: self.snip_columns,
             braille_tokens: self.braille_tokens,
@@ -420,6 +422,22 @@ impl ResumeApp {
                 } else {
                     "tokens: raw".to_string()
                 };
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Cycle day grouping: none -> created day -> modified day. The
+            // session cursor remains a session cursor; group headers are a
+            // render projection so actions never land on a header row.
+            KeyCode::Char('d') => {
+                let mode = self.sessions.cycle_group_mode();
+                self.status_message = format!("group: {}", mode.label());
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+            KeyCode::Char('D') => {
+                let mode = self.sessions.cycle_group_mode_reverse();
+                self.status_message = format!("group: {}", mode.label());
                 self.mark_display_options_dirty();
                 ResumeAction::None
             }

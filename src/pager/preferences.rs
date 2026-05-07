@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::session_list::{CwdDisplayMode, HiddenDisplayMode, SortColumn, SortDirection};
+use super::session_list::{
+    CwdDisplayMode, GroupMode, HiddenDisplayMode, SortColumn, SortDirection,
+};
 use super::transcript::{TranscriptBodyMode, TranscriptRoleFilter};
 
 const RESUME_DISPLAY_PREFS: &str = "resume-display.json";
@@ -23,6 +25,7 @@ pub struct ResumeDisplayOptions {
     pub cwd_display_mode: CwdDisplayMode,
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
+    pub group_mode: GroupMode,
     pub snip_columns: bool,
     pub braille_tokens: bool,
     pub show_transcript: bool,
@@ -41,6 +44,7 @@ impl Default for ResumeDisplayOptions {
             cwd_display_mode: CwdDisplayMode::Relative,
             sort_column: SortColumn::ModifiedTime,
             sort_direction: SortDirection::Descending,
+            group_mode: GroupMode::None,
             snip_columns: true,
             braille_tokens: false,
             show_transcript: true,
@@ -108,6 +112,7 @@ mod tests {
             cwd_display_mode: CwdDisplayMode::TouchedProjects,
             sort_column: SortColumn::Thread,
             sort_direction: SortDirection::Ascending,
+            group_mode: GroupMode::CreatedDay,
             snip_columns: false,
             braille_tokens: true,
             show_transcript: false,
