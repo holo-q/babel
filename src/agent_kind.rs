@@ -108,6 +108,10 @@ pub enum PulseEffect {
     Finished,
     Attention,
     Compact,
+    /// Session ending / cleanup.
+    Teardown,
+    /// Turn ended due to error.
+    Error,
 }
 
 /// One native hook event mapped into Babel's canonical hook vocabulary.

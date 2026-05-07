@@ -581,6 +581,25 @@ pub async fn handle_stdin(event: &str, agent_kind: AgentKind) -> Result<()> {
                 "Hook pre compact"
             );
         }
+        "session-end" => {
+            let reason = payload_field(&raw, "reason").unwrap_or_else(|| "unknown".into());
+            info!(session, reason = %reason, "Hook session end");
+        }
+        "subagent-start" => {
+            let agent_type = payload_field(&raw, "agent_type").unwrap_or_else(|| "unknown".into());
+            debug!(session, agent_type = %agent_type, "Hook subagent start");
+        }
+        "stop-failure" => {
+            let error_type = payload_field(&raw, "error_type").unwrap_or_else(|| "unknown".into());
+            warn!(session, error_type = %error_type, "Hook stop failure");
+        }
+        "post-compact" => {
+            info!(session, "Hook post compact");
+        }
+        "permission" => {
+            let tool = payload.tool_name.as_deref().unwrap_or("unknown");
+            info!(session, tool, "Hook permission request");
+        }
         _ => {}
     }
 

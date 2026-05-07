@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin session-start"
+            "command": "babel hook stdin session-start --agent cursor"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin prompt"
+            "command": "babel hook stdin prompt --agent cursor"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin pre-tool"
+            "command": "babel hook stdin pre-tool --agent cursor"
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin post-tool"
+            "command": "babel hook stdin post-tool --agent cursor"
           }
         ]
       }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin stop"
+            "command": "babel hook stdin stop --agent cursor"
           }
         ]
       }
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin notification"
+            "command": "babel hook stdin notification --agent cursor"
           }
         ]
       }
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin subagent-stop"
+            "command": "babel hook stdin subagent-stop --agent cursor"
           }
         ]
       }
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin pre-compact"
+            "command": "babel hook stdin pre-compact --agent cursor"
           }
         ]
       }
@@ -94,7 +94,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin session-end"
+            "command": "babel hook stdin session-end --agent cursor"
           }
         ]
       }
@@ -105,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin subagent-start"
+            "command": "babel hook stdin subagent-start --agent cursor"
           }
         ]
       }
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin stop-failure"
+            "command": "babel hook stdin stop-failure --agent cursor"
           }
         ]
       }
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin post-compact"
+            "command": "babel hook stdin post-compact --agent cursor"
           }
         ]
       }
@@ -138,7 +138,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "babel hook stdin permission"
+            "command": "babel hook stdin permission --agent cursor"
           }
         ]
       }

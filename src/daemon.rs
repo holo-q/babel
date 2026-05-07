@@ -2093,12 +2093,11 @@ async fn warm_daemon_state(
 ) -> Result<()> {
     // ── Step 1: Summary index (spawn_blocking + rayon parallel scan) ─────
     // Heavy CPU+IO work over 3000+ JSONL files — runs off the async executor.
-    let (summary_index, session_paths) = tokio::task::spawn_blocking(|| {
-        rebuild_summary_index_blocking()
-    })
-    .await
-    .context("summary index task panicked")?
-    .context("Failed to build summary index")?;
+    let (summary_index, session_paths) =
+        tokio::task::spawn_blocking(|| rebuild_summary_index_blocking())
+            .await
+            .context("summary index task panicked")?
+            .context("Failed to build summary index")?;
 
     let total_summaries = summary_index.len();
     {
@@ -2119,12 +2118,11 @@ async fn warm_daemon_state(
 
     // ── Step 2: Fingerprint index (spawn_blocking) ──────────────────────
     let fp_limit = config::FINGERPRINT_INDEX_LIMIT;
-    let (fingerprint_index, sessions_with_fingerprints) = tokio::task::spawn_blocking(move || {
-        rebuild_fingerprint_index_blocking(fp_limit)
-    })
-    .await
-    .context("fingerprint index task panicked")?
-    .context("Failed to build fingerprint index")?;
+    let (fingerprint_index, sessions_with_fingerprints) =
+        tokio::task::spawn_blocking(move || rebuild_fingerprint_index_blocking(fp_limit))
+            .await
+            .context("fingerprint index task panicked")?
+            .context("Failed to build fingerprint index")?;
 
     {
         let mut s = state.write().await;
@@ -2190,10 +2188,7 @@ async fn warm_daemon_state(
                         tracing::info!("Cleared {} stale hook states", n);
                     }
                     let mut s = state.write().await;
-                    s.complete_warmup_operation(
-                        "hook_reconcile",
-                        Some(format!("{} cleared", n)),
-                    );
+                    s.complete_warmup_operation("hook_reconcile", Some(format!("{} cleared", n)));
                     complete_warmup_operation(
                         readiness,
                         "hook_reconcile",
@@ -2204,10 +2199,7 @@ async fn warm_daemon_state(
                 Err(e) => {
                     tracing::debug!(error = %e, "Failed to reconcile hook states");
                     let mut s = state.write().await;
-                    s.complete_warmup_operation(
-                        "hook_reconcile",
-                        Some(format!("skipped: {}", e)),
-                    );
+                    s.complete_warmup_operation("hook_reconcile", Some(format!("skipped: {}", e)));
                     complete_warmup_operation(
                         readiness,
                         "hook_reconcile",
@@ -2218,10 +2210,7 @@ async fn warm_daemon_state(
             }
         } else {
             let mut s = state.write().await;
-            s.complete_warmup_operation(
-                "hook_reconcile",
-                Some("sqlite unavailable".to_string()),
-            );
+            s.complete_warmup_operation("hook_reconcile", Some("sqlite unavailable".to_string()));
             complete_warmup_operation(
                 readiness,
                 "hook_reconcile",
@@ -4035,6 +4024,8 @@ mod handlers {
                 PulseEffect::Finished => 0.9,
                 PulseEffect::Attention => 0.75,
                 PulseEffect::Compact => 0.55,
+                PulseEffect::Teardown => 0.3,
+                PulseEffect::Error => 0.85,
             };
             if pulse_intensity > 0.0 {
                 s.event_publisher

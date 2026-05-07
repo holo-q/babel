@@ -1,0 +1,64 @@
+[[hooks]]
+event = "SessionStart"
+matcher = ""
+command = "babel hook stdin session-start --agent kimi"
+
+[[hooks]]
+event = "UserPromptSubmit"
+matcher = ""
+command = "babel hook stdin prompt --agent kimi"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = ""
+command = "babel hook stdin pre-tool --agent kimi"
+
+[[hooks]]
+event = "PostToolUse"
+matcher = ""
+command = "babel hook stdin post-tool --agent kimi"
+
+[[hooks]]
+event = "Stop"
+matcher = ""
+command = "babel hook stdin stop --agent kimi"
+
+[[hooks]]
+event = "Notification"
+matcher = ""
+command = "babel hook stdin notification --agent kimi"
+
+[[hooks]]
+event = "SubagentStop"
+matcher = ""
+command = "babel hook stdin subagent-stop --agent kimi"
+
+[[hooks]]
+event = "PreCompact"
+matcher = ""
+command = "babel hook stdin pre-compact --agent kimi"
+
+[[hooks]]
+event = "SessionEnd"
+matcher = ""
+command = "babel hook stdin session-end --agent kimi"
+
+[[hooks]]
+event = "SubagentStart"
+matcher = ""
+command = "babel hook stdin subagent-start --agent kimi"
+
+[[hooks]]
+event = "StopFailure"
+matcher = ""
+command = "babel hook stdin stop-failure --agent kimi"
+
+[[hooks]]
+event = "PostCompact"
+matcher = ""
+command = "babel hook stdin post-compact --agent kimi"
+
+[[hooks]]
+event = "PermissionRequest"
+matcher = ""
+command = "babel hook stdin permission --agent kimi"

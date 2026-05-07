@@ -57,6 +57,41 @@ pub(crate) const CLAUDE_CODE: &[HookEventSpec] = &[
         read: ReadEffect::Preserve,
         pulse: PulseEffect::Compact,
     },
+    HookEventSpec {
+        native: "SessionEnd",
+        canonical: "session-end",
+        state: Some(HookStateEffect::Idle),
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Teardown,
+    },
+    HookEventSpec {
+        native: "SubagentStart",
+        canonical: "subagent-start",
+        state: None,
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Session,
+    },
+    HookEventSpec {
+        native: "StopFailure",
+        canonical: "stop-failure",
+        state: Some(HookStateEffect::Idle),
+        read: ReadEffect::MarkUnread,
+        pulse: PulseEffect::Error,
+    },
+    HookEventSpec {
+        native: "PostCompact",
+        canonical: "post-compact",
+        state: None,
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Compact,
+    },
+    HookEventSpec {
+        native: "PermissionRequest",
+        canonical: "permission",
+        state: None,
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Attention,
+    },
 ];
 
 pub(crate) const CODEX: &[HookEventSpec] = &[
@@ -105,6 +140,13 @@ pub(crate) const CODEX: &[HookEventSpec] = &[
 ];
 
 pub(crate) const GEMINI: &[HookEventSpec] = &[
+    HookEventSpec {
+        native: "SessionStart",
+        canonical: "session-start",
+        state: Some(HookStateEffect::Working),
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Session,
+    },
     HookEventSpec {
         native: "BeforeTool",
         canonical: "pre-tool",
@@ -185,6 +227,13 @@ pub(crate) const CLINE: &[HookEventSpec] = &[
         state: Some(HookStateEffect::Idle),
         read: ReadEffect::MarkUnread,
         pulse: PulseEffect::Finished,
+    },
+    HookEventSpec {
+        native: "Notification",
+        canonical: "notification",
+        state: None,
+        read: ReadEffect::Preserve,
+        pulse: PulseEffect::Attention,
     },
 ];
 
