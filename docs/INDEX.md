@@ -1,5 +1,11 @@
 # babel Documentation Index
 
+## Current Trajectory
+
+- **`docs/20-evolution-log.md`** - recent project evolution: Babel rename,
+  harness-aware migration, refactor waves, resume/history product surface, and
+  non-regression rules.
+
 ## Research Reports
 
 ### Kitty Cross-Instance Window Spawning
