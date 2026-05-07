@@ -54,17 +54,26 @@ async fn main() -> Result<()> {
     // Parse CLI first to get --debug flag before logging init
     let cli = Cli::parse();
 
-    // Initialize logging - daemon uses custom init with VtrLayer, others use spaceship-std
+    let is_resume_tui =
+        matches!(&cli.command, Commands::Resume { indices, .. } if indices.is_empty());
+    let is_tui_surface = is_resume_tui || matches!(&cli.command, Commands::Tui);
+
+    // Initialize logging - daemon uses custom init with VtrLayer, TUIs buffer
+    // terminal logs until teardown, and ordinary CLI commands keep stderr traces.
     // Daemon's VtrLayer captures 50K events in a ring buffer for debugging parallel operations
     let is_daemon = matches!(cli.command, Commands::Daemon { .. });
-    if is_daemon {
+    let _tui_logging_guard = if is_daemon {
         // Custom init with VtrLayer - captures all tracing events to ring buffer
         babel::daemon::init_daemon_logging(&cli.logging);
+        None
+    } else if is_tui_surface {
+        Some(spaceship_std::init_logging_tui!("babel", &cli.logging))
     } else {
         // Standard spaceship-std init for CLI commands
         // Config: ~/Workspace/logging.toml | Logs: journalctl -t babel -f
         spaceship_std::init_logging!("babel", &cli.logging);
-    }
+        None
+    };
 
     if cli.logging.debug {
         tracing::debug!("debug logging enabled via --debug flag");
@@ -110,7 +119,8 @@ async fn main() -> Result<()> {
 
     // Print mode indicator to stderr for commands that use BabelCore
     // Skip for daemon/tui/monitor/mcp/hook which have their own connection handling
-    let show_mode = !is_migration
+    let show_mode = !is_resume_tui
+        && !is_migration
         && !is_migration_doctor
         && !matches!(
             cli.command,
