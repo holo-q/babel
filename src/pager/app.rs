@@ -316,12 +316,10 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Mark/unmark selected session as hidden
-            KeyCode::Char(ch)
-                if !key.modifiers.contains(KeyModifiers::ALT)
-                    && (ch == 'H'
-                        || (ch == 'h' && key.modifiers.contains(KeyModifiers::SHIFT))) =>
-            {
+            // Mark/unmark selected session as hidden. This is intentionally a
+            // plain toggle separate from `h`, which only changes visibility
+            // modes; hidden-row mutation should not depend on shift chords.
+            KeyCode::Char('x') if !key.modifiers.contains(KeyModifiers::ALT) => {
                 let Some((session_key, hidden)) = self.sessions.toggle_selected_hidden() else {
                     return ResumeAction::None;
                 };
@@ -339,9 +337,8 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Reverse hidden display cycle. Shift-H is already the durable
-            // mark-hidden command, so Alt-H carries the reverse cycle without
-            // stealing the user's existing hide shortcut.
+            // Reverse hidden display cycle. Kept as an unadvertised escape
+            // hatch; the footer shows the lowercase forward verb only.
             KeyCode::Char('h' | 'H') if key.modifiers.contains(KeyModifiers::ALT) => {
                 let mode = self.sessions.cycle_hidden_display_mode_reverse();
                 self.status_message = format!("hidden display: {}", mode.label());
@@ -989,8 +986,6 @@ pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Resul
             selection.agent_kind.display_name()
         ));
     }
-    let part_refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-
     boundary!(
         "harness",
         "resume",

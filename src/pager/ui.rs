@@ -632,7 +632,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "Tab",
+            "tab",
             if app.sessions.show_all { "all" } else { "cwd" },
             app.sessions.show_all,
         );
@@ -660,14 +660,14 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "d/D",
+            "d",
             app.sessions.group_mode.label(),
             app.sessions.group_mode != Default::default(),
         );
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "h/A-h",
+            "h",
             app.sessions.hidden_display_mode.label(),
             app.sessions.hidden_display_mode != Default::default(),
         );
@@ -681,7 +681,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "s/S",
+            "s",
             if app.focus == PaneFocus::Transcript {
                 app.transcript.body_mode.label()
             } else if app.snip_columns {
@@ -694,7 +694,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "u/U",
+            "u",
             app.transcript.role_filter.label(),
             app.transcript.role_filter != TranscriptRoleFilter::All,
         );
@@ -715,9 +715,9 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     }
 
     let keybinds = if app.is_searching() {
-        "Enter confirm  Esc cancel  C-w/C-BS word"
+        "enter confirm  esc cancel  c-w/c-bs word"
     } else {
-        "H hide  y yank  r refresh  c/C cwd  d/D group  h/A-h hidden  s/S snip  u/U roles  o focus  b tokens  / search  Enter launch  q quit"
+        "x hide  y yank  r refresh  c cwd  d group  h hidden  s snip  u roles  o focus  b tokens  / search  enter launch  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);
