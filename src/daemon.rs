@@ -2332,8 +2332,15 @@ pub async fn run_daemon(enable_scrollparse: bool) -> Result<()> {
         checkpoint!("tmux_registered", sockets = tmux_sockets.len());
     }
 
+    // Zellij backend: register if any zellij sessions exist
+    let zellij_sessions = crate::backend::zellij::find_all_sessions();
+    if !zellij_sessions.is_empty() {
+        registry.register(Arc::new(crate::backend::zellij::ZellijBackend));
+        checkpoint!("zellij_registered", sessions = zellij_sessions.len());
+    }
+
     if registry.backends().is_empty() {
-        anyhow::bail!("No terminal backends available. Kitty remote control must be enabled, or tmux must be running.");
+        anyhow::bail!("No terminal backends available. Kitty remote control must be enabled, or tmux/zellij must be running.");
     }
 
     let registry = Arc::new(registry);
@@ -4227,6 +4234,7 @@ async fn process_request(
             kitty_id,
             pane_addr,
             tmux_pane,
+            zellij_pane,
             agent_kind,
             hook_state,
             pulse,
@@ -4246,6 +4254,25 @@ async fn process_request(
                         .backends()
                         .iter()
                         .filter(|b| b.backend_name() == "tmux")
+                        .flat_map(|b| b.find_all_connections())
+                        .next()?;
+                    Some(PaneAddr::new(conn, id))
+                })
+            });
+
+            // If zellij_pane is present but pane_addr is still not resolved,
+            // resolve the zellij pane identity into a PaneAddr. Zellij pane IDs
+            // come as "terminal_N" or bare "N" — strip prefix, parse numeric.
+            let pane_addr = pane_addr.or_else(|| {
+                zellij_pane.as_ref().and_then(|zp| {
+                    let numeric = zp.strip_prefix("terminal_").unwrap_or(zp);
+                    let id: u64 = numeric.parse().ok()?;
+                    let s = state.try_read().ok()?;
+                    let conn = s
+                        .registry
+                        .backends()
+                        .iter()
+                        .filter(|b| b.backend_name() == "zellij")
                         .flat_map(|b| b.find_all_connections())
                         .next()?;
                     Some(PaneAddr::new(conn, id))

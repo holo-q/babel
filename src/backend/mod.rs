@@ -21,6 +21,7 @@
 
 pub mod kitty;
 pub mod tmux;
+pub mod zellij;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,6 +109,10 @@ pub enum PaneExtras {
     Tmux {
         session: String,
         window_idx: u32,
+    },
+    Zellij {
+        session: String,
+        tab_name: Option<String>,
     },
 }
 
@@ -469,6 +474,14 @@ impl BackendRegistry {
 pub fn detect_current_backend() -> Result<(Arc<dyn TerminalBackend>, String)> {
     // TMUX first: when tmux runs inside kitty, KITTY_WINDOW_ID leaks through
     // but tmux is the more specific/intentional context.
+    // Zellij first: most specific env var ($ZELLIJ_SESSION_NAME only exists inside zellij).
+    if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
+        let backend = Arc::new(zellij::ZellijBackend) as Arc<dyn TerminalBackend>;
+        return Ok((backend, format!("zellij:{session_name}")));
+    }
+
+    // TMUX next: when tmux runs inside kitty, KITTY_WINDOW_ID leaks through
+    // but tmux is the more specific/intentional context.
     if let Ok(tmux_val) = std::env::var("TMUX") {
         let backend = Arc::new(tmux::TmuxBackend) as Arc<dyn TerminalBackend>;
         if let Some(socket) = tmux_val.splitn(3, ',').next() {
@@ -483,7 +496,7 @@ pub fn detect_current_backend() -> Result<(Arc<dyn TerminalBackend>, String)> {
     }
 
     Err(anyhow::anyhow!(
-        "no supported terminal backend detected (need kitty or tmux)"
+        "no supported terminal backend detected (need kitty, tmux, or zellij)"
     ))
 }
 

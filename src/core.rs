@@ -117,6 +117,9 @@ impl BabelCore {
             if !crate::backend::tmux::find_all_sockets().is_empty() {
                 registry.register(std::sync::Arc::new(crate::backend::tmux::TmuxBackend));
             }
+            if !crate::backend::zellij::find_all_sessions().is_empty() {
+                registry.register(std::sync::Arc::new(crate::backend::zellij::ZellijBackend));
+            }
             let mut state = BabelState::new(std::sync::Arc::new(registry));
 
             let refresh_result = if let Some(duration) = refresh_timeout {

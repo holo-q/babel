@@ -36,12 +36,19 @@ impl PaneAddr {
     }
 
     /// Short display form for logs, e.g. `42@12345`.
+    ///
+    /// Multi-backend aware: strips kitty socket prefix, tmux socket dir,
+    /// or zellij connection prefix to produce a compact identifier.
     pub fn short(&self) -> String {
-        let sock_short = self
-            .socket
-            .rsplit("kitty.sock-")
-            .next()
-            .unwrap_or(&self.socket);
+        let sock_short = if let Some((_, pid)) = self.socket.rsplit_once("kitty.sock-") {
+            pid
+        } else if let Some(rest) = self.socket.strip_prefix("tmux:") {
+            rest.rsplit('/').next().unwrap_or(rest)
+        } else if let Some(rest) = self.socket.strip_prefix("zellij:") {
+            rest
+        } else {
+            &self.socket
+        };
         format!("{}@{}", self.id, sock_short)
     }
 }

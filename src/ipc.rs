@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::EventMessage;
 use crate::kitty::{KittyPane, PaneAddr, PaneSelector};
 use crate::paint::PaintEvent;
-use crate::service::state::{SocketStatus, TerminalInfo};
+use crate::service::state::{DaemonReadiness, SocketStatus, TerminalInfo};
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::SessionInfo;
 use crate::wset::WSetSummary;
@@ -84,6 +84,9 @@ pub enum Request {
 
     /// Ping - check if daemon is alive
     Ping,
+
+    /// Read daemon warmup state without being gated by warmup.
+    Readiness,
 
     /// Shutdown daemon
     Shutdown,
@@ -176,6 +179,10 @@ pub enum Request {
         /// but for the tmux backend.
         #[serde(default)]
         tmux_pane: Option<String>,
+        /// Zellij pane ID (from $ZELLIJ_PANE_ID env var, e.g. "terminal_5").
+        /// When present, daemon binds this zellij pane to the session.
+        #[serde(default)]
+        zellij_pane: Option<String>,
         /// Harness that emitted the hook.
         #[serde(default)]
         agent_kind: AgentKind,
@@ -241,6 +248,9 @@ pub enum Response {
 
     /// Pong response to ping
     Pong { uptime_secs: u64 },
+
+    /// Daemon warmup state.
+    Readiness { readiness: DaemonReadiness },
 
     /// Subscription acknowledged
     Subscribed { subscriber_id: u64 },

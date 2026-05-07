@@ -107,6 +107,7 @@ async fn push_to_daemon(
         kitty_id: pane_addr.map(|addr| addr.id),
         pane_addr: pane_addr.cloned(),
         tmux_pane: std::env::var("TMUX_PANE").ok(),
+        zellij_pane: std::env::var("ZELLIJ_PANE_ID").ok(),
         agent_kind,
         hook_state,
         pulse,
