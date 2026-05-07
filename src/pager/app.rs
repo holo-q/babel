@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -25,7 +25,7 @@ use crate::ipc::{Request, Response};
 use crate::utility::ipc::socket_path;
 
 use super::preferences::{
-    ResumeDisplayOptions, load_resume_display_options, save_resume_display_options,
+    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
 };
 use super::project_metrics::ProjectTouchMetric;
 use super::session_list::{CwdDisplayMode, EnrichedSession, SessionListState, SortColumn};
@@ -662,7 +662,13 @@ where
     Ok(())
 }
 
-async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<String> {
+/// Launch a session resume in the current terminal backend.
+///
+/// Resolves the harness resume command, determines the working directory
+/// (with Claude-specific fallback to ~/.claude/projects/), spawns a new
+/// pane via the backend trait, and restores the session's last-known
+/// desktop workspace when available.
+pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<String> {
     let spec = selection.agent_kind.spec();
     let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
         anyhow::anyhow!(
@@ -683,9 +689,16 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<St
         .as_ref()
         .filter(|p| p.exists())
         .cloned()
+        .or_else(|| {
+            if selection.agent_kind == crate::AgentKind::Claude {
+                crate::utility::claude_storage::get_session_cwd(&selection.native_id).ok()
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let (backend, conn) = detect_current_backend()?;
+    let (backend, conn) = crate::backend::detect_current_backend()?;
     let launched = backend.launch_pane(&conn, &parts, &cwd).await?;
 
     if let Some(platform_window_id) = launched.platform_window_id {
@@ -714,29 +727,6 @@ async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<St
         "launched {} {}",
         selection.agent_kind.slug(),
         short_id
-    ))
-}
-
-fn detect_current_backend()
--> anyhow::Result<(std::sync::Arc<dyn crate::backend::TerminalBackend>, String)> {
-    use crate::backend::{kitty::KittyBackend, tmux::TmuxBackend};
-
-    if std::env::var("KITTY_WINDOW_ID").is_ok() {
-        let backend = std::sync::Arc::new(KittyBackend)
-            as std::sync::Arc<dyn crate::backend::TerminalBackend>;
-        return Ok((backend, crate::kitty::default_socket()));
-    }
-
-    if let Ok(tmux_val) = std::env::var("TMUX") {
-        let backend =
-            std::sync::Arc::new(TmuxBackend) as std::sync::Arc<dyn crate::backend::TerminalBackend>;
-        if let Some(socket) = tmux_val.splitn(3, ',').next() {
-            return Ok((backend, format!("tmux:{socket}")));
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "no supported terminal backend detected (need kitty or tmux)"
     ))
 }
 

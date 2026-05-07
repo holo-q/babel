@@ -83,3 +83,30 @@ pub fn spec_for(kind: AgentKind) -> &'static HarnessSpec {
         .find(|spec| spec.kind == kind)
         .unwrap_or(&OTHER_SPEC)
 }
+
+/// Locate the transcript file for a session by harness-specific storage convention.
+pub fn find_session_transcript(
+    kind: AgentKind,
+    native_id: &str,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    match kind {
+        AgentKind::Claude => crate::utility::claude_storage::find_session_transcript(native_id),
+        AgentKind::Codex => codex::transcript::find_session_transcript(native_id),
+        _ => Ok(None),
+    }
+}
+
+/// Parse a transcript file using the harness-specific format.
+pub fn parse_transcript(
+    kind: AgentKind,
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<scrollparse::Message>> {
+    match kind {
+        AgentKind::Claude => crate::pager::parse_transcript(path),
+        AgentKind::Codex => codex::transcript::parse_transcript(path),
+        _ => anyhow::bail!(
+            "{} transcript parsing is not wired yet",
+            kind.display_name()
+        ),
+    }
+}

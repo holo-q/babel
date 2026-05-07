@@ -462,6 +462,29 @@ impl BackendRegistry {
     }
 }
 
+/// Detect which terminal backend the current process is running inside.
+///
+/// Checks environment variables to determine whether we're in kitty or tmux,
+/// returning the appropriate backend implementation and connection string.
+pub fn detect_current_backend() -> Result<(Arc<dyn TerminalBackend>, String)> {
+    if std::env::var("KITTY_WINDOW_ID").is_ok() {
+        let backend = Arc::new(kitty::KittyBackend) as Arc<dyn TerminalBackend>;
+        let conn = kitty::default_socket();
+        return Ok((backend, conn));
+    }
+
+    if let Ok(tmux_val) = std::env::var("TMUX") {
+        let backend = Arc::new(tmux::TmuxBackend) as Arc<dyn TerminalBackend>;
+        if let Some(socket) = tmux_val.splitn(3, ',').next() {
+            return Ok((backend, format!("tmux:{socket}")));
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "no supported terminal backend detected (need kitty or tmux)"
+    ))
+}
+
 impl Default for BackendRegistry {
     fn default() -> Self {
         Self::new()

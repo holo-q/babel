@@ -17,7 +17,7 @@ use crate::agent_kind::AgentKind;
 use crate::babel_storage::BabelStorage;
 use crate::session_row;
 
-const PROJECT_CACHE_VERSION: u32 = 2;
+const PROJECT_CACHE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTouchMetric {
@@ -39,7 +39,7 @@ pub fn load_cached_session_projects(
 ) -> Result<Vec<ProjectTouchMetric>> {
     use crate::babel_storage::{ProjectCacheState, SessionProjectCacheEntry};
 
-    let Some(path) = find_session_transcript(agent_kind, native_id)? else {
+    let Some(path) = crate::harness::find_session_transcript(agent_kind, native_id)? else {
         anyhow::bail!("transcript not found");
     };
 
@@ -47,13 +47,13 @@ pub fn load_cached_session_projects(
     let source_path = format!("project-touch-v{PROJECT_CACHE_VERSION}:{}", path.display());
     let db = BabelStorage::open()?;
 
-    let cached = db.get_project_cache_state(session_key)?;
+    let cached = db.get_project_cache_state(session_key, &source_path)?;
 
     // Determine if we can do an incremental parse or need full reparse
     let (mut metrics_map, start_offset) = match &cached {
         Some(state) if state.parsed_bytes == file_size => {
             // Fully up to date — return cached directly
-            return Ok(state
+            let mut projects: Vec<ProjectTouchMetric> = state
                 .projects
                 .iter()
                 .map(|p| ProjectTouchMetric {
@@ -61,7 +61,9 @@ pub fn load_cached_session_projects(
                     touch_count: p.touch_count,
                     ansi256: p.ansi256,
                 })
-                .collect());
+                .collect();
+            sort_touch_metrics_by_frequency(&mut projects);
+            return Ok(projects);
         }
         Some(state) if state.parsed_bytes < file_size => {
             // File grew — incremental parse from offset
@@ -94,7 +96,11 @@ pub fn load_cached_session_projects(
         reader.seek(SeekFrom::Start(start_offset))?;
     }
 
-    let base_line = metrics_map.values().map(|a| a.latest_line).max().unwrap_or(0);
+    let base_line = metrics_map
+        .values()
+        .map(|a| a.latest_line)
+        .max()
+        .unwrap_or(0);
     let mut line_buf = String::new();
     let mut line_index = base_line;
 
@@ -131,8 +137,9 @@ pub fn load_cached_session_projects(
     // Build sorted result
     let mut projects: Vec<(PathBuf, ProjectAccumulator)> = metrics_map.into_iter().collect();
     projects.sort_by(|(lp, la), (rp, ra)| {
-        ra.latest_line
-            .cmp(&la.latest_line)
+        ra.touch_count
+            .cmp(&la.touch_count)
+            .then_with(|| ra.latest_line.cmp(&la.latest_line))
             .then_with(|| lp.cmp(rp))
     });
 
@@ -167,14 +174,6 @@ pub fn load_cached_session_projects(
     Ok(result)
 }
 
-pub fn find_session_transcript(agent_kind: AgentKind, native_id: &str) -> Result<Option<PathBuf>> {
-    match agent_kind {
-        AgentKind::Claude => crate::utility::claude_storage::find_session_transcript(native_id),
-        AgentKind::Codex => crate::harness::codex::transcript::find_session_transcript(native_id),
-        _ => Ok(None),
-    }
-}
-
 pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
     let file = File::open(path)
         .with_context(|| format!("Failed to open transcript {}", path.display()))?;
@@ -207,8 +206,9 @@ pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
     let mut projects: Vec<(PathBuf, ProjectAccumulator)> = metrics_by_project.into_iter().collect();
     projects.sort_by(|(left_path, left), (right_path, right)| {
         right
-            .latest_line
-            .cmp(&left.latest_line)
+            .touch_count
+            .cmp(&left.touch_count)
+            .then_with(|| right.latest_line.cmp(&left.latest_line))
             .then_with(|| left_path.cmp(right_path))
     });
 
@@ -222,13 +222,20 @@ pub fn parse_touched_projects(path: &Path) -> Result<Vec<ProjectTouchMetric>> {
         .collect())
 }
 
+fn sort_touch_metrics_by_frequency(projects: &mut [ProjectTouchMetric]) {
+    projects.sort_by(|left, right| {
+        right
+            .touch_count
+            .cmp(&left.touch_count)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct ProjectAccumulator {
     latest_line: usize,
     touch_count: u32,
 }
-
-
 
 fn record_base_cwd(record: &Value) -> Option<PathBuf> {
     first_string_for_keys(record, &["cwd", "workdir"]).and_then(|cwd| candidate_path(cwd, None))
@@ -617,6 +624,48 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn touched_projects_are_sorted_by_frequency_before_recency() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("project-metrics-frequency-{}", std::process::id()));
+        let alpha = root.join("workspace");
+        let beta = root.join("wnck-sys");
+        std::fs::create_dir_all(alpha.join(".git")).unwrap();
+        std::fs::create_dir_all(beta.join(".git")).unwrap();
+        let transcript = root.join("session.jsonl");
+        let mut file = File::create(&transcript).unwrap();
+
+        writeln!(
+            file,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","arguments":"{{\"file_path\":\"{}/src/lib.rs\"}}"}}}}"#,
+            beta.display()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","arguments":"{{\"file_path\":\"{}/src/ffi.rs\"}}"}}}}"#,
+            beta.display()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","arguments":"{{\"file_path\":\"{}/README.md\"}}"}}}}"#,
+            alpha.display()
+        )
+        .unwrap();
+        drop(file);
+
+        let projects = parse_touched_projects(&transcript).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(projects[0].path, beta);
+        assert_eq!(projects[0].touch_count, 2);
+        assert_eq!(projects[1].path, alpha);
+        assert_eq!(projects[1].touch_count, 1);
     }
 
     #[test]

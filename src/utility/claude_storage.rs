@@ -891,6 +891,61 @@ pub fn get_todos_by_session_id(session_id: &str) -> Result<Vec<TodoItem>> {
     }
 }
 
+/// Get working directory for a Claude session by searching ~/.claude/projects/
+///
+/// 1. Locate the session JSONL file in project directories
+/// 2. Extract cwd from session metadata if available
+/// 3. Fall back to decoding project directory name
+pub fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
+    let base = claude_base();
+    let projects_dir = base.join("projects");
+
+    if !projects_dir.exists() {
+        bail!("No projects directory found at {:?}", projects_dir);
+    }
+
+    for entry in std::fs::read_dir(&projects_dir)
+        .with_context(|| format!("Failed to read projects directory: {:?}", projects_dir))?
+    {
+        let entry = entry?;
+        let project_dir = entry.path();
+
+        if !project_dir.is_dir() {
+            continue;
+        }
+
+        let session_file = project_dir.join(format!("{}.jsonl", session_id));
+        if !session_file.exists() {
+            continue;
+        }
+
+        if let Ok(info) = get_session_info(&session_file) {
+            if let Some(cwd) = info.cwd {
+                if cwd.exists() {
+                    return Ok(cwd);
+                }
+            }
+        }
+
+        if let Some(project_name) = project_dir.file_name().and_then(|n| n.to_str()) {
+            if project_name.starts_with('-') {
+                let decoded = project_name.replacen('-', "/", 1).replace('-', "/");
+                let path = PathBuf::from(&decoded);
+                if path.exists() {
+                    return Ok(path);
+                }
+            }
+        }
+
+        bail!(
+            "Found session {} but could not determine working directory",
+            session_id
+        );
+    }
+
+    bail!("Session {} not found in ~/.claude/projects/", session_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

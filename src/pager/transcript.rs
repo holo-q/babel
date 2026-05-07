@@ -2,7 +2,7 @@
 //!
 //! Displays parsed messages from selected session.
 
-use scrollparse::Message;
+use scrollparse::{Message, MessageKind};
 use serde::{Deserialize, Serialize};
 
 /// Which transcript roles are visible in the preview pane.
@@ -119,4 +119,60 @@ impl TranscriptView {
     pub fn scroll_bottom(&mut self) {
         self.scroll_offset = usize::MAX;
     }
+}
+
+// --- Transcript geometry helpers ---
+// Canonical home for row-count / visibility predicates used by both
+// TranscriptView's scroll-snapshot logic and the UI rendering pipeline.
+// Keeping a single copy prevents scroll-position vs render desync.
+
+pub(crate) fn transcript_message_row_count(
+    message: &Message,
+    expand_messages: bool,
+    role_filter: TranscriptRoleFilter,
+) -> usize {
+    if !transcript_message_is_visible(&message.kind, role_filter) {
+        return 0;
+    }
+
+    if expand_messages && transcript_message_can_expand(&message.kind) {
+        expanded_message_row_count(&message.content)
+    } else {
+        1
+    }
+}
+
+pub(crate) fn transcript_message_is_visible(
+    kind: &MessageKind,
+    role_filter: TranscriptRoleFilter,
+) -> bool {
+    match role_filter {
+        TranscriptRoleFilter::All => true,
+        TranscriptRoleFilter::Conversation => {
+            matches!(kind, MessageKind::User | MessageKind::Assistant)
+        }
+        TranscriptRoleFilter::UserOnly => matches!(kind, MessageKind::User),
+    }
+}
+
+pub(crate) fn transcript_message_can_expand(kind: &MessageKind) -> bool {
+    matches!(kind, MessageKind::User | MessageKind::Assistant)
+}
+
+pub(crate) fn expanded_message_row_count(content: &str) -> usize {
+    let mut rows = 1;
+    let mut chars = content.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => rows += 1,
+            '\r' => {
+                rows += 1;
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
 }
