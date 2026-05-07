@@ -600,6 +600,70 @@ pub async fn handle_stdin(event: &str, agent_kind: AgentKind) -> Result<()> {
             let tool = payload.tool_name.as_deref().unwrap_or("unknown");
             info!(session, tool, "Hook permission request");
         }
+        "setup" => {
+            let trigger = payload_field(&raw, "trigger").unwrap_or_else(|| "unknown".into());
+            info!(session, trigger = %trigger, "Hook setup");
+        }
+        "prompt-expand" => {
+            let command = payload_field(&raw, "command_name").unwrap_or_else(|| "unknown".into());
+            debug!(session, command = %command, "Hook prompt expansion");
+        }
+        "permission-denied" => {
+            let tool = payload.tool_name.as_deref().unwrap_or("unknown");
+            let reason = payload_field(&raw, "denial_reason").unwrap_or_else(|| "unknown".into());
+            info!(session, tool, reason = %reason, "Hook permission denied");
+        }
+        "post-tool-fail" => {
+            let tool = payload.tool_name.as_deref().unwrap_or("unknown");
+            let error = payload_field(&raw, "error_message").unwrap_or_else(|| "unknown".into());
+            warn!(session, tool, error = %error, "Hook tool failure");
+        }
+        "post-tool-batch" => {
+            debug!(session, "Hook tool batch complete");
+        }
+        "task-created" => {
+            let task_id = payload_field(&raw, "task_id").unwrap_or_else(|| "unknown".into());
+            debug!(session, task_id = %task_id, "Hook task created");
+        }
+        "task-completed" => {
+            let task_id = payload_field(&raw, "task_id").unwrap_or_else(|| "unknown".into());
+            debug!(session, task_id = %task_id, "Hook task completed");
+        }
+        "teammate-idle" => {
+            let teammate = payload_field(&raw, "teammate_id").unwrap_or_else(|| "unknown".into());
+            info!(session, teammate = %teammate, "Hook teammate idle");
+        }
+        "instructions-loaded" => {
+            let file = payload_field(&raw, "file_path").unwrap_or_else(|| "unknown".into());
+            let reason = payload_field(&raw, "load_reason").unwrap_or_else(|| "unknown".into());
+            debug!(session, file = %file, reason = %reason, "Hook instructions loaded");
+        }
+        "config-change" => {
+            let source = payload_field(&raw, "config_source").unwrap_or_else(|| "unknown".into());
+            info!(session, source = %source, "Hook config change");
+        }
+        "cwd-changed" => {
+            let new_cwd = payload_field(&raw, "new_cwd").unwrap_or_else(|| "unknown".into());
+            debug!(session, new_cwd = %new_cwd, "Hook cwd changed");
+        }
+        "file-changed" => {
+            let file = payload_field(&raw, "file_path").unwrap_or_else(|| "unknown".into());
+            debug!(session, file = %file, "Hook file changed");
+        }
+        "worktree-create" => {
+            debug!(session, "Hook worktree create");
+        }
+        "worktree-remove" => {
+            debug!(session, "Hook worktree remove");
+        }
+        "elicitation" => {
+            let server = payload_field(&raw, "server_name").unwrap_or_else(|| "unknown".into());
+            info!(session, server = %server, "Hook elicitation request");
+        }
+        "elicitation-result" => {
+            let server = payload_field(&raw, "server_name").unwrap_or_else(|| "unknown".into());
+            debug!(session, server = %server, "Hook elicitation result");
+        }
         _ => {}
     }
 

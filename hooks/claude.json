@@ -142,6 +142,182 @@
           }
         ]
       }
+    ],
+    "Setup": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin setup"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin prompt-expand"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin permission-denied"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin post-tool-fail"
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin post-tool-batch"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin task-created"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin task-completed"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin teammate-idle"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin instructions-loaded"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin config-change"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin cwd-changed"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin file-changed"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin worktree-create"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin worktree-remove"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin elicitation"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin elicitation-result"
+          }
+        ]
+      }
     ]
   }
 }
