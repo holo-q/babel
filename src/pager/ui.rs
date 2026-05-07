@@ -16,16 +16,19 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::agent_kind::AgentKind;
 use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 
-use super::app::{PaneFocus, ResumeApp, TouchedProjectsState};
+use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
 use super::one_line;
 use super::project_metrics::{workgroup_style_for_path, ProjectTouchMetric, WorkgroupStyle};
 use super::session_list::{CwdDisplayMode, EnrichedSession};
 use super::transcript::{
-    transcript_message_is_visible, transcript_message_row_count, TranscriptRoleFilter,
+    distill_prompt_thoughtstream, transcript_message_is_visible, transcript_message_row_count,
+    TranscriptBodyMode, TranscriptRoleFilter,
 };
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
 const TOUCHED_PROJECTS_CWD_MAX_WIDTH: usize = 60;
+const TOKEN_BRAILLE_COLUMN_WIDTH: usize = 3;
+const BRAILLE_DOTS: [u8; 8] = [0x01, 0x02, 0x04, 0x40, 0x08, 0x10, 0x20, 0x80];
 
 /// Draw the pager UI
 pub fn draw(frame: &mut Frame, app: &mut ResumeApp) {
@@ -79,9 +82,14 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let mut title_spans = vec![Span::styled("Sessions [", title_style)];
     title_spans.extend(session_filter_label_spans(app, title_style));
     title_spans.push(Span::styled("]", title_style));
-    if app.is_searching {
+    if matches!(app.active_search, Some(SearchTarget::Sessions)) {
         title_spans.push(Span::styled(
             format!(" /{}", app.search_buffer),
+            title_style,
+        ));
+    } else if !app.sessions.filter_query.is_empty() {
+        title_spans.push(Span::styled(
+            format!(" /{}", app.sessions.filter_query),
             title_style,
         ));
     }
@@ -118,9 +126,13 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         scroll_offset_for_cursor(cursor, app.sessions.scroll_offset, list_height, visible_len);
     app.sessions.scroll_offset = scroll_offset;
 
-    let viewport_indices: Vec<usize> = app
-        .sessions
-        .visible_indices()
+    let visible_indices = app.sessions.visible_indices().to_vec();
+    let max_visible_turn_count = visible_indices
+        .iter()
+        .map(|idx| app.sessions.sessions[*idx].turn_count)
+        .max()
+        .unwrap_or(0);
+    let viewport_indices: Vec<usize> = visible_indices
         .iter()
         .skip(scroll_offset)
         .take(list_height.max(1))
@@ -142,6 +154,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .collect();
     let measured_widths = RowWidths::measure(
         app.sessions.cwd_display_mode,
+        app.braille_tokens,
         viewport_rows
             .iter()
             .map(|rendered| (rendered.idx, &rendered.row, rendered.cwd.measure_width())),
@@ -151,6 +164,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         Paragraph::new(render_session_header(
             &widths,
             app.sessions.cwd_display_mode,
+            app.braille_tokens,
             inner.width as usize,
         )),
         column_header,
@@ -167,6 +181,8 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
                 inner.width as usize,
                 is_selected,
                 app.snip_columns,
+                app.braille_tokens,
+                max_visible_turn_count,
             )
         })
         .collect();
@@ -195,6 +211,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
 fn render_session_header(
     widths: &RowWidths,
     cwd_display_mode: CwdDisplayMode,
+    braille_tokens: bool,
     row_width: usize,
 ) -> Line<'static> {
     let header_style = Style::default()
@@ -257,7 +274,7 @@ fn render_session_header(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        "turns",
+        token_column_label(braille_tokens),
         widths.turns,
         header_style,
         pad_style,
@@ -298,6 +315,8 @@ fn render_session_item(
     row_width: usize,
     is_selected: bool,
     snip_columns: bool,
+    braille_tokens: bool,
+    max_turn_count: u32,
 ) -> ListItem<'static> {
     ListItem::new(render_session_line(
         rendered,
@@ -305,6 +324,8 @@ fn render_session_item(
         row_width,
         is_selected,
         snip_columns,
+        braille_tokens,
+        max_turn_count,
     ))
 }
 
@@ -314,6 +335,8 @@ fn render_session_line(
     row_width: usize,
     is_selected: bool,
     snip_columns: bool,
+    braille_tokens: bool,
+    max_turn_count: u32,
 ) -> Line<'static> {
     let idx = rendered.idx;
     let row = &rendered.row;
@@ -435,7 +458,7 @@ fn render_session_line(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        &row.turns,
+        &token_cell_text(row.turn_count, max_turn_count, widths.turns, braille_tokens),
         widths.turns,
         turns_style,
         pad_style,
@@ -519,15 +542,25 @@ fn draw_transcript(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let row_count = cached_transcript_row_count(&mut app.transcript);
     let max_offset = row_count.saturating_sub(inner.height as usize);
     app.transcript.scroll_offset = app.transcript.scroll_offset.min(max_offset);
+    if row_count == 0 && !app.transcript.search_query.trim().is_empty() {
+        let para = Paragraph::new(format!(
+            "No transcript matches /{}",
+            app.transcript.search_query
+        ))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(para, inner);
+        return;
+    }
 
     let lines = transcript_visible_lines(
         &app.transcript.messages,
-        app.transcript.expand_messages,
+        app.transcript.body_mode,
         app.transcript.scroll_offset,
         inner.height as usize,
         row_width,
         palette,
         app.transcript.role_filter,
+        &app.transcript.search_query,
     );
 
     let para = Paragraph::new(lines);
@@ -553,7 +586,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         base_style,
     );
 
-    if !app.is_searching {
+    if !app.is_searching() {
         push_status_button(
             &mut left_spans,
             &mut left_width,
@@ -564,14 +597,28 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "c/C",
+            "c",
             app.sessions.cwd_display_mode.column_label(),
             app.sessions.cwd_display_mode != CwdDisplayMode::Relative,
         );
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "h",
+            "o",
+            "focus",
+            app.sessions.project_filter.is_some(),
+        );
+        push_status_button(
+            &mut left_spans,
+            &mut left_width,
+            "b",
+            if app.braille_tokens { "braille" } else { "raw" },
+            app.braille_tokens,
+        );
+        push_status_button(
+            &mut left_spans,
+            &mut left_width,
+            "h/A-h",
             app.sessions.hidden_display_mode.label(),
             app.sessions.hidden_display_mode != Default::default(),
         );
@@ -585,13 +632,9 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "s",
+            "s/S",
             if app.focus == PaneFocus::Transcript {
-                if app.transcript.expand_messages {
-                    "full"
-                } else {
-                    "snip"
-                }
+                app.transcript.body_mode.label()
             } else if app.snip_columns {
                 "cols-snip"
             } else {
@@ -602,12 +645,18 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         push_status_button(
             &mut left_spans,
             &mut left_width,
-            "u",
+            "u/U",
             app.transcript.role_filter.label(),
             app.transcript.role_filter != TranscriptRoleFilter::All,
         );
-    } else if !app.search_buffer.is_empty() {
+    } else if let Some(target) = app.active_search {
         push_span(&mut left_spans, &mut left_width, "  /", base_style);
+        push_span(
+            &mut left_spans,
+            &mut left_width,
+            format!("{} ", target.label()),
+            Style::default().fg(Color::DarkGray),
+        );
         push_span(
             &mut left_spans,
             &mut left_width,
@@ -616,10 +665,10 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         );
     }
 
-    let keybinds = if app.is_searching {
-        "Enter confirm  Esc cancel"
+    let keybinds = if app.is_searching() {
+        "Enter confirm  Esc cancel  C-w/C-BS word"
     } else {
-        "H hide  y yank  r refresh  c/C cwd  j/k nav  J/K transcript  Enter launch  S-Enter keep  / search  q quit"
+        "H hide  y yank  r refresh  c/C cwd  h/A-h hidden  s/S snip  u/U roles  o focus  b tokens  / search  Enter launch  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);
@@ -684,7 +733,8 @@ fn session_header_line(
     let padding = width.saturating_sub(left_width + status_width);
 
     spans.push(Span::raw(" ".repeat(padding)));
-    spans.push(Span::styled(status, status_style));
+    let mut line_width = left_width + padding;
+    push_text_with_dim_cut_marker(&mut spans, &mut line_width, status, status_style);
     Line::from(clamp_spans_to_width(spans, width))
 }
 
@@ -723,6 +773,13 @@ fn push_status_button(
 
 fn transcript_title(app: &ResumeApp) -> String {
     let filter = app.transcript.role_filter.label();
+    let search = if matches!(app.active_search, Some(SearchTarget::Transcript)) {
+        (!app.search_buffer.is_empty()).then(|| format!(" /{}", app.search_buffer))
+    } else {
+        (!app.transcript.search_query.is_empty())
+            .then(|| format!(" /{}", app.transcript.search_query))
+    }
+    .unwrap_or_default();
     let cwd = app
         .transcript
         .session_id
@@ -738,13 +795,16 @@ fn transcript_title(app: &ResumeApp) -> String {
         .unwrap_or_default();
 
     match &app.transcript.session_id {
-        Some(id) => format!("Transcript [{}] [{filter}]{cwd}", &id[..8.min(id.len())]),
-        None => format!("Transcript [{filter}]{cwd}"),
+        Some(id) => format!(
+            "Transcript [{}] [{filter}]{search}{cwd}",
+            &id[..8.min(id.len())]
+        ),
+        None => format!("Transcript [{filter}]{search}{cwd}"),
     }
 }
 
 fn session_filter_label_spans(app: &mut ResumeApp, title_style: Style) -> Vec<Span<'static>> {
-    let base = if app.sessions.show_all {
+    let base = if app.sessions.show_all || app.sessions.project_filter.is_some() {
         "all".to_string()
     } else {
         app.sessions
@@ -758,7 +818,17 @@ fn session_filter_label_spans(app: &mut ResumeApp, title_style: Style) -> Vec<Sp
     } else {
         base
     };
-    vec![Span::styled(label, title_style)]
+    let mut spans = vec![Span::styled(label, title_style)];
+    if let Some(filter) = app.sessions.project_filter.as_ref() {
+        spans.push(Span::styled(" ", title_style));
+        spans.push(Span::styled(
+            format!("o:{}", filter.label),
+            title_style
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
 }
 
 fn frequency_rgb(count: u32, max_count: u32, normal: (u8, u8, u8)) -> Color {
@@ -768,12 +838,25 @@ fn frequency_rgb(count: u32, max_count: u32, normal: (u8, u8, u8)) -> Color {
         count as f32 / max_count as f32
     }
     .clamp(0.0, 1.0);
-    let dark = (45.0, 55.0, 55.0);
-    let mix = |low: f32, high: u8| (low + (high as f32 - low) * pct).round() as u8;
+    let floor = dimmed_frequency_floor(normal);
+    let mix = |low: u8, high: u8| (low as f32 + (high as f32 - low as f32) * pct).round() as u8;
     Color::Rgb(
-        mix(dark.0, normal.0),
-        mix(dark.1, normal.1),
-        mix(dark.2, normal.2),
+        mix(floor.0, normal.0),
+        mix(floor.1, normal.1),
+        mix(floor.2, normal.2),
+    )
+}
+
+fn dimmed_frequency_floor(normal: (u8, u8, u8)) -> (u8, u8, u8) {
+    // Frequency is visual weight, not identity. Keep the workgroup hue even for
+    // low-touch projects by dimming toward a terminal-bg-ish floor instead of
+    // washing every color through the same neutral gray.
+    const DARK_BG: (f32, f32, f32) = (28.0, 32.0, 34.0);
+    const HUE_KEEP: f32 = 0.42;
+    (
+        (DARK_BG.0 + (normal.0 as f32 - DARK_BG.0) * HUE_KEEP).round() as u8,
+        (DARK_BG.1 + (normal.1 as f32 - DARK_BG.1) * HUE_KEEP).round() as u8,
+        (DARK_BG.2 + (normal.2 as f32 - DARK_BG.2) * HUE_KEEP).round() as u8,
     )
 }
 
@@ -790,37 +873,7 @@ fn style_rgb(style: Style) -> Option<(u8, u8, u8)> {
 }
 
 fn ansi256_to_rgb(ansi: u8) -> Option<(u8, u8, u8)> {
-    const ANSI16: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (128, 0, 0),
-        (0, 128, 0),
-        (128, 128, 0),
-        (0, 0, 128),
-        (128, 0, 128),
-        (0, 128, 128),
-        (192, 192, 192),
-        (128, 128, 128),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (0, 0, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-
-    match ansi {
-        0..=15 => Some(ANSI16[ansi as usize]),
-        16..=231 => {
-            let idx = ansi - 16;
-            let channel = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            Some((channel(idx / 36), channel((idx / 6) % 6), channel(idx % 6)))
-        }
-        232..=255 => {
-            let shade = 8 + (ansi - 232) * 10;
-            Some((shade, shade, shade))
-        }
-    }
+    Some(session_row::ansi256_rgb(ansi))
 }
 
 fn hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
@@ -1046,9 +1099,16 @@ impl RowWidths {
 
     fn measure<'a>(
         cwd_display_mode: CwdDisplayMode,
+        braille_tokens: bool,
         rows: impl Iterator<Item = (usize, &'a SessionRow, usize)>,
     ) -> Self {
-        let mut widths = Self::header_minimums(cwd_display_mode);
+        let mut widths = Self::header_minimums(cwd_display_mode, braille_tokens);
+        let rows: Vec<_> = rows.collect();
+        let max_turn_count = rows
+            .iter()
+            .map(|(_, row, _)| row.turn_count)
+            .max()
+            .unwrap_or(0);
 
         for (idx, row, cwd_width) in rows {
             widths.state = widths.state.max(display_width(row.state_icon));
@@ -1058,7 +1118,12 @@ impl RowWidths {
             widths.cwd = widths.cwd.max(cwd_width);
             widths.created_time = widths.created_time.max(display_width(&row.created_time));
             widths.modified_time = widths.modified_time.max(display_width(&row.modified_time));
-            widths.turns = widths.turns.max(display_width(&row.turns));
+            widths.turns = widths.turns.max(display_width(&token_cell_text(
+                row.turn_count,
+                max_turn_count,
+                TOKEN_BRAILLE_COLUMN_WIDTH,
+                braille_tokens,
+            )));
             widths.title = widths.title.max(display_width(&row.title));
             widths.prompt = widths.prompt.max(display_width(&row.last_prompt));
         }
@@ -1068,7 +1133,7 @@ impl RowWidths {
         widths
     }
 
-    fn header_minimums(cwd_display_mode: CwdDisplayMode) -> Self {
+    fn header_minimums(cwd_display_mode: CwdDisplayMode, braille_tokens: bool) -> Self {
         Self {
             state: 1,
             index: display_width("#"),
@@ -1077,7 +1142,7 @@ impl RowWidths {
             cwd: display_width(cwd_display_mode.column_label()),
             created_time: display_width("ct"),
             modified_time: display_width("mt"),
-            turns: display_width("turns"),
+            turns: display_width(token_column_label(braille_tokens)),
             title: display_width("thread"),
             prompt: display_width("prompt"),
         }
@@ -1241,6 +1306,38 @@ fn push_span(
     spans.push(Span::styled(text, style));
 }
 
+fn push_text_with_dim_cut_marker(
+    spans: &mut Vec<Span<'static>>,
+    line_width: &mut usize,
+    text: impl Into<String>,
+    style: Style,
+) {
+    let text = text.into();
+    if !text.contains(CUT_MARKER_GLYPH) {
+        push_span(spans, line_width, text, style);
+        return;
+    }
+
+    let mut rest = text.as_str();
+    while let Some(idx) = rest.find(CUT_MARKER_GLYPH) {
+        let (before, after_before) = rest.split_at(idx);
+        if !before.is_empty() {
+            push_span(spans, line_width, before.to_string(), style);
+        }
+        push_span(
+            spans,
+            line_width,
+            CUT_MARKER_GLYPH,
+            style.add_modifier(Modifier::DIM),
+        );
+        rest = &after_before[CUT_MARKER_GLYPH.len()..];
+    }
+
+    if !rest.is_empty() {
+        push_span(spans, line_width, rest.to_string(), style);
+    }
+}
+
 fn finish_row_line(
     mut spans: Vec<Span<'static>>,
     mut line_width: usize,
@@ -1318,7 +1415,7 @@ fn push_left_cell_mode(
     if text_width < width {
         push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
     }
-    push_span(spans, line_width, fitted, text_style);
+    push_text_with_dim_cut_marker(spans, line_width, fitted, text_style);
 }
 
 fn push_right_cell(
@@ -1342,7 +1439,7 @@ fn push_right_cell_mode(
     snip: bool,
 ) {
     let fitted = fit_cell_text(text, width, snip);
-    push_span(spans, line_width, fitted.clone(), text_style);
+    push_text_with_dim_cut_marker(spans, line_width, fitted.clone(), text_style);
     let text_width = display_width(&fitted);
     if text_width < width {
         push_span(spans, line_width, " ".repeat(width - text_width), pad_style);
@@ -1440,13 +1537,13 @@ fn push_styled_cwd_label(
         push_span(spans, line_width, label.suffix.clone(), text_style);
     } else if let Some(suffix) = fitted.strip_prefix(&label.workgroup_prefix) {
         push_span(spans, line_width, label.workgroup_prefix.clone(), styled);
-        push_span(spans, line_width, suffix.to_string(), text_style);
+        push_text_with_dim_cut_marker(spans, line_width, suffix.to_string(), text_style);
     } else {
         // Middle truncation preserves the left edge, which is where the workgroup
         // root appears in relative/absolute labels. If the split point no longer
         // matches cleanly, keep the visible cwd token workgroup-colored instead of
         // losing scope color completely.
-        push_span(spans, line_width, fitted, styled);
+        push_text_with_dim_cut_marker(spans, line_width, fitted, styled);
     }
 
     if text_width < width {
@@ -1467,6 +1564,59 @@ fn fit_cell_text(text: &str, width: usize, snip: bool) -> String {
     } else {
         take_width_from_start(text, width)
     }
+}
+
+fn token_column_label(braille_tokens: bool) -> &'static str {
+    if braille_tokens {
+        "tok"
+    } else {
+        "turns"
+    }
+}
+
+fn token_cell_text(
+    turn_count: u32,
+    max_turn_count: u32,
+    column_width: usize,
+    braille_tokens: bool,
+) -> String {
+    if !braille_tokens {
+        return if turn_count > 0 {
+            turn_count.to_string()
+        } else {
+            String::new()
+        };
+    }
+    braille_token_bar(turn_count, max_turn_count, column_width.max(1))
+}
+
+fn braille_token_bar(turn_count: u32, max_turn_count: u32, width: usize) -> String {
+    if turn_count == 0 || max_turn_count == 0 || width == 0 {
+        return String::new();
+    }
+
+    let max_dots = width.saturating_mul(8);
+    let filled = (((turn_count as u64) * (max_dots as u64) + (max_turn_count as u64 - 1))
+        / max_turn_count as u64)
+        .clamp(1, max_dots as u64) as usize;
+    let mut remaining = filled;
+    let mut out = String::new();
+
+    for _ in 0..width {
+        let dots = remaining.min(8);
+        remaining = remaining.saturating_sub(dots);
+        if dots == 0 {
+            out.push(' ');
+            continue;
+        }
+        let mask = BRAILLE_DOTS
+            .iter()
+            .take(dots)
+            .fold(0u8, |mask, dot| mask | dot);
+        out.push(char::from_u32(0x2800 + mask as u32).unwrap_or(' '));
+    }
+
+    out
 }
 
 fn display_width(text: &str) -> usize {
@@ -1697,41 +1847,55 @@ pub fn prepare_transcript_messages(messages: &mut [Message]) {
 }
 
 fn cached_transcript_row_count(view: &mut super::transcript::TranscriptView) -> usize {
-    if let Some((expand, filter, count)) = view.cached_row_count {
-        if expand == view.expand_messages && filter == view.role_filter {
-            return count;
+    if let Some((body_mode, filter, search, count)) = &view.cached_row_count {
+        if *body_mode == view.body_mode
+            && *filter == view.role_filter
+            && search == &view.search_query
+        {
+            return *count;
         }
     }
-    let count =
-        transcript_rendered_row_count(&view.messages, view.expand_messages, view.role_filter);
-    view.cached_row_count = Some((view.expand_messages, view.role_filter, count));
+    let count = transcript_rendered_row_count(
+        &view.messages,
+        view.body_mode,
+        view.role_filter,
+        &view.search_query,
+    );
+    view.cached_row_count = Some((
+        view.body_mode,
+        view.role_filter,
+        view.search_query.clone(),
+        count,
+    ));
     count
 }
 
 fn transcript_rendered_row_count(
     messages: &[Message],
-    expand_messages: bool,
+    body_mode: TranscriptBodyMode,
     role_filter: TranscriptRoleFilter,
+    search_query: &str,
 ) -> usize {
-    transcript_render_items(messages, role_filter)
+    transcript_render_items(messages, role_filter, search_query)
         .iter()
-        .map(|item| transcript_render_item_row_count(item, expand_messages, role_filter))
+        .map(|item| transcript_render_item_row_count(item, body_mode, role_filter))
         .sum()
 }
 
 pub fn transcript_visible_lines(
     messages: &[Message],
-    expand_messages: bool,
+    body_mode: TranscriptBodyMode,
     scroll_offset: usize,
     height: usize,
     row_width: usize,
     palette: TranscriptPalette,
     role_filter: TranscriptRoleFilter,
+    search_query: &str,
 ) -> Vec<Line<'static>> {
     let mut remaining_skip = scroll_offset;
     let mut lines = Vec::new();
-    for item in transcript_render_items(messages, role_filter) {
-        let row_count = transcript_render_item_row_count(&item, expand_messages, role_filter);
+    for item in transcript_render_items(messages, role_filter, search_query) {
+        let row_count = transcript_render_item_row_count(&item, body_mode, role_filter);
         if remaining_skip >= row_count {
             remaining_skip -= row_count;
             continue;
@@ -1740,7 +1904,7 @@ pub fn transcript_visible_lines(
         match item {
             TranscriptRenderItem::Message { msg, gap_before } => {
                 let message_lines =
-                    transcript_message_lines(msg, expand_messages, row_width, palette, gap_before);
+                    transcript_message_lines(msg, body_mode, row_width, palette, gap_before);
                 for line in message_lines.into_iter().skip(remaining_skip) {
                     if lines.len() >= height {
                         return lines;
@@ -1769,11 +1933,12 @@ enum TranscriptRenderItem<'a> {
     Gap,
 }
 
-fn transcript_render_items(
-    messages: &[Message],
+fn transcript_render_items<'a>(
+    messages: &'a [Message],
     role_filter: TranscriptRoleFilter,
-) -> Vec<TranscriptRenderItem<'_>> {
-    match role_filter {
+    search_query: &str,
+) -> Vec<TranscriptRenderItem<'a>> {
+    let items = match role_filter {
         TranscriptRoleFilter::All => messages
             .iter()
             .map(|msg| TranscriptRenderItem::Message {
@@ -1791,7 +1956,28 @@ fn transcript_render_items(
                 gap_before: false,
             })
             .collect(),
+    };
+    filter_transcript_render_items(items, search_query)
+}
+
+fn filter_transcript_render_items<'a>(
+    items: Vec<TranscriptRenderItem<'a>>,
+    search_query: &str,
+) -> Vec<TranscriptRenderItem<'a>> {
+    let needle = search_query.trim().to_lowercase();
+    if needle.is_empty() {
+        return items;
     }
+
+    items
+        .into_iter()
+        .filter(|item| match item {
+            TranscriptRenderItem::Message { msg, .. } => {
+                msg.content.to_lowercase().contains(&needle)
+            }
+            TranscriptRenderItem::Gap => false,
+        })
+        .collect()
 }
 
 fn conversation_transcript_render_items(messages: &[Message]) -> Vec<TranscriptRenderItem<'_>> {
@@ -1877,12 +2063,12 @@ fn push_condensed_assistant_block<'a>(
 
 fn transcript_render_item_row_count(
     item: &TranscriptRenderItem<'_>,
-    expand_messages: bool,
+    body_mode: TranscriptBodyMode,
     role_filter: TranscriptRoleFilter,
 ) -> usize {
     match item {
         TranscriptRenderItem::Message { msg, .. } => {
-            transcript_message_row_count(msg, expand_messages, role_filter)
+            transcript_message_row_count(msg, body_mode, role_filter)
         }
         TranscriptRenderItem::Gap => 1,
     }
@@ -1899,7 +2085,7 @@ fn transcript_gap_line() -> Line<'static> {
 
 fn transcript_message_lines(
     msg: &Message,
-    expand_messages: bool,
+    body_mode: TranscriptBodyMode,
     row_width: usize,
     palette: TranscriptPalette,
     gap_before: bool,
@@ -1909,15 +2095,28 @@ fn transcript_message_lines(
     let content = transcript_render_content(&msg.content);
     let assistant_prefix = if gap_before { "⋮ " } else { "● " };
     match &msg.kind {
-        MessageKind::User if expand_messages => {
+        MessageKind::User if body_mode == TranscriptBodyMode::Full => {
             expanded_message_lines("> ", &content, palette.user_style(), row_width)
         }
-        MessageKind::Assistant if expand_messages => expanded_message_lines(
+        MessageKind::Assistant if body_mode == TranscriptBodyMode::Full => expanded_message_lines(
             assistant_prefix,
             &content,
             palette.assistant_style(),
             row_width,
         ),
+        MessageKind::User if body_mode == TranscriptBodyMode::Thoughtstream => {
+            let content = transcript_thoughtstream_content(&content);
+            expanded_message_lines("> ", &content, palette.user_style(), row_width)
+        }
+        MessageKind::Assistant if body_mode == TranscriptBodyMode::Thoughtstream => {
+            let content = transcript_thoughtstream_content(&content);
+            expanded_message_lines(
+                assistant_prefix,
+                &content,
+                palette.assistant_style(),
+                row_width,
+            )
+        }
         MessageKind::User => vec![collapsed_message_line(
             "> ",
             &content,
@@ -1951,6 +2150,12 @@ fn transcript_message_lines(
             row_width,
         )],
     }
+}
+
+fn transcript_thoughtstream_content(content: &str) -> Cow<'_, str> {
+    distill_prompt_thoughtstream(content)
+        .map(Cow::Owned)
+        .unwrap_or(Cow::Borrowed(super::transcript::TRANSCRIPT_SNIP_MARKER))
 }
 
 fn transcript_render_content(content: &str) -> Cow<'_, str> {
@@ -2375,7 +2580,7 @@ mod tests {
 
     #[test]
     fn row_width_measurement_includes_column_header_labels() {
-        let widths = RowWidths::measure(CwdDisplayMode::Relative, std::iter::empty());
+        let widths = RowWidths::measure(CwdDisplayMode::Relative, false, std::iter::empty());
 
         assert_eq!(widths.state, 1);
         assert_eq!(widths.harness, "harness".len());
@@ -2387,6 +2592,30 @@ mod tests {
         assert_eq!(widths.index, "#".len());
         assert_eq!(widths.title, "thread".len());
         assert_eq!(widths.prompt, "prompt".len());
+    }
+
+    #[test]
+    fn token_cell_raw_mode_uses_plain_number() {
+        assert_eq!(token_cell_text(54, 100, 3, false), "54");
+        assert_eq!(token_cell_text(0, 100, 3, false), "");
+    }
+
+    #[test]
+    fn token_cell_braille_mode_uses_maximum_dot_resolution() {
+        assert_eq!(braille_token_bar(8, 8, 1), "⣿");
+        assert_eq!(braille_token_bar(24, 24, 3), "⣿⣿⣿");
+        assert_eq!(display_width(&token_cell_text(12, 24, 3, true)), 3);
+    }
+
+    #[test]
+    fn project_frequency_color_preserves_workgroup_hue_when_dimmed() {
+        let Color::Rgb(r, g, b) = frequency_rgb(1, 4, (0, 135, 175)) else {
+            panic!("frequency color should render as rgb");
+        };
+
+        assert!(g > r, "cyan workgroup should keep green above red");
+        assert!(b > r, "cyan workgroup should keep blue above red");
+        assert!(b >= 70, "dimmed cyan should not collapse into neutral gray");
     }
 
     #[test]
@@ -2471,7 +2700,7 @@ mod tests {
             prompt: 120,
         };
 
-        let line = render_session_header(&widths, CwdDisplayMode::Relative, 50);
+        let line = render_session_header(&widths, CwdDisplayMode::Relative, false, 50);
 
         assert!(line_display_width(&line) <= 50);
     }
@@ -2523,7 +2752,7 @@ mod tests {
         }
         .fit(60);
 
-        let line = render_session_line(&rendered, &widths, 60, true, true);
+        let line = render_session_line(&rendered, &widths, 60, true, true, false, 999);
 
         assert!(line_display_width(&line) <= 60);
     }
@@ -2536,6 +2765,27 @@ mod tests {
         assert!(truncated.contains(SNIP_MARKER));
         assert!(!truncated.contains("snip"));
         assert!(!truncated.contains("[cut]"));
+    }
+
+    #[test]
+    fn cell_middle_truncation_dims_cut_marker_span() {
+        let mut spans = Vec::new();
+        let mut width = 0;
+        push_right_cell_mode(
+            &mut spans,
+            &mut width,
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+            18,
+            Style::default().fg(Color::White),
+            Style::default(),
+            true,
+        );
+
+        let cut = spans
+            .iter()
+            .find(|span| span.content.as_ref() == CUT_MARKER_GLYPH)
+            .expect("cut marker span");
+        assert!(cut.style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -2579,8 +2829,13 @@ mod tests {
             line: 0,
         };
 
-        let lines =
-            transcript_message_lines(&msg, false, 80, transcript_palette(AgentKind::Codex), false);
+        let lines = transcript_message_lines(
+            &msg,
+            TranscriptBodyMode::Snip,
+            80,
+            transcript_palette(AgentKind::Codex),
+            false,
+        );
         let rendered = lines[0]
             .spans
             .iter()
@@ -2618,11 +2873,21 @@ mod tests {
         ];
 
         assert_eq!(
-            transcript_rendered_row_count(&messages, false, TranscriptRoleFilter::All),
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Snip,
+                TranscriptRoleFilter::All,
+                ""
+            ),
             3
         );
         assert_eq!(
-            transcript_rendered_row_count(&messages, true, TranscriptRoleFilter::All),
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Full,
+                TranscriptRoleFilter::All,
+                ""
+            ),
             5
         );
     }
@@ -2637,12 +2902,13 @@ mod tests {
 
         let lines = transcript_visible_lines(
             &messages,
-            true,
+            TranscriptBodyMode::Full,
             1,
             1,
             40,
             transcript_palette(AgentKind::Claude),
             TranscriptRoleFilter::All,
+            "",
         );
         let text = lines[0]
             .spans
@@ -2711,17 +2977,23 @@ mod tests {
         ];
 
         assert_eq!(
-            transcript_rendered_row_count(&messages, true, TranscriptRoleFilter::UserOnly),
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Full,
+                TranscriptRoleFilter::UserOnly,
+                ""
+            ),
             2
         );
         let lines = transcript_visible_lines(
             &messages,
-            true,
+            TranscriptBodyMode::Full,
             0,
             4,
             80,
             transcript_palette(AgentKind::Claude),
             TranscriptRoleFilter::UserOnly,
+            "",
         );
         let text = lines
             .iter()
@@ -2770,17 +3042,23 @@ mod tests {
         ];
 
         assert_eq!(
-            transcript_rendered_row_count(&messages, false, TranscriptRoleFilter::Conversation),
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Snip,
+                TranscriptRoleFilter::Conversation,
+                ""
+            ),
             2
         );
         let lines = transcript_visible_lines(
             &messages,
-            false,
+            TranscriptBodyMode::Snip,
             0,
             5,
             80,
             transcript_palette(AgentKind::Claude),
             TranscriptRoleFilter::Conversation,
+            "",
         );
         let text = lines
             .iter()
@@ -2825,12 +3103,13 @@ mod tests {
 
         let lines = transcript_visible_lines(
             &messages,
-            false,
+            TranscriptBodyMode::Snip,
             0,
             5,
             80,
             transcript_palette(AgentKind::Claude),
             TranscriptRoleFilter::Conversation,
+            "",
         );
         let text = lines
             .iter()
@@ -2884,17 +3163,23 @@ mod tests {
         ];
 
         assert_eq!(
-            transcript_rendered_row_count(&messages, false, TranscriptRoleFilter::Condensed),
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Snip,
+                TranscriptRoleFilter::Condensed,
+                ""
+            ),
             4
         );
         let lines = transcript_visible_lines(
             &messages,
-            false,
+            TranscriptBodyMode::Snip,
             0,
             8,
             80,
             transcript_palette(AgentKind::Claude),
             TranscriptRoleFilter::Condensed,
+            "",
         );
         let rendered: Vec<String> = lines
             .iter()
@@ -2917,6 +3202,56 @@ mod tests {
     }
 
     #[test]
+    fn transcript_search_filters_visible_rows_without_list_filter() {
+        let messages = vec![
+            Message {
+                kind: MessageKind::User,
+                content: "ordinary prompt".to_string(),
+                line: 0,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "needle response".to_string(),
+                line: 1,
+            },
+            Message {
+                kind: MessageKind::Assistant,
+                content: "other response".to_string(),
+                line: 2,
+            },
+        ];
+
+        assert_eq!(
+            transcript_rendered_row_count(
+                &messages,
+                TranscriptBodyMode::Snip,
+                TranscriptRoleFilter::All,
+                "needle"
+            ),
+            1
+        );
+        let lines = transcript_visible_lines(
+            &messages,
+            TranscriptBodyMode::Snip,
+            0,
+            3,
+            80,
+            transcript_palette(AgentKind::Codex),
+            TranscriptRoleFilter::All,
+            "needle",
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("needle response"));
+        assert!(!text.contains("ordinary prompt"));
+        assert!(!text.contains("other response"));
+    }
+
+    #[test]
     fn transcript_role_filter_cycles_through_all_conversation_condensed_user() {
         assert_eq!(
             TranscriptRoleFilter::All.cycle(),
@@ -2933,6 +3268,27 @@ mod tests {
         assert_eq!(
             TranscriptRoleFilter::UserOnly.cycle(),
             TranscriptRoleFilter::All
+        );
+        assert_eq!(
+            TranscriptRoleFilter::All.previous(),
+            TranscriptRoleFilter::UserOnly
+        );
+        assert_eq!(
+            TranscriptRoleFilter::UserOnly.previous(),
+            TranscriptRoleFilter::Condensed
+        );
+    }
+
+    #[test]
+    fn transcript_body_mode_cycle_is_reversible() {
+        assert_eq!(TranscriptBodyMode::Snip.cycle(), TranscriptBodyMode::Full);
+        assert_eq!(
+            TranscriptBodyMode::Snip.previous(),
+            TranscriptBodyMode::Thoughtstream
+        );
+        assert_eq!(
+            TranscriptBodyMode::Thoughtstream.previous(),
+            TranscriptBodyMode::Full
         );
     }
 
@@ -3013,7 +3369,7 @@ mod tests {
             title: 6,
             prompt: 6,
         };
-        let line = render_session_header(&widths, CwdDisplayMode::TouchedProjects, 80);
+        let line = render_session_header(&widths, CwdDisplayMode::TouchedProjects, false, 80);
         let text = line
             .spans
             .iter()

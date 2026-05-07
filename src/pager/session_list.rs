@@ -8,7 +8,8 @@ use crate::babel_storage::HookState;
 use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
 use crate::ActivityState;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +78,14 @@ impl HiddenDisplayMode {
             Self::Normal => Self::Manual,
             Self::Manual => Self::All,
             Self::All => Self::Normal,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Normal => Self::All,
+            Self::Manual => Self::Normal,
+            Self::All => Self::Manual,
         }
     }
 
@@ -183,6 +192,26 @@ impl SortColumn {
 impl Default for SortColumn {
     fn default() -> Self {
         Self::ModifiedTime
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectFilterTag {
+    pub label: String,
+    pub paths: Vec<PathBuf>,
+    pub match_touched: bool,
+}
+
+impl ProjectFilterTag {
+    pub fn new(label: impl Into<String>, paths: Vec<PathBuf>, match_touched: bool) -> Self {
+        let mut paths = paths;
+        paths.sort();
+        paths.dedup();
+        Self {
+            label: label.into(),
+            paths,
+            match_touched,
+        }
     }
 }
 
@@ -365,6 +394,12 @@ pub struct SessionListState {
     pub sort_direction: SortDirection,
     /// Search/filter query
     pub filter_query: String,
+    /// Structured project focus tag selected from the cwd column with `o`.
+    pub project_filter: Option<ProjectFilterTag>,
+    /// Cached touched-project roots, keyed by session key, so project focus can
+    /// match the multi-project cwd column without re-parsing transcripts on the
+    /// render path.
+    touched_project_paths: HashMap<String, Vec<PathBuf>>,
     /// Cached visible row indices. The full catalog can be large because the
     /// TUI keeps low-signal sessions loaded for instant hidden-mode tabulation.
     visible_indices: Vec<usize>,
@@ -384,6 +419,8 @@ impl SessionListState {
             sort_column: SortColumn::ModifiedTime,
             sort_direction: SortDirection::Descending,
             filter_query: String::new(),
+            project_filter: None,
+            touched_project_paths: HashMap::new(),
             visible_indices: Vec::new(),
             visible_dirty: true,
         }
@@ -478,6 +515,13 @@ impl SessionListState {
         self.hidden_display_mode
     }
 
+    pub fn cycle_hidden_display_mode_reverse(&mut self) -> HiddenDisplayMode {
+        self.hidden_display_mode = self.hidden_display_mode.previous();
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+        self.hidden_display_mode
+    }
+
     pub fn cycle_cwd_display_mode(&mut self) -> CwdDisplayMode {
         self.cwd_display_mode = self.cwd_display_mode.next();
         self.cwd_display_mode
@@ -512,6 +556,41 @@ impl SessionListState {
         self.invalidate_visible_indices();
         // Reset cursor if out of bounds after filter change
         self.clamp_cursor();
+    }
+
+    pub fn set_project_filter(&mut self, filter: ProjectFilterTag) {
+        self.project_filter = Some(filter);
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.invalidate_visible_indices();
+        self.clamp_cursor();
+    }
+
+    pub fn clear_project_filter(&mut self) -> bool {
+        if self.project_filter.take().is_some() {
+            self.cursor = 0;
+            self.scroll_offset = 0;
+            self.invalidate_visible_indices();
+            self.clamp_cursor();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn project_filter_needs_touched_projects(&self) -> bool {
+        self.project_filter
+            .as_ref()
+            .map(|filter| filter.match_touched)
+            .unwrap_or(false)
+    }
+
+    pub fn set_touched_projects_for_session(&mut self, session_key: String, paths: Vec<PathBuf>) {
+        self.touched_project_paths.insert(session_key, paths);
+        if self.project_filter_needs_touched_projects() {
+            self.invalidate_visible_indices();
+            self.clamp_cursor();
+        }
     }
 
     /// Replace session data while preserving the current semantic selection.
@@ -588,7 +667,7 @@ impl SessionListState {
             HiddenDisplayMode::Normal | HiddenDisplayMode::Manual | HiddenDisplayMode::All => {}
         }
 
-        if !self.show_all {
+        if !self.show_all && self.project_filter.is_none() {
             if let Some(cwd) = &self.current_cwd {
                 let matches_cwd = session
                     .project_path
@@ -598,6 +677,12 @@ impl SessionListState {
                 if !matches_cwd {
                     return false;
                 }
+            }
+        }
+
+        if let Some(filter) = &self.project_filter {
+            if !self.session_matches_project_filter(session, filter) {
+                return false;
             }
         }
 
@@ -630,6 +715,46 @@ impl SessionListState {
 
         true
     }
+
+    fn session_matches_project_filter(
+        &self,
+        session: &EnrichedSession,
+        filter: &ProjectFilterTag,
+    ) -> bool {
+        if filter.paths.is_empty() {
+            return true;
+        }
+
+        if session
+            .project_path
+            .as_deref()
+            .map(|path| path_matches_any_filter_path(path, &filter.paths))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        if !filter.match_touched {
+            return false;
+        }
+
+        match self.touched_project_paths.get(&session.session_key) {
+            Some(paths) => paths
+                .iter()
+                .any(|path| path_matches_any_filter_path(path, &filter.paths)),
+            // A touched-project focus tag needs background metrics before the
+            // list can know whether a row belongs. Keep unknown rows visible
+            // long enough for queue_visible_project_metrics to hydrate them;
+            // loaded misses collapse out as results arrive.
+            None => true,
+        }
+    }
+}
+
+fn path_matches_any_filter_path(path: &Path, filter_paths: &[PathBuf]) -> bool {
+    filter_paths
+        .iter()
+        .any(|filter| path.starts_with(filter) || filter.starts_with(path))
 }
 
 fn compare_sessions(
@@ -683,5 +808,23 @@ fn workspace_rank(session: &EnrichedSession) -> Option<i32> {
     match &session.running_status {
         RunningStatus::Active { workspace, .. } => *workspace,
         RunningStatus::Inactive => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_display_cycle_is_reversible() {
+        assert_eq!(HiddenDisplayMode::Normal.next(), HiddenDisplayMode::Manual);
+        assert_eq!(HiddenDisplayMode::Manual.next(), HiddenDisplayMode::All);
+        assert_eq!(HiddenDisplayMode::All.next(), HiddenDisplayMode::Normal);
+        assert_eq!(HiddenDisplayMode::Normal.previous(), HiddenDisplayMode::All);
+        assert_eq!(HiddenDisplayMode::All.previous(), HiddenDisplayMode::Manual);
+        assert_eq!(
+            HiddenDisplayMode::Manual.previous(),
+            HiddenDisplayMode::Normal
+        );
     }
 }

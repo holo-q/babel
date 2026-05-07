@@ -17,7 +17,7 @@ use crate::agent_kind::AgentKind;
 use crate::babel_storage::BabelStorage;
 use crate::session_row;
 
-const PROJECT_CACHE_VERSION: u32 = 3;
+const PROJECT_CACHE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTouchMetric {
@@ -47,7 +47,7 @@ pub fn load_cached_session_projects(
     let source_path = format!("project-touch-v{PROJECT_CACHE_VERSION}:{}", path.display());
     let db = BabelStorage::open()?;
 
-    let cached = db.get_project_cache_state(session_key)?;
+    let cached = db.get_project_cache_state(session_key, &source_path)?;
 
     // Determine if we can do an incremental parse or need full reparse
     let (mut metrics_map, start_offset) = match &cached {
@@ -56,10 +56,13 @@ pub fn load_cached_session_projects(
             let mut projects: Vec<ProjectTouchMetric> = state
                 .projects
                 .iter()
-                .map(|p| ProjectTouchMetric {
-                    path: PathBuf::from(&p.path),
-                    touch_count: p.touch_count,
-                    ansi256: p.ansi256,
+                .map(|p| {
+                    let path = PathBuf::from(&p.path);
+                    ProjectTouchMetric {
+                        ansi256: workgroup_ansi256_for_project(&path),
+                        path,
+                        touch_count: p.touch_count,
+                    }
                 })
                 .collect();
             sort_touch_metrics_by_frequency(&mut projects);
@@ -384,48 +387,84 @@ fn project_root_for_path(path: &Path) -> Option<PathBuf> {
         };
 
     candidate = normalize_lexical_path(&candidate);
-    for ancestor in candidate.ancestors() {
-        if is_project_root(ancestor) {
-            return Some(ancestor.to_path_buf());
-        }
-    }
-
-    None
+    // Touched-project identity is meant to answer "which project was this
+    // session working in?", not "which package manifest happened to own this
+    // file?". Prefer stable repository/workspace roots before package markers
+    // so Cargo member crates like `mogitor/crates/mogitor-watch` fold back to
+    // the `mogitor` workspace row by default.
+    nearest_ancestor_matching(&candidate, is_git_root)
+        .or_else(|| nearest_ancestor_matching(&candidate, is_workspace_root))
+        .or_else(|| nearest_ancestor_matching(&candidate, is_package_project_root))
 }
 
-fn is_project_root(path: &Path) -> bool {
+fn nearest_ancestor_matching(path: &Path, predicate: fn(&Path) -> bool) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| predicate(ancestor))
+        .map(Path::to_path_buf)
+}
+
+fn is_git_root(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+fn is_workspace_root(path: &Path) -> bool {
+    has_cargo_workspace(path)
+        || path.join("pnpm-workspace.yaml").exists()
+        || package_json_declares_workspaces(path)
+        || path.join("settings.gradle").exists()
+        || path.join("settings.gradle.kts").exists()
+        || has_solution_file(path)
+}
+
+fn is_package_project_root(path: &Path) -> bool {
     const MARKERS: &[&str] = &[
-        ".git",
         "pyproject.toml",
         "Cargo.toml",
         "package.json",
-        "pnpm-workspace.yaml",
         "yarn.lock",
         "deno.json",
         "go.mod",
         "build.gradle",
         "build.gradle.kts",
-        "settings.gradle",
-        "settings.gradle.kts",
         "pom.xml",
         "mix.exs",
         "gleam.toml",
         "Package.swift",
         "workgroup.toml",
-        "*.sln",
     ];
 
-    MARKERS.iter().any(|marker| {
-        if *marker == "*.sln" {
-            return std::fs::read_dir(path)
-                .ok()
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "sln"));
-        }
-        path.join(marker).exists()
-    })
+    MARKERS.iter().any(|marker| path.join(marker).exists())
+}
+
+fn has_cargo_workspace(path: &Path) -> bool {
+    let manifest = path.join("Cargo.toml");
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    text.parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.get("workspace").cloned())
+        .is_some()
+}
+
+fn package_json_declares_workspaces(path: &Path) -> bool {
+    let manifest = path.join("package.json");
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|value| value.get("workspaces").cloned())
+        .is_some()
+}
+
+fn has_solution_file(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "sln"))
 }
 
 pub fn workgroup_style_for_path(path: &Path) -> Option<WorkgroupStyle> {
@@ -510,7 +549,7 @@ fn color_text_to_ansi256(text: &str) -> Option<u8> {
         return Some(ansi);
     }
     if text.starts_with('#') {
-        return Some(session_row::closest_ansi256_from_hex(text));
+        return Some(session_row::theme_balanced_ansi256_from_hex(text));
     }
     match text.to_ascii_lowercase().as_str() {
         "black" => Some(0),
@@ -676,6 +715,59 @@ mod tests {
         assert_eq!(projects[0].touch_count, 2);
         assert_eq!(projects[1].path, alpha);
         assert_eq!(projects[1].touch_count, 1);
+    }
+
+    #[test]
+    fn git_root_beats_nested_package_markers() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("project-metrics-git-root-{}", std::process::id()));
+        let repo = root.join("mogitor");
+        let crate_dir = repo.join("crates").join("mogitor-watch");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"mogitor-watch\"\n",
+        )
+        .unwrap();
+
+        let root_for_member = project_root_for_path(&crate_dir.join("src/lib.rs"));
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(root_for_member, Some(repo));
+    }
+
+    #[test]
+    fn cargo_workspace_root_beats_member_manifest_without_git() {
+        let root = std::env::current_dir().unwrap().join("tmp").join(format!(
+            "project-metrics-cargo-workspace-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("mogitor");
+        let crate_dir = workspace.join("crates").join("mogitor-domain");
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"mogitor-domain\"\n",
+        )
+        .unwrap();
+
+        let root_for_member = project_root_for_path(&crate_dir.join("src/lib.rs"));
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(root_for_member, Some(workspace));
     }
 
     #[test]

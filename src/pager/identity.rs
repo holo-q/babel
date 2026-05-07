@@ -79,7 +79,11 @@ fn harness_fields(session: &EnrichedSession) -> Value {
         "identity_fields": spec.identity_fields,
         "env_identity_fields": spec.env_identity_fields,
         "cmdline_markers": spec.cmdline_markers,
-        "resume_command": spec.resume_command(&session.native_id),
+        "resume_command": crate::harness::resume_command_display(
+            session.agent_kind,
+            &session.native_id,
+            session.project_path.as_deref(),
+        ),
     })
 }
 

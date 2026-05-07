@@ -19,7 +19,10 @@ pub use app::{
     launch_harness_resume, run_resume_pager, ResumeApp, ResumeSelection, ResumeSessionSource,
 };
 pub use session_list::{EnrichedSession, RunningStatus};
-pub use transcript::{TranscriptRoleFilter, TranscriptView};
+pub use transcript::{
+    distill_prompt_thoughtstream, distilled_human_prompt, TranscriptBodyMode, TranscriptRoleFilter,
+    TranscriptView, TRANSCRIPT_SNIP_MARKER,
+};
 pub use ui::{
     prepare_transcript_messages, transcript_palette, transcript_visible_lines, TranscriptPalette,
 };

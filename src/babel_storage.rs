@@ -746,14 +746,18 @@ impl BabelStorage {
     }
 
     /// Get incremental cache state: projects + byte offset parsed so far.
-    pub fn get_project_cache_state(&self, session_key: &str) -> Result<Option<ProjectCacheState>> {
+    pub fn get_project_cache_state(
+        &self,
+        session_key: &str,
+        source_path: &str,
+    ) -> Result<Option<ProjectCacheState>> {
         let mut stmt = self.conn.prepare(
             "SELECT projects_json, parsed_bytes
              FROM session_project_cache
-             WHERE session_key = ?1",
+             WHERE session_key = ?1 AND source_path = ?2",
         )?;
 
-        let mut rows = stmt.query(params![session_key])?;
+        let mut rows = stmt.query(params![session_key, source_path])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
@@ -1432,8 +1436,8 @@ mod tests {
     #[test]
     fn test_session_project_cache_is_mtime_scoped() {
         let db = test_db();
-        let session_key = "codex:session-projects";
-        let source_path = "/home/nuck/.codex/sessions/session.jsonl";
+        let session_key = "harness:session-projects";
+        let source_path = "opaque-transcript-source";
         let projects = vec![
             SessionProjectCacheEntry {
                 path: "/home/nuck/holoq/repo-os/babel".to_string(),
@@ -1457,6 +1461,36 @@ mod tests {
         );
         assert!(db
             .get_session_project_cache(session_key, source_path, 11)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_incremental_project_cache_is_source_path_scoped() {
+        let db = test_db();
+        let session_key = "harness:session-projects";
+        let source_path = "project-touch-v5:opaque-transcript-source";
+        let stale_source_path = "project-touch-v4:opaque-transcript-source";
+        let state = ProjectCacheState {
+            projects: vec![SessionProjectCacheEntry {
+                path: "/home/nuck/holoq/repo-tool/mogitor".to_string(),
+                touch_count: 5,
+                ansi256: Some(39),
+            }],
+            parsed_bytes: 4096,
+        };
+
+        db.set_project_cache_state(session_key, source_path, &state)
+            .unwrap();
+
+        assert_eq!(
+            db.get_project_cache_state(session_key, source_path)
+                .unwrap()
+                .map(|state| state.parsed_bytes),
+            Some(4096)
+        );
+        assert!(db
+            .get_project_cache_state(session_key, stale_source_path)
             .unwrap()
             .is_none());
     }

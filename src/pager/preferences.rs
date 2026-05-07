@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::session_list::{CwdDisplayMode, HiddenDisplayMode, SortColumn, SortDirection};
-use super::transcript::TranscriptRoleFilter;
+use super::transcript::{TranscriptBodyMode, TranscriptRoleFilter};
 
 const RESUME_DISPLAY_PREFS: &str = "resume-display.json";
 
@@ -24,7 +24,11 @@ pub struct ResumeDisplayOptions {
     pub sort_column: SortColumn,
     pub sort_direction: SortDirection,
     pub snip_columns: bool,
+    pub braille_tokens: bool,
     pub show_transcript: bool,
+    pub transcript_body_mode: TranscriptBodyMode,
+    /// Legacy persisted field kept only to migrate older preference files.
+    #[serde(skip_serializing)]
     pub expand_messages: bool,
     pub transcript_role_filter: TranscriptRoleFilter,
 }
@@ -38,7 +42,9 @@ impl Default for ResumeDisplayOptions {
             sort_column: SortColumn::ModifiedTime,
             sort_direction: SortDirection::Descending,
             snip_columns: true,
+            braille_tokens: false,
             show_transcript: true,
+            transcript_body_mode: TranscriptBodyMode::Snip,
             expand_messages: false,
             transcript_role_filter: TranscriptRoleFilter::All,
         }
@@ -70,8 +76,12 @@ fn load_resume_display_options_from(path: &Path) -> Result<ResumeDisplayOptions>
     }
     let text = fs::read_to_string(path)
         .with_context(|| format!("read resume display options from {}", path.display()))?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("parse resume display options from {}", path.display()))
+    let mut options: ResumeDisplayOptions = serde_json::from_str(&text)
+        .with_context(|| format!("parse resume display options from {}", path.display()))?;
+    if options.transcript_body_mode == TranscriptBodyMode::Snip && options.expand_messages {
+        options.transcript_body_mode = TranscriptBodyMode::Full;
+    }
+    Ok(options)
 }
 
 fn save_resume_display_options_to(path: &Path, options: &ResumeDisplayOptions) -> Result<()> {
@@ -99,8 +109,10 @@ mod tests {
             sort_column: SortColumn::Thread,
             sort_direction: SortDirection::Ascending,
             snip_columns: false,
+            braille_tokens: true,
             show_transcript: false,
-            expand_messages: true,
+            transcript_body_mode: TranscriptBodyMode::Thoughtstream,
+            expand_messages: false,
             transcript_role_filter: TranscriptRoleFilter::UserOnly,
         };
 

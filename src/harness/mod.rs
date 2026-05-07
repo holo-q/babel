@@ -5,6 +5,7 @@
 //! its session scanner and migration adapter.
 
 use crate::agent_kind::{AgentKind, HarnessSpec, HarnessSupport, InstallStrategy};
+use std::path::Path;
 
 mod events;
 
@@ -81,6 +82,91 @@ pub fn spec_for(kind: AgentKind) -> &'static HarnessSpec {
         .iter()
         .find(|spec| spec.kind == kind)
         .unwrap_or(&OTHER_SPEC)
+}
+
+/// Build native argv for resuming a harness session.
+///
+/// Harness-specific command details live behind each harness module. The pager
+/// and CLI launch surfaces should not know that Codex needs `--cd`, Claude uses
+/// `--resume`, or a future harness needs environment/bootstrap flags.
+pub fn resume_command_parts(
+    kind: AgentKind,
+    native_id: &str,
+    cwd: Option<&Path>,
+) -> Option<Vec<String>> {
+    match kind {
+        AgentKind::Codex => Some(codex::resume_command_parts(native_id, cwd)),
+        _ => spec_for(kind)
+            .resume_command(native_id)
+            .map(split_static_resume_command),
+    }
+}
+
+pub fn resume_command_display(
+    kind: AgentKind,
+    native_id: &str,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    resume_command_parts(kind, native_id, cwd).map(|parts| {
+        parts
+            .iter()
+            .map(|part| shell_quote_for_display(part))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+fn split_static_resume_command(command: String) -> Vec<String> {
+    command.split_whitespace().map(str::to_string).collect()
+}
+
+fn shell_quote_for_display(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_resume_passes_session_cwd_before_session_id() {
+        let parts = resume_command_parts(
+            AgentKind::Codex,
+            "019dd59f-ca6b-7100-885b-8aca07b12b15",
+            Some(Path::new("/home/nuck/holoq/repo-os/babel")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            parts,
+            [
+                "codex",
+                "resume",
+                "--cd",
+                "/home/nuck/holoq/repo-os/babel",
+                "019dd59f-ca6b-7100-885b-8aca07b12b15",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_command_display_quotes_cwd_with_spaces() {
+        let command = resume_command_display(
+            AgentKind::Codex,
+            "session",
+            Some(Path::new("/workspace/has space")),
+        )
+        .unwrap();
+
+        assert_eq!(command, "codex resume --cd '/workspace/has space' session");
+    }
 }
 
 /// Locate the transcript file for a session by harness-specific storage convention.

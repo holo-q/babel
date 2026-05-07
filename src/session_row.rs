@@ -428,6 +428,40 @@ fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+pub fn ansi256_rgb(index: u8) -> (u8, u8, u8) {
+    const ANSI16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+
+    match index {
+        0..=15 => ANSI16[index as usize],
+        16..=231 => {
+            let idx = index - 16;
+            let channel = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (channel(idx / 36), channel((idx / 6) % 6), channel(idx % 6))
+        }
+        232..=255 => {
+            let shade = 8 + (index - 232) * 10;
+            (shade, shade, shade)
+        }
+    }
+}
+
 pub fn closest_ansi256_from_hex(hex: &str) -> u8 {
     let (r, g, b) = hex_to_rgb(hex).unwrap_or((102, 102, 102));
     let ri = ((r as u16) * 5 / 255) as u8;
@@ -436,9 +470,103 @@ pub fn closest_ansi256_from_hex(hex: &str) -> u8 {
     16 + 36 * ri + 6 * gi + bi
 }
 
+pub fn theme_balanced_ansi256_from_hex(hex: &str) -> u8 {
+    let rgb = hex_to_rgb(hex).unwrap_or((102, 102, 102));
+    let balanced = balance_rgb_to_ansi_theme_luminance(rgb);
+    closest_ansi256_from_rgb(balanced)
+}
+
+fn balance_rgb_to_ansi_theme_luminance(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    let source = perceptual_luminance(rgb);
+    let target = ansi_chroma_average_luminance();
+    if (source - target).abs() <= 0.01 {
+        return rgb;
+    }
+
+    let target_rgb = if source < target {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    let mut low = 0.0;
+    let mut high = 1.0;
+    let mut best = rgb;
+
+    for _ in 0..12 {
+        let mid = (low + high) / 2.0;
+        let candidate = lerp_rgb_f32(rgb, target_rgb, mid);
+        best = candidate;
+        let candidate_luma = perceptual_luminance(candidate);
+        if source < target {
+            if candidate_luma < target {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        } else if candidate_luma > target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+
+    best
+}
+
+fn ansi_chroma_average_luminance() -> f32 {
+    // Hex workgroup colors encode hue/chroma intent, not a request to punch above
+    // or sink below the user's ANSI theme. Balance against the chromatic ANSI
+    // slots so custom colors sit beside normal terminal-themed labels.
+    const CHROMA_INDICES: [u8; 12] = [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14];
+    let total: f32 = CHROMA_INDICES
+        .iter()
+        .map(|index| perceptual_luminance(ansi256_rgb(*index)))
+        .sum();
+    total / CHROMA_INDICES.len() as f32
+}
+
+fn closest_ansi256_from_rgb((r, g, b): (u8, u8, u8)) -> u8 {
+    let ri = (((r as u16) * 5 + 127) / 255).min(5) as u8;
+    let gi = (((g as u16) * 5 + 127) / 255).min(5) as u8;
+    let bi = (((b as u16) * 5 + 127) / 255).min(5) as u8;
+    16 + 36 * ri + 6 * gi + bi
+}
+
+fn lerp_rgb_f32(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let channel = |from: u8, to: u8| {
+        (from as f32 + (to as f32 - from as f32) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (
+        channel(from.0, to.0),
+        channel(from.1, to.1),
+        channel(from.2, to.2),
+    )
+}
+
+fn perceptual_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    let r = srgb_channel_to_linear(r);
+    let g = srgb_channel_to_linear(g);
+    let b = srgb_channel_to_linear(b);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn srgb_channel_to_linear(channel: u8) -> f32 {
+    let value = channel as f32 / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TurnTone;
+    use super::{
+        ansi256_rgb, ansi_chroma_average_luminance, closest_ansi256_from_hex, perceptual_luminance,
+        theme_balanced_ansi256_from_hex, TurnTone,
+    };
 
     #[test]
     fn turn_tone_caps_gradient_at_150_turns() {
@@ -449,5 +577,21 @@ mod tests {
         assert_eq!(max.rgb(), over.rgb());
         assert_ne!(lower.rgb(), max.rgb());
         assert!(max.is_bold());
+    }
+
+    #[test]
+    fn plain_hex_to_ansi256_keeps_legacy_quantization() {
+        assert_eq!(closest_ansi256_from_hex("#ff0000"), 196);
+        assert_eq!(closest_ansi256_from_hex("#0000ff"), 21);
+    }
+
+    #[test]
+    fn theme_balanced_hex_moves_luminance_toward_ansi_chroma_average() {
+        let target = ansi_chroma_average_luminance();
+        let raw = perceptual_luminance(ansi256_rgb(closest_ansi256_from_hex("#150012")));
+        let balanced =
+            perceptual_luminance(ansi256_rgb(theme_balanced_ansi256_from_hex("#150012")));
+
+        assert!((balanced - target).abs() < (raw - target).abs());
     }
 }

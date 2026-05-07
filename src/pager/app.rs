@@ -28,7 +28,9 @@ use super::preferences::{
     load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
 };
 use super::project_metrics::ProjectTouchMetric;
-use super::session_list::{CwdDisplayMode, EnrichedSession, SessionListState, SortColumn};
+use super::session_list::{
+    CwdDisplayMode, EnrichedSession, ProjectFilterTag, SessionListState, SortColumn,
+};
 use super::transcript::TranscriptView;
 use std::path::PathBuf;
 
@@ -38,6 +40,21 @@ pub enum PaneFocus {
     #[default]
     Sessions,
     Transcript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTarget {
+    Sessions,
+    Transcript,
+}
+
+impl SearchTarget {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sessions => "list",
+            Self::Transcript => "transcript",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,14 +149,16 @@ pub struct ResumeApp {
     pub transcript: TranscriptView,
     /// Which pane has focus
     pub focus: PaneFocus,
-    /// Whether search mode is active
-    pub is_searching: bool,
-    /// Search query buffer
+    /// Which independent search surface is currently being edited.
+    pub active_search: Option<SearchTarget>,
+    /// Search query buffer for the active search target.
     pub search_buffer: String,
     /// Whether the transcript preview pane is visible
     pub show_transcript: bool,
     /// Whether list text cells use middle snip markers instead of edge clipping.
     pub snip_columns: bool,
+    /// Whether the turn/token count column is rendered as compact braille.
+    pub braille_tokens: bool,
     /// Last launcher/refresh status shown in the footer
     pub status_message: String,
     /// Cached/async per-session project-touch metric for cwd-column rendering.
@@ -156,10 +175,11 @@ impl ResumeApp {
             sessions: SessionListState::new(sessions, current_cwd),
             transcript: TranscriptView::new(),
             focus: PaneFocus::Sessions,
-            is_searching: false,
+            active_search: None,
             search_buffer: String::new(),
             show_transcript: true,
             snip_columns: true,
+            braille_tokens: false,
             status_message: "Enter: launch  r: refresh".to_string(),
             touched_projects: HashMap::new(),
             display_options_dirty: false,
@@ -176,7 +196,12 @@ impl ResumeApp {
         self.sessions.invalidate_visible_indices();
         self.show_transcript = options.show_transcript;
         self.snip_columns = options.snip_columns;
-        self.transcript.expand_messages = options.expand_messages;
+        self.braille_tokens = options.braille_tokens;
+        self.transcript.body_mode = if options.transcript_body_mode.expands_messages() {
+            options.transcript_body_mode
+        } else {
+            crate::pager::TranscriptBodyMode::from_expand_messages(options.expand_messages)
+        };
         self.transcript.role_filter = options.transcript_role_filter;
         if !self.show_transcript && self.focus == PaneFocus::Transcript {
             self.focus = PaneFocus::Sessions;
@@ -192,7 +217,9 @@ impl ResumeApp {
             sort_direction: self.sessions.sort_direction,
             show_transcript: self.show_transcript,
             snip_columns: self.snip_columns,
-            expand_messages: self.transcript.expand_messages,
+            braille_tokens: self.braille_tokens,
+            transcript_body_mode: self.transcript.body_mode,
+            expand_messages: self.transcript.body_mode.expands_messages(),
             transcript_role_filter: self.transcript.role_filter,
         }
     }
@@ -216,7 +243,7 @@ impl ResumeApp {
         }
 
         // Handle search mode
-        if self.is_searching {
+        if self.active_search.is_some() {
             self.handle_search_key(key);
             return ResumeAction::None;
         }
@@ -289,7 +316,9 @@ impl ResumeApp {
 
             // Mark/unmark selected session as hidden
             KeyCode::Char(ch)
-                if ch == 'H' || (ch == 'h' && key.modifiers.contains(KeyModifiers::SHIFT)) =>
+                if !key.modifiers.contains(KeyModifiers::ALT)
+                    && (ch == 'H'
+                        || (ch == 'h' && key.modifiers.contains(KeyModifiers::SHIFT))) =>
             {
                 let Some((session_key, hidden)) = self.sessions.toggle_selected_hidden() else {
                     return ResumeAction::None;
@@ -301,8 +330,18 @@ impl ResumeApp {
             }
 
             // Toggle hidden sessions
-            KeyCode::Char('h') => {
+            KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::ALT) => {
                 let mode = self.sessions.cycle_hidden_display_mode();
+                self.status_message = format!("hidden display: {}", mode.label());
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Reverse hidden display cycle. Shift-H is already the durable
+            // mark-hidden command, so Alt-H carries the reverse cycle without
+            // stealing the user's existing hide shortcut.
+            KeyCode::Char('h' | 'H') if key.modifiers.contains(KeyModifiers::ALT) => {
+                let mode = self.sessions.cycle_hidden_display_mode_reverse();
                 self.status_message = format!("hidden display: {}", mode.label());
                 self.mark_display_options_dirty();
                 ResumeAction::None
@@ -337,14 +376,14 @@ impl ResumeApp {
             // Contextual snip toggle: list focus controls column middle-snips;
             // transcript focus controls expanded conversation bodies. Tool rows
             // remain clamped regardless so command output never floods the pane.
-            KeyCode::Char('s') => {
+            KeyCode::Char('s' | 'S') => {
                 if self.focus == PaneFocus::Transcript {
-                    let expanded = self.transcript.toggle_message_expansion();
-                    self.status_message = if expanded {
-                        "transcript messages: full".to_string()
+                    let mode = if key.code == KeyCode::Char('S') {
+                        self.transcript.cycle_body_mode_reverse()
                     } else {
-                        "transcript messages: snip".to_string()
+                        self.transcript.cycle_body_mode()
                     };
+                    self.status_message = format!("transcript messages: {}", mode.label());
                 } else {
                     self.snip_columns = !self.snip_columns;
                     self.status_message = if self.snip_columns {
@@ -359,8 +398,28 @@ impl ResumeApp {
 
             // Toggle transcript role filter.
             KeyCode::Char('u') => {
-                self.transcript.toggle_role_filter();
-                self.status_message = "transcript filter changed".to_string();
+                let mode = self.transcript.toggle_role_filter();
+                self.status_message = format!("transcript filter: {}", mode.label());
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Reverse transcript role filter.
+            KeyCode::Char('U') => {
+                let mode = self.transcript.toggle_role_filter_reverse();
+                self.status_message = format!("transcript filter: {}", mode.label());
+                self.mark_display_options_dirty();
+                ResumeAction::None
+            }
+
+            // Toggle compact braille turn/token density column.
+            KeyCode::Char('b') => {
+                self.braille_tokens = !self.braille_tokens;
+                self.status_message = if self.braille_tokens {
+                    "tokens: braille".to_string()
+                } else {
+                    "tokens: raw".to_string()
+                };
                 self.mark_display_options_dirty();
                 ResumeAction::None
             }
@@ -383,10 +442,36 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Search
             KeyCode::Char('/') => {
-                self.is_searching = true;
-                self.search_buffer.clear();
+                self.begin_contextual_search();
+                ResumeAction::None
+            }
+
+            // Focus the list to the selected cwd column scope. In touched mode
+            // the selected row can represent several projects, so the tag
+            // becomes a multi-project filter once the metrics are loaded.
+            KeyCode::Char('o') => {
+                match self.project_filter_from_selection() {
+                    Ok(filter)
+                        if self
+                            .sessions
+                            .project_filter
+                            .as_ref()
+                            .map(|current| current == &filter)
+                            .unwrap_or(false) =>
+                    {
+                        self.sessions.clear_project_filter();
+                        self.status_message = "project filter cleared".to_string();
+                    }
+                    Ok(filter) => {
+                        let label = filter.label.clone();
+                        self.sessions.set_project_filter(filter);
+                        self.status_message = format!("project filter: {label}");
+                    }
+                    Err(message) => {
+                        self.status_message = message;
+                    }
+                }
                 ResumeAction::None
             }
 
@@ -437,23 +522,68 @@ impl ResumeApp {
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
+        let Some(target) = self.active_search else {
+            return;
+        };
         match key.code {
             KeyCode::Enter | KeyCode::Esc => {
-                self.is_searching = false;
+                self.active_search = None;
                 if key.code == KeyCode::Esc {
                     self.search_buffer.clear();
-                    self.sessions.set_filter(String::new());
+                    self.clear_search_target(target);
                 }
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                delete_previous_search_word(&mut self.search_buffer);
+                self.apply_search_buffer_to_target(target);
+            }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                delete_previous_search_word(&mut self.search_buffer);
+                self.apply_search_buffer_to_target(target);
             }
             KeyCode::Backspace => {
                 self.search_buffer.pop();
-                self.sessions.set_filter(self.search_buffer.clone());
+                self.apply_search_buffer_to_target(target);
             }
             KeyCode::Char(c) => {
                 self.search_buffer.push(c);
-                self.sessions.set_filter(self.search_buffer.clone());
+                self.apply_search_buffer_to_target(target);
             }
             _ => {}
+        }
+    }
+
+    pub fn is_searching(&self) -> bool {
+        self.active_search.is_some()
+    }
+
+    fn begin_contextual_search(&mut self) {
+        let target = if self.focus == PaneFocus::Transcript && self.show_transcript {
+            SearchTarget::Transcript
+        } else {
+            SearchTarget::Sessions
+        };
+        self.search_buffer = match target {
+            SearchTarget::Sessions => self.sessions.filter_query.clone(),
+            SearchTarget::Transcript => self.transcript.search_query.clone(),
+        };
+        self.active_search = Some(target);
+        self.status_message = format!("{} search", target.label());
+    }
+
+    fn apply_search_buffer_to_target(&mut self, target: SearchTarget) {
+        match target {
+            SearchTarget::Sessions => self.sessions.set_filter(self.search_buffer.clone()),
+            SearchTarget::Transcript => self
+                .transcript
+                .set_search_filter(self.search_buffer.clone()),
+        }
+    }
+
+    fn clear_search_target(&mut self, target: SearchTarget) {
+        match target {
+            SearchTarget::Sessions => self.sessions.set_filter(String::new()),
+            SearchTarget::Transcript => self.transcript.clear_search_filter(),
         }
     }
 
@@ -463,6 +593,102 @@ impl ResumeApp {
             native_id: session.native_id.clone(),
             session_key: session.session_key.clone(),
         })
+    }
+
+    fn project_filter_from_selection(&mut self) -> Result<ProjectFilterTag, String> {
+        let mode = self.sessions.cwd_display_mode;
+        let Some(session) = self.sessions.selected().cloned() else {
+            return Err("no selected session".to_string());
+        };
+
+        if mode == CwdDisplayMode::TouchedProjects {
+            match self.touched_projects.get(&session.session_key) {
+                Some(TouchedProjectsState::Loaded(projects)) if !projects.is_empty() => {
+                    let paths: Vec<PathBuf> = projects
+                        .iter()
+                        .map(|project| project.path.clone())
+                        .collect();
+                    return Ok(ProjectFilterTag::new(
+                        format!("touch:{}", project_filter_leafs(&paths)),
+                        paths,
+                        true,
+                    ));
+                }
+                Some(TouchedProjectsState::Loaded(_)) | Some(TouchedProjectsState::Empty) => {}
+                Some(TouchedProjectsState::Loading) | None => {
+                    return Err("touched projects loading; press o again".to_string());
+                }
+                Some(TouchedProjectsState::Notice(message)) => {
+                    return Err(format!("touched projects unavailable: {message}"));
+                }
+            }
+        }
+
+        let Some(path) = session.project_path else {
+            return Err("selected session has no project path".to_string());
+        };
+        Ok(ProjectFilterTag::new(
+            project_filter_label(&path, mode),
+            vec![path],
+            false,
+        ))
+    }
+}
+
+fn project_filter_label(path: &PathBuf, mode: CwdDisplayMode) -> String {
+    match mode {
+        CwdDisplayMode::Absolute => format!("abs:{}", path.display()),
+        CwdDisplayMode::Project | CwdDisplayMode::TouchedProjects => {
+            format!("proj:{}", project_leaf(path))
+        }
+        CwdDisplayMode::Relative => format!("cwd:{}", relative_project_path(path)),
+    }
+}
+
+fn project_filter_leafs(paths: &[PathBuf]) -> String {
+    const MAX_LEAFS: usize = 4;
+    let mut leafs: Vec<String> = paths.iter().take(MAX_LEAFS).map(project_leaf).collect();
+    if paths.len() > MAX_LEAFS {
+        leafs.push("…".to_string());
+    }
+    leafs.join(",")
+}
+
+fn project_leaf(path: &PathBuf) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn relative_project_path(path: &PathBuf) -> String {
+    dirs::home_dir()
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|relative| relative.display().to_string())
+        })
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn delete_previous_search_word(buffer: &mut String) {
+    while buffer
+        .chars()
+        .last()
+        .map(char::is_whitespace)
+        .unwrap_or(false)
+    {
+        buffer.pop();
+    }
+
+    while buffer
+        .chars()
+        .last()
+        .map(|ch| !ch.is_whitespace())
+        .unwrap_or(false)
+    {
+        buffer.pop();
     }
 }
 
@@ -714,21 +940,6 @@ where
 /// pane via the backend trait, and restores the session's last-known
 /// desktop workspace when available.
 pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Result<String> {
-    let spec = selection.agent_kind.spec();
-    let resume_cmd = spec.resume_command(&selection.native_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} has no resume command",
-            selection.agent_kind.display_name()
-        )
-    })?;
-    let parts: Vec<&str> = resume_cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Empty resume command for {}",
-            selection.agent_kind.display_name()
-        ));
-    }
-
     let cwd = selection
         .project_path
         .as_ref()
@@ -743,16 +954,36 @@ pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Resul
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    let parts = crate::harness::resume_command_parts(
+        selection.agent_kind,
+        &selection.native_id,
+        Some(&cwd),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no resume command",
+            selection.agent_kind.display_name()
+        )
+    })?;
+    if parts.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Empty resume command for {}",
+            selection.agent_kind.display_name()
+        ));
+    }
+    let part_refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+
     boundary!(
         "harness",
         "resume",
         agent = selection.agent_kind.slug(),
         native_id = selection.native_id.as_str(),
-        cwd = format!("{:?}", cwd)
+        cwd = format!("{:?}", cwd),
+        cmd = parts.join(" ")
     );
 
     let (backend, conn) = crate::backend::detect_current_backend()?;
-    let launched = backend.launch_pane(&conn, &parts, &cwd).await?;
+    let launched = backend.launch_pane(&conn, &part_refs, &cwd).await?;
 
     if let Some(platform_window_id) = launched.platform_window_id {
         let target_workspace = crate::babel_storage::init_db()
@@ -941,7 +1172,9 @@ fn load_harness_transcript(
 }
 
 fn queue_visible_project_metrics(app: &mut ResumeApp, tx: &mpsc::Sender<ProjectLoadResult>) {
-    if app.sessions.cwd_display_mode != CwdDisplayMode::TouchedProjects {
+    if app.sessions.cwd_display_mode != CwdDisplayMode::TouchedProjects
+        && !app.sessions.project_filter_needs_touched_projects()
+    {
         return;
     }
 
@@ -966,6 +1199,8 @@ fn queue_visible_project_metrics(app: &mut ResumeApp, tx: &mpsc::Sender<ProjectL
                         session.agent_kind.display_name()
                     ))
                 });
+            app.sessions
+                .set_touched_projects_for_session(session.session_key.clone(), Vec::new());
             continue;
         }
 
@@ -990,6 +1225,12 @@ fn apply_project_result(app: &mut ResumeApp, result: ProjectLoadResult) {
             session_key,
             projects,
         } => {
+            let paths = projects
+                .iter()
+                .map(|project| project.path.clone())
+                .collect();
+            app.sessions
+                .set_touched_projects_for_session(session_key.clone(), paths);
             app.touched_projects
                 .insert(session_key, TouchedProjectsState::Loaded(projects));
         }
@@ -1002,6 +1243,8 @@ fn apply_project_result(app: &mut ResumeApp, result: ProjectLoadResult) {
                 session_key = session_key.as_str(),
                 message = message.as_str()
             );
+            app.sessions
+                .set_touched_projects_for_session(session_key.clone(), Vec::new());
             app.touched_projects
                 .insert(session_key, TouchedProjectsState::Notice(message));
         }

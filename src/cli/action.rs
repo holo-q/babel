@@ -208,7 +208,9 @@ pub async fn cmd_get_scrollback(
             id
         }
         Target::All => {
-            anyhow::bail!("Cannot get scrollback from all windows. Use a specific window ID or '.' for current.");
+            anyhow::bail!(
+                "Cannot get scrollback from all windows. Use a specific window ID or '.' for current."
+            );
         }
     };
 
@@ -767,7 +769,9 @@ pub async fn cmd_solo(core: &BabelCore, target: Option<&Target>, off: bool) -> R
         }
 
         if pane_ids.len() > 1 {
-            anyhow::bail!("Solo mode requires a single window. Use a specific window ID or '.' for current window.");
+            anyhow::bail!(
+                "Solo mode requires a single window. Use a specific window ID or '.' for current window."
+            );
         }
 
         let pane_id = pane_ids[0];
