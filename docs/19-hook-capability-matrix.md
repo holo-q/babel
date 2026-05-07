@@ -204,19 +204,38 @@ events remain.
 | 28 | Elicitation           | elicitation           | **Mapped** |
 | 29 | ElicitationResult     | elicitation-result    | **Mapped** |
 
-## Codex CLI: 6/6 Mapped
+## Codex CLI: 6/6 Mapped (Confirmed Complete)
 
-| Codex Event       | Babel Canonical | Status     |
-|-------------------|-----------------|------------|
-| SessionStart      | session-start   | **Mapped** |
-| UserPromptSubmit  | prompt          | **Mapped** |
-| PreToolUse        | pre-tool        | **Mapped** |
-| PostToolUse       | post-tool       | **Mapped** |
-| Stop              | stop            | **Mapped** |
-| PermissionRequest | permission      | **Mapped** |
-| *(notify)*        | *(legacy)*      | Separate   |
+Verified against `codex-rs/protocol/src/protocol.rs` (`HookEventName` enum)
+and the official docs. The enum has exactly 6 variants — no expansion has
+occurred. PreCompact/PostCompact is an open feature request (GitHub #17148,
+2026-04-08, unimplemented).
 
-The `notify` mechanism is handled separately via `handle_codex_notify`.
+| Codex Event       | Babel Canonical | Matcher? | Can Block? | Notes                          |
+|-------------------|-----------------|----------|------------|--------------------------------|
+| SessionStart      | session-start   | yes      | yes        | `source` field: startup/resume/clear |
+| UserPromptSubmit  | prompt          | no       | yes        | Matcher ignored by Codex       |
+| PreToolUse        | pre-tool        | yes      | yes        | `apply_patch` aliases Write/Edit |
+| PermissionRequest | notification    | yes      | yes        | Fires AFTER PreToolUse, before approval UI |
+| PostToolUse       | post-tool       | yes      | yes        | Includes failed commands (no separate failure event) |
+| Stop              | stop            | no       | yes        | `decision:"block"` = continuation prompt |
+
+Note: Codex PermissionRequest maps to babel canonical `notification` (not
+`permission`) because it occupies the same semantic slot as CC's Notification
+— a "needs attention" signal. This is intentional divergence from the CC
+mapping where PermissionRequest → `permission`.
+
+The `notify` mechanism (`config.toml` → `notify` key) is orthogonal to hooks.
+Babel handles it separately via `handle_codex_notify` for the legacy
+`agent-turn-complete` signal.
+
+### What Codex Doesn't Have (confirmed absent)
+
+No equivalent of: SessionEnd, Setup, SubagentStart/Stop, PreCompact/PostCompact,
+StopFailure, Notification, PostToolUseFailure, PostToolBatch, TaskCreated/Completed,
+TeammateIdle, InstructionsLoaded, ConfigChange, CwdChanged, FileChanged,
+WorktreeCreate/Remove, Elicitation/ElicitationResult, UserPromptExpansion,
+PermissionDenied. Codex merges tool success/failure into a single PostToolUse.
 
 ## Gemini CLI: 6/6 Mapped
 
