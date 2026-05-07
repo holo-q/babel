@@ -10,6 +10,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 // Re-export submodules
 pub mod action;
+pub mod bridge;
 pub mod doctor;
 pub mod fingerprint;
 pub mod fork;
@@ -1065,6 +1066,23 @@ pub enum Commands {
     /// Run inside a zellij session alongside the plugin.
     #[command(name = "zellij-bridge")]
     ZellijBridge,
+
+    /// Live bridge — subscribe to daemon, push state to tmux/zellij/stdout
+    ///
+    /// Auto-detects target from environment ($TMUX → tmux, $ZELLIJ → zellij).
+    /// Use --tmux, --zellij, or --json to force a specific delivery target.
+    #[command(name = "bridge")]
+    Bridge {
+        /// Force tmux delivery (set-option + refresh-client)
+        #[arg(long, group = "target")]
+        tmux: bool,
+        /// Force zellij delivery (pipe JSON to plugin)
+        #[arg(long, group = "target")]
+        zellij: bool,
+        /// Force JSON to stdout (for debugging/piping)
+        #[arg(long, group = "target")]
+        json: bool,
+    },
 
     /// Check system health and kitty patch status
     ///
