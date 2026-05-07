@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use vtr::checkpoint;
+use vtr::{checkpoint, trace_error};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data Structures
@@ -924,6 +924,7 @@ pub fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
                 if cwd.exists() {
                     return Ok(cwd);
                 }
+                trace_error!("session_cwd_missing", cwd = format!("{:?}", cwd));
             }
         }
 
@@ -932,6 +933,7 @@ pub fn get_session_cwd(session_id: &str) -> Result<PathBuf> {
                 let decoded = project_name.replacen('-', "/", 1).replace('-', "/");
                 let path = PathBuf::from(&decoded);
                 if path.exists() {
+                    checkpoint!("decoded_cwd", path = format!("{:?}", path));
                     return Ok(path);
                 }
             }

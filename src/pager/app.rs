@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use vtr::trace_error;
+use vtr::{boundary, trace_error};
 
 use crate::agent_kind::AgentKind;
 use crate::events::BabelEvent;
@@ -697,6 +697,14 @@ pub async fn launch_harness_resume(selection: &ResumeSelection) -> anyhow::Resul
             }
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    boundary!(
+        "harness",
+        "resume",
+        agent = selection.agent_kind.slug(),
+        native_id = selection.native_id.as_str(),
+        cwd = format!("{:?}", cwd)
+    );
 
     let (backend, conn) = crate::backend::detect_current_backend()?;
     let launched = backend.launch_pane(&conn, &parts, &cwd).await?;
