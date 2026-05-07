@@ -1,51 +1,70 @@
 # Hook Capability Matrix
 
-Babel normalizes harness lifecycle hooks into **13 canonical events**
-(up from 8 in the initial release). Each harness emits some subset
-under its own native event names; Babel's roster (`events.rs`) maps
-native -> canonical so the daemon, paint stream, and storage layer
-never think in provider terms.
+Babel normalizes harness lifecycle hooks into **29 canonical events**.
+Each harness emits some subset under its own native event names;
+Babel's roster (`events.rs`) maps native -> canonical so the daemon,
+paint stream, and storage layer never think in provider terms.
 
-This document tracks two dimensions:
+This document is the reference for:
 
-1. **Harness -> canonical event coverage** (what Babel's roster knows)
-2. **Shipped config -> actually wired** (what `hooks/*` registers)
+1. **All 29 canonical events** -- their effects on state, read, and pulse
+2. **Harness family event arrays** -- size and membership
+3. **Harness x event coverage** -- what's wired, what's roster-only
+4. **Shipped configs** -- what's in the `hooks/` directory
+5. **PulseEffect visual design** -- how each pulse drives the indicator
 
-## Canonical Events
+## Canonical Events -- 29 CC + harness variants
 
-| #  | Canonical        | State Effect | Read Effect | Pulse     | Purpose                                 |
-|----|------------------|-------------|-------------|-----------|------------------------------------------|
-| 1  | `session-start`  | Working     | Preserve    | Session   | Harness session begins / resumes         |
-| 2  | `prompt`         | Working     | MarkRead    | Prompt    | User submits a prompt                    |
-| 3  | `pre-tool`       | ToolRunning | Preserve    | Tool      | Tool is about to execute                 |
-| 4  | `post-tool`      | Working     | Preserve    | Tool      | Tool finished executing                  |
-| 5  | `stop`           | Idle        | MarkUnread  | Finished  | Agent turn ends cleanly                  |
-| 6  | `notification`   | ---         | Preserve    | Attention | System notification / info event         |
-| 7  | `subagent-stop`  | ---         | Preserve    | Finished  | Subagent finished (CC-family)            |
-| 8  | `pre-compact`    | ---         | Preserve    | Compact   | Context compaction about to fire         |
-| 9  | `session-end`    | Idle        | Preserve    | Teardown  | Session teardown / harness exit          |
-| 10 | `subagent-start` | ---         | Preserve    | Session   | Subagent spawned                         |
-| 11 | `stop-failure`   | Idle        | MarkUnread  | Error     | Turn ended due to error (API, rate, auth)|
-| 12 | `post-compact`   | ---         | Preserve    | Compact   | After compaction completes               |
-| 13 | `permission`     | ---         | Preserve    | Attention | Permission dialog shown to user          |
+The CLAUDE_CODE array has 29 entries. All CC-family harnesses
+share this full array. Other families (Codex, Gemini, Cline, Crush)
+map their native events into the same canonical namespace at smaller
+array sizes.
 
-Events 1--8 are the original set. Events 9--13 were added in the
-second wave to close observability gaps around session lifecycle,
-error states, and compaction bookends.
+| #  | Native CC Event       | Canonical           | State       | Read        | Pulse     |
+|----|-----------------------|---------------------|-------------|-------------|-----------|
+| 1  | SessionStart          | `session-start`     | Working     | Preserve    | Session   |
+| 2  | UserPromptSubmit      | `prompt`            | Working     | MarkRead    | Prompt    |
+| 3  | PreToolUse            | `pre-tool`          | ToolRunning | Preserve    | Tool      |
+| 4  | PostToolUse           | `post-tool`         | Working     | Preserve    | Tool      |
+| 5  | Stop                  | `stop`              | Idle        | MarkUnread  | Finished  |
+| 6  | Notification          | `notification`      | --          | Preserve    | Attention |
+| 7  | SubagentStop          | `subagent-stop`     | --          | Preserve    | Finished  |
+| 8  | PreCompact            | `pre-compact`       | --          | Preserve    | Compact   |
+| 9  | SessionEnd            | `session-end`       | Idle        | Preserve    | Teardown  |
+| 10 | SubagentStart         | `subagent-start`    | --          | Preserve    | Session   |
+| 11 | StopFailure           | `stop-failure`      | Idle        | MarkUnread  | Error     |
+| 12 | PostCompact           | `post-compact`      | --          | Preserve    | Compact   |
+| 13 | PermissionRequest     | `permission`        | --          | Preserve    | Attention |
+| 14 | Setup                 | `setup`             | --          | Preserve    | Session   |
+| 15 | UserPromptExpansion   | `prompt-expand`     | --          | Preserve    | Prompt    |
+| 16 | PermissionDenied      | `permission-denied` | --          | Preserve    | Attention |
+| 17 | PostToolUseFailure    | `post-tool-fail`    | Working     | Preserve    | Error     |
+| 18 | PostToolBatch         | `post-tool-batch`   | Working     | Preserve    | Tool      |
+| 19 | TaskCreated           | `task-created`      | --          | Preserve    | Session   |
+| 20 | TaskCompleted         | `task-completed`    | --          | Preserve    | Finished  |
+| 21 | TeammateIdle          | `teammate-idle`     | --          | Preserve    | Attention |
+| 22 | InstructionsLoaded    | `instructions-loaded` | --        | Preserve    | None      |
+| 23 | ConfigChange          | `config-change`     | --          | Preserve    | Attention |
+| 24 | CwdChanged            | `cwd-changed`       | --          | Preserve    | None      |
+| 25 | FileChanged           | `file-changed`      | --          | Preserve    | None      |
+| 26 | WorktreeCreate        | `worktree-create`   | --          | Preserve    | Session   |
+| 27 | WorktreeRemove        | `worktree-remove`   | --          | Preserve    | Teardown  |
+| 28 | Elicitation           | `elicitation`       | --          | Preserve    | Attention |
+| 29 | ElicitationResult     | `elicitation-result` | --         | Preserve    | None      |
+
+Events 1--8 are the original set. Events 9--13 closed observability
+gaps (session lifecycle, errors, compaction bookends). Events 14--29
+complete full coverage of every known Claude Code hook event type.
 
 ## Event Arrays by Harness Family
 
-Each harness family defines a fixed-size event array. CC-family
-harnesses share the 13-event Claude Code array regardless of their
-native event naming.
-
-| Family       | Size | Members                                                                  |
-|--------------|------|--------------------------------------------------------------------------|
-| CLAUDE_CODE  | 13   | Claude, QwenCode, Kimi, FactoryDroid, Cursor, Amp\*, OpenCode\*, Kiro\* |
-| CODEX        | 6    | SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, PermissionRequest |
-| GEMINI       | 6    | SessionStart(new), BeforeTool, AfterTool, BeforeAgent, Stop, PreCompress |
-| CLINE        | 6    | TaskStart, UserPromptSubmit, PreToolUse, PostToolUse, TaskComplete, Notification(new) |
-| CRUSH        | 1    | PreToolUse                                                               |
+| Family      | Size | Harnesses                                                                |
+|-------------|------|--------------------------------------------------------------------------|
+| CLAUDE_CODE | 29   | Claude, QwenCode, Kimi, FactoryDroid, Cursor, Amp\*, OpenCode\*, Kiro\* |
+| CODEX       | 6    | Codex                                                                    |
+| GEMINI      | 6    | Gemini                                                                   |
+| CLINE       | 6    | Cline                                                                    |
+| CRUSH       | 1    | Crush                                                                    |
 
 \* = BridgeRequired (roster mapping exists but no shipped config; bridge adapter needed)
 
@@ -53,136 +72,169 @@ native event naming.
 
 Legend:
 - `+` = in roster AND wired in shipped config
-- `R` = roster-only (no shipped config -- bridge harnesses)
-- `---` = not in roster (harness doesn't emit this)
+- `R` = roster-only (bridge harnesses -- mapping exists, no shipped config)
+- `--` = harness doesn't emit this event
 - `x` = unsupported harness (no hook surface)
 
-| Harness            | Support              | Install          | ses-start | prompt | pre-tool | post-tool | stop | notif | subag-stop | pre-compact | ses-end | subag-start | stop-fail | post-compact | permiss |
-|--------------------|----------------------|------------------|-----------|--------|----------|-----------|------|-------|------------|-------------|---------|-------------|-----------|--------------|---------|
-| **Claude**         | Supported            | AutoJsonSettings | +         | +      | +        | +         | +    | +     | +          | +           | +       | +           | +         | +            | +       |
-| **Codex**          | Supported            | JsonSnippet      | +         | +      | +        | +         | +    | ---   | ---        | ---         | ---     | ---         | ---       | ---          | +       |
-| **FactoryDroid**   | Supported            | JsonSnippet      | +         | +      | +        | +         | +    | +     | +          | +           | +       | +           | +         | +            | +       |
-| **QwenCode**       | Supported            | JsonSnippet      | +         | +      | +        | +         | +    | +     | +          | +           | +       | +           | +         | +            | +       |
-| **Gemini**         | Supported            | JsonSnippet      | +         | ---    | +        | +         | +    | ---   | ---        | +           | ---     | ---         | ---       | ---          | ---     |
-| **Crush**          | Supported            | JsonSnippet      | ---       | ---    | +        | ---       | ---  | ---   | ---        | ---         | ---     | ---         | ---       | ---          | ---     |
-| **Cursor**         | Supported            | JsonSnippet      | +         | +      | +        | +         | +    | +     | +          | +           | +       | +           | +         | +            | +       |
-| **Kimi**           | Supported            | TomlSnippet      | +         | +      | +        | +         | +    | +     | +          | +           | +       | +           | +         | +            | +       |
-| **Cline**          | Supported            | FsSnippet        | +         | +      | +        | +         | +    | +     | ---        | ---         | ---     | ---         | ---       | ---          | ---     |
-| **OpenCode**       | BridgeRequired       | BridgeContract   | R         | R      | R        | R         | R    | R     | R          | R           | R       | R           | R         | R            | R       |
-| **Amp**            | BridgeRequired       | BridgeContract   | R         | R      | R        | R         | R    | R     | R          | R           | R       | R           | R         | R            | R       |
-| **Kiro**           | BridgeRequired       | BridgeContract   | R         | R      | R        | R         | R    | R     | R          | R           | R       | R           | R         | R            | R       |
-| **GitHub Copilot** | Unsupported          | ---              | x         | x      | x        | x         | x    | x     | x          | x           | x       | x           | x         | x            | x       |
-| **RooCode**        | Unsupported          | ---              | x         | x      | x        | x         | x    | x     | x          | x           | x       | x           | x         | x            | x       |
-| **KiloCode**       | Unsupported          | ---              | x         | x      | x        | x         | x    | x     | x          | x           | x       | x           | x         | x            | x       |
-| **Aider**          | Unsupported          | ---              | x         | x      | x        | x         | x    | x     | x          | x           | x       | x           | x         | x            | x       |
-| **Antigravity**    | Unsupported          | ---              | x         | x      | x        | x         | x    | x     | x          | x           | x       | x           | x         | x            | x       |
+Due to the 29-column width, the CC-family harnesses are shown as
+full-coverage rows. Non-CC harnesses list their supported canonicals.
 
-### Support Tiers
+### CC-Family Harnesses (29/29)
 
-| Tier                          | Meaning                                                       |
-|-------------------------------|---------------------------------------------------------------|
-| Supported + AutoJsonSettings  | Babel auto-installs hooks into harness settings.json          |
-| Supported + JsonSnippet       | User copies shipped JSON config into harness settings         |
-| Supported + TomlSnippet       | User copies shipped TOML config into harness settings         |
-| Supported + FsSnippet         | Filesystem-convention reference (Cline reads `.md` rules)     |
-| BridgeRequired                | Roster mapping exists; needs bridge adapter to actually fire  |
-| Unsupported                   | No hook surface exposed by the harness                        |
+All CC-family harnesses cover the complete 29-event array.
 
-### Shipped Configs
+| Harness          | Support        | Install          | Coverage |
+|------------------|----------------|------------------|----------|
+| **Claude**       | Supported      | AutoJsonSettings | 29/29 +  |
+| **FactoryDroid** | Supported      | JsonSnippet      | 29/29 +  |
+| **QwenCode**     | Supported      | JsonSnippet      | 29/29 +  |
+| **Cursor**       | Supported      | JsonSnippet      | 29/29 +  |
+| **Kimi**         | Supported      | TomlSnippet      | 29/29 +  |
+| **OpenCode**     | BridgeRequired | BridgeContract   | 29/29 R  |
+| **Amp**          | BridgeRequired | BridgeContract   | 29/29 R  |
+| **Kiro**         | BridgeRequired | BridgeContract   | 29/29 R  |
 
-| File                | Format | Family      | Events |
-|---------------------|--------|-------------|--------|
-| `hooks/claude.json` | JSON   | CLAUDE_CODE | 13/13  |
-| `hooks/codex.json`  | JSON   | CODEX       | 6/6    |
-| `hooks/factory-droid.json` | JSON | CLAUDE_CODE | 13/13 |
-| `hooks/qwen-code.json` | JSON | CLAUDE_CODE | 13/13  |
-| `hooks/cursor.json` | JSON   | CLAUDE_CODE | 13/13  |
-| `hooks/gemini.json` | JSON   | GEMINI      | 6/6    |
-| `hooks/crush.json`  | JSON   | CRUSH       | 1/1    |
-| `hooks/kimi.toml`   | TOML   | CLAUDE_CODE | 13/13  |
-| `hooks/cline.md`    | FS ref | CLINE       | 6/6    |
+### Non-CC Harnesses
 
-All shipped configs are now at full coverage for their respective
+| Harness          | Support     | Install     | Canonical events covered                                                    |
+|------------------|-------------|-------------|-----------------------------------------------------------------------------|
+| **Codex**        | Supported   | JsonSnippet | session-start, prompt, pre-tool, post-tool, stop, permission (6/6)          |
+| **Gemini**       | Supported   | JsonSnippet | session-start, pre-tool, post-tool, prompt, stop, pre-compact (6/6)         |
+| **Cline**        | Supported   | FsSnippet   | session-start, prompt, pre-tool, post-tool, stop, notification (6/6)        |
+| **Crush**        | Supported   | JsonSnippet | pre-tool (1/1)                                                              |
+
+### Unsupported Harnesses
+
+| Harness            | Status      |
+|--------------------|-------------|
+| **GitHub Copilot** | Unsupported |
+| **RooCode**        | Unsupported |
+| **KiloCode**       | Unsupported |
+| **Aider**          | Unsupported |
+| **Antigravity**    | Unsupported |
+
+No hook surface exposed by these harnesses.
+
+## Support Tiers
+
+| Tier                         | Meaning                                                      |
+|------------------------------|--------------------------------------------------------------|
+| Supported + AutoJsonSettings | Babel auto-installs hooks into harness settings.json         |
+| Supported + JsonSnippet      | User copies shipped JSON config into harness settings        |
+| Supported + TomlSnippet      | User copies shipped TOML config into harness settings        |
+| Supported + FsSnippet        | Filesystem-convention reference (Cline reads `.md` rules)    |
+| BridgeRequired               | Roster mapping exists; needs bridge adapter to actually fire |
+| Unsupported                  | No hook surface exposed by the harness                       |
+
+## Shipped Configs
+
+| File                         | Format | Family      | Events |
+|------------------------------|--------|-------------|--------|
+| `hooks/claude.json`          | JSON   | CLAUDE_CODE | 29/29  |
+| `hooks/factory-droid.json`   | JSON   | CLAUDE_CODE | 29/29  |
+| `hooks/qwen-code.json`       | JSON   | CLAUDE_CODE | 29/29  |
+| `hooks/cursor.json`          | JSON   | CLAUDE_CODE | 29/29  |
+| `hooks/kimi.toml`            | TOML   | CLAUDE_CODE | 29/29  |
+| `hooks/codex.json`           | JSON   | CODEX       | 6/6    |
+| `hooks/gemini.json`          | JSON   | GEMINI      | 6/6    |
+| `hooks/crush.json`           | JSON   | CRUSH       | 1/1    |
+| `hooks/cline.md`             | FS ref | CLINE       | 6/6    |
+
+All shipped configs are at full coverage for their respective
 event arrays. No config gaps remain.
 
-## Claude Code: Full Spec vs Babel Coverage
+## PulseEffect Visual Design
 
-CC emits ~29 hook event types. Babel maps 13 of them (up from 8).
-The remaining 16 unmapped events are listed below as expansion
-candidates, roughly ordered by value.
+Each canonical event carries a PulseEffect that drives the
+indicator's visual response. The pulse determines intensity
+(glow brightness), and optionally ring color and outline state.
 
-| CC Event             | Babel Canonical  | Status         | Notes                                         |
-|----------------------|------------------|----------------|-----------------------------------------------|
-| SessionStart         | session-start    | **Mapped**     |                                               |
-| UserPromptSubmit     | prompt           | **Mapped**     |                                               |
-| PreToolUse           | pre-tool         | **Mapped**     |                                               |
-| PostToolUse          | post-tool        | **Mapped**     |                                               |
-| Stop                 | stop             | **Mapped**     |                                               |
-| Notification         | notification     | **Mapped**     |                                               |
-| SubagentStop         | subagent-stop    | **Mapped**     |                                               |
-| PreCompact           | pre-compact      | **Mapped**     |                                               |
-| SessionEnd           | session-end      | **Mapped**     | New -- drives cleanup without timeout          |
-| SubagentStart        | subagent-start   | **Mapped**     | New -- tracks parallel worker spawns           |
-| StopFailure          | stop-failure     | **Mapped**     | New -- distinguishes clean stop from error     |
-| PostCompact          | post-compact     | **Mapped**     | New -- compaction duration bookend             |
-| PermissionRequest    | permission       | **Mapped**     | New -- permission UX awareness                 |
-| Setup                | ---              | Not mapped     | `--init-only` / maintenance mode               |
-| UserPromptExpansion  | ---              | Not mapped     | Slash command expansion                        |
-| InstructionsLoaded   | ---              | Not mapped     | CLAUDE.md loaded into context                  |
-| PostToolUseFailure   | ---              | Not mapped     | CC splits success/failure; babel merges via post-tool |
-| PostToolBatch        | ---              | Not mapped     | All parallel tool calls resolved               |
-| PermissionDenied     | ---              | Not mapped     | Auto-mode classifier denied a tool             |
-| Elicitation          | ---              | Not mapped     | MCP server requests user input                 |
-| ElicitationResult    | ---              | Not mapped     | User responded to elicitation                  |
-| TeammateIdle         | ---              | Not mapped     | Team agent going idle                          |
-| TaskCreated          | ---              | Not mapped     | TaskCreate tool call                           |
-| TaskCompleted        | ---              | Not mapped     | Task marked completed                          |
-| ConfigChange         | ---              | Not mapped     | Settings file changed during session           |
-| CwdChanged           | ---              | Not mapped     | Working directory changed                      |
-| FileChanged          | ---              | Not mapped     | Watched file changed on disk                   |
-| WorktreeCreate       | ---              | Not mapped     | Worktree being created                         |
-| WorktreeRemove       | ---              | Not mapped     | Worktree being removed                         |
+| Pulse    | Intensity | Ring Color | Outline | Visual Meaning                    |
+|----------|-----------|------------|---------|-----------------------------------|
+| None     | 0.0       | --         | --      | Silent, no visual feedback        |
+| Session  | 0.4       | --         | --      | Gentle glow: session lifecycle    |
+| Prompt   | 0.5       | --         | --      | Moderate glow: user engaged       |
+| Compact  | 0.55      | `#40c0f0`  | yes     | Sustained cyan ring: compacting   |
+| Tool     | 0.65      | --         | --      | Active glow: tool running         |
+| Attention| 0.75      | --         | --      | Bright glow: needs user attention |
+| Error    | 0.85      | --         | --      | Hot glow: something broke         |
+| Finished | 0.9       | --         | --      | Peak flash: turn complete         |
+| Teardown | 0.3       | --         | --      | Dim fade: session ending          |
 
-## Codex CLI: Full Spec vs Babel Coverage
+**Compact is special.** It has sustained ring state via the
+`pane_compacting` HashSet -- when `pre-compact` fires, the ring
+holds at 0.5 minimum intensity with distinct `ring_color` and
+outline until `post-compact` fires and clears the pane from the
+set. All other pulses are momentary bumps that decay naturally.
 
-Codex has 6 event types plus a separate `notify` mechanism.
-All 6 are now mapped and wired.
+## Claude Code: Full Spec -- 29/29 Mapped
 
-| Codex Event       | Babel Canonical | Status      | Notes                                             |
-|-------------------|-----------------|-------------|---------------------------------------------------|
-| SessionStart      | session-start   | **Mapped**  |                                                   |
-| UserPromptSubmit  | prompt          | **Mapped**  |                                                   |
-| PreToolUse        | pre-tool        | **Mapped**  |                                                   |
-| PostToolUse       | post-tool       | **Mapped**  |                                                   |
-| Stop              | stop            | **Mapped**  |                                                   |
-| PermissionRequest | permission      | **Mapped**  |                                                   |
-| *(notify)*        | *(legacy)*      | Separate    | `agent-turn-complete` via `handle_codex_notify`   |
+All 29 known Claude Code hook event types are mapped. No unmapped
+events remain.
 
-## Gemini CLI: Full Spec vs Babel Coverage
+| #  | CC Native             | Babel Canonical       | Status     |
+|----|-----------------------|-----------------------|------------|
+| 1  | SessionStart          | session-start         | **Mapped** |
+| 2  | UserPromptSubmit      | prompt                | **Mapped** |
+| 3  | PreToolUse            | pre-tool              | **Mapped** |
+| 4  | PostToolUse           | post-tool             | **Mapped** |
+| 5  | Stop                  | stop                  | **Mapped** |
+| 6  | Notification          | notification          | **Mapped** |
+| 7  | SubagentStop          | subagent-stop         | **Mapped** |
+| 8  | PreCompact            | pre-compact           | **Mapped** |
+| 9  | SessionEnd            | session-end           | **Mapped** |
+| 10 | SubagentStart         | subagent-start        | **Mapped** |
+| 11 | StopFailure           | stop-failure          | **Mapped** |
+| 12 | PostCompact           | post-compact          | **Mapped** |
+| 13 | PermissionRequest     | permission            | **Mapped** |
+| 14 | Setup                 | setup                 | **Mapped** |
+| 15 | UserPromptExpansion   | prompt-expand         | **Mapped** |
+| 16 | PermissionDenied      | permission-denied     | **Mapped** |
+| 17 | PostToolUseFailure    | post-tool-fail        | **Mapped** |
+| 18 | PostToolBatch         | post-tool-batch       | **Mapped** |
+| 19 | TaskCreated           | task-created          | **Mapped** |
+| 20 | TaskCompleted         | task-completed        | **Mapped** |
+| 21 | TeammateIdle          | teammate-idle         | **Mapped** |
+| 22 | InstructionsLoaded    | instructions-loaded   | **Mapped** |
+| 23 | ConfigChange          | config-change         | **Mapped** |
+| 24 | CwdChanged            | cwd-changed           | **Mapped** |
+| 25 | FileChanged           | file-changed          | **Mapped** |
+| 26 | WorktreeCreate        | worktree-create       | **Mapped** |
+| 27 | WorktreeRemove        | worktree-remove       | **Mapped** |
+| 28 | Elicitation           | elicitation           | **Mapped** |
+| 29 | ElicitationResult     | elicitation-result    | **Mapped** |
 
-Gemini has 6 event types. SessionStart is new to the roster.
+## Codex CLI: 6/6 Mapped
 
-| Gemini Event  | Babel Canonical | Status     | Notes                                          |
-|---------------|-----------------|------------|-------------------------------------------------|
-| SessionStart  | session-start   | **Mapped** | New addition                                    |
-| BeforeTool    | pre-tool        | **Mapped** |                                                 |
-| AfterTool     | post-tool       | **Mapped** |                                                 |
-| BeforeAgent   | prompt          | **Mapped** | Gemini's equivalent to prompt; mapped to stop   |
-| Stop          | stop            | **Mapped** |                                                 |
-| PreCompress   | pre-compact     | **Mapped** | Gemini's name for compaction                    |
+| Codex Event       | Babel Canonical | Status     |
+|-------------------|-----------------|------------|
+| SessionStart      | session-start   | **Mapped** |
+| UserPromptSubmit  | prompt          | **Mapped** |
+| PreToolUse        | pre-tool        | **Mapped** |
+| PostToolUse       | post-tool       | **Mapped** |
+| Stop              | stop            | **Mapped** |
+| PermissionRequest | permission      | **Mapped** |
+| *(notify)*        | *(legacy)*      | Separate   |
 
-## Expansion Priorities
+The `notify` mechanism is handled separately via `handle_codex_notify`.
 
-The 5 highest-value unmapped CC events for future waves:
+## Gemini CLI: 6/6 Mapped
 
-1. **PostToolBatch** --- aggregate signal after parallel tool calls resolve;
-   useful for batch-tool-aware paint states
-2. **PostToolUseFailure** --- CC splits success/failure explicitly; babel
-   currently merges both into `post-tool`, but a dedicated `tool-failure`
-   canonical could drive error-specific paint
-3. **PermissionDenied** --- paired with `permission`, completes the
-   permission lifecycle for UX tracking
-4. **TaskCreated / TaskCompleted** --- task lifecycle for multi-agent
-   orchestration visibility
-5. **Elicitation / ElicitationResult** --- MCP elicitation lifecycle;
-   relevant as MCP adoption grows
+| Gemini Event | Babel Canonical | Status     |
+|--------------|-----------------|------------|
+| SessionStart | session-start   | **Mapped** |
+| BeforeTool   | pre-tool        | **Mapped** |
+| AfterTool    | post-tool       | **Mapped** |
+| BeforeAgent  | prompt          | **Mapped** |
+| Stop         | stop            | **Mapped** |
+| PreCompress  | pre-compact     | **Mapped** |
+
+## Frontier
+
+29/29 CC events are mapped. Codex covers its full 6/6. Gemini and
+Cline cover their known event sets (6/6 each). Crush covers its
+single event (1/1).
+
+There is no remaining unmapped frontier for Claude Code. For Gemini
+and Cline, additional native events may exist that Babel hasn't
+discovered yet, but current coverage matches everything known.

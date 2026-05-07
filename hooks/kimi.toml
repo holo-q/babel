@@ -62,3 +62,83 @@ command = "babel hook stdin post-compact --agent kimi"
 event = "PermissionRequest"
 matcher = ""
 command = "babel hook stdin permission --agent kimi"
+
+[[hooks]]
+event = "Setup"
+matcher = ""
+command = "babel hook stdin setup --agent kimi"
+
+[[hooks]]
+event = "UserPromptExpansion"
+matcher = ""
+command = "babel hook stdin prompt-expand --agent kimi"
+
+[[hooks]]
+event = "PermissionDenied"
+matcher = ""
+command = "babel hook stdin permission-denied --agent kimi"
+
+[[hooks]]
+event = "PostToolUseFailure"
+matcher = ""
+command = "babel hook stdin post-tool-fail --agent kimi"
+
+[[hooks]]
+event = "PostToolBatch"
+matcher = ""
+command = "babel hook stdin post-tool-batch --agent kimi"
+
+[[hooks]]
+event = "TaskCreated"
+matcher = ""
+command = "babel hook stdin task-created --agent kimi"
+
+[[hooks]]
+event = "TaskCompleted"
+matcher = ""
+command = "babel hook stdin task-completed --agent kimi"
+
+[[hooks]]
+event = "TeammateIdle"
+matcher = ""
+command = "babel hook stdin teammate-idle --agent kimi"
+
+[[hooks]]
+event = "InstructionsLoaded"
+matcher = ""
+command = "babel hook stdin instructions-loaded --agent kimi"
+
+[[hooks]]
+event = "ConfigChange"
+matcher = ""
+command = "babel hook stdin config-change --agent kimi"
+
+[[hooks]]
+event = "CwdChanged"
+matcher = ""
+command = "babel hook stdin cwd-changed --agent kimi"
+
+[[hooks]]
+event = "FileChanged"
+matcher = ""
+command = "babel hook stdin file-changed --agent kimi"
+
+[[hooks]]
+event = "WorktreeCreate"
+matcher = ""
+command = "babel hook stdin worktree-create --agent kimi"
+
+[[hooks]]
+event = "WorktreeRemove"
+matcher = ""
+command = "babel hook stdin worktree-remove --agent kimi"
+
+[[hooks]]
+event = "Elicitation"
+matcher = ""
+command = "babel hook stdin elicitation --agent kimi"
+
+[[hooks]]
+event = "ElicitationResult"
+matcher = ""
+command = "babel hook stdin elicitation-result --agent kimi"
