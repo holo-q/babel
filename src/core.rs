@@ -42,10 +42,12 @@ use vtr::trace_error;
 use crate::babel_storage;
 use crate::ipc::{Request, Response};
 use crate::kitty::{self, PaneAddr, PaneSelector};
-use crate::service::state::{BabelState, TerminalInfo};
+use crate::service::state::{BabelState, DaemonReadinessState, TerminalInfo};
 use crate::utility::agent_discovery::AgentPane;
 use crate::utility::claude_storage::{MigrateResult, SessionInfo};
-use crate::utility::ipc::{is_daemon_running, send_request};
+use crate::utility::ipc::{
+    send_request, socket_path, wait_until_daemon_ready, DEFAULT_DAEMON_READY_WAIT,
+};
 use scrollparse::claude::{detect_activity_state, ActivityState};
 
 /// Core API for agent session management
@@ -104,10 +106,28 @@ impl BabelCore {
         prefer_daemon: bool,
         refresh_timeout: Option<Duration>,
     ) -> Self {
-        if prefer_daemon && is_daemon_running().await {
-            debug!("connected to babeld");
-            Self {
-                mode: CoreMode::Connected,
+        if prefer_daemon && socket_path().exists() {
+            match wait_until_daemon_ready(DEFAULT_DAEMON_READY_WAIT).await {
+                Ok(readiness) => {
+                    match readiness.state {
+                        DaemonReadinessState::Ready => debug!("connected to babeld"),
+                        DaemonReadinessState::Warming => {
+                            warn!("babeld is still warming after readiness wait")
+                        }
+                        DaemonReadinessState::Failed => {
+                            warn!("babeld warmup failed; staying on daemon path")
+                        }
+                    }
+                    Self {
+                        mode: CoreMode::Connected,
+                    }
+                }
+                Err(e) => {
+                    warn!("daemon socket is present but readiness wait failed: {e}");
+                    Self {
+                        mode: CoreMode::Connected,
+                    }
+                }
             }
         } else {
             debug!("daemon not available, initializing local state");

@@ -13,6 +13,7 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::instrument;
@@ -23,6 +24,9 @@ use tracing::instrument;
 // import DTOs from `crate::ipc` and only reach into `utility::ipc` for
 // transport (socket_path, create_listener, send_request, ...).
 pub use crate::ipc::{Request, Response, TitleTarget};
+use crate::service::state::{DaemonReadiness, DaemonReadinessState};
+
+pub const DEFAULT_DAEMON_READY_WAIT: Duration = Duration::from_secs(120);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Socket Path
@@ -50,6 +54,15 @@ pub fn socket_path() -> PathBuf {
 /// The fundamental dialogue: speak a query into the tower, await the answer that rises.
 #[tracing::instrument(level = "debug", skip(request), fields(cmd = ?request))]
 pub async fn send_request(request: &Request) -> Result<Response> {
+    let response = send_request_once(request).await?;
+    if !matches!(request, Request::Readiness) && is_warming_response(&response) {
+        wait_until_daemon_ready(DEFAULT_DAEMON_READY_WAIT).await?;
+        return send_request_once(request).await;
+    }
+    Ok(response)
+}
+
+async fn send_request_once(request: &Request) -> Result<Response> {
     let sock_path = socket_path();
 
     let mut stream = UnixStream::connect(&sock_path)
@@ -70,6 +83,37 @@ pub async fn send_request(request: &Request) -> Result<Response> {
         serde_json::from_str(&response_line).context("Failed to parse daemon response")?;
 
     Ok(response)
+}
+
+fn is_warming_response(response: &Response) -> bool {
+    matches!(response, Response::Error { message } if message.starts_with("daemon warming up"))
+}
+
+pub async fn wait_until_daemon_ready(timeout_duration: Duration) -> Result<DaemonReadiness> {
+    let deadline = Instant::now() + timeout_duration;
+
+    loop {
+        match send_request_once(&Request::Readiness).await {
+            Ok(Response::Readiness { readiness }) => {
+                if !matches!(readiness.state, DaemonReadinessState::Warming) {
+                    return Ok(readiness);
+                }
+                if Instant::now() >= deadline {
+                    return Ok(readiness);
+                }
+            }
+            Ok(other) => {
+                anyhow::bail!("unexpected daemon readiness response: {:?}", other);
+            }
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("daemon readiness wait timed out: {e}");
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Check if daemon is running

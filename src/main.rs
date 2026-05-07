@@ -70,6 +70,23 @@ async fn main() -> Result<()> {
         tracing::debug!("debug logging enabled via --debug flag");
     }
 
+    // Daemon startup must not construct a local BabelCore first. That local
+    // fallback can do the exact expensive pane/session scan the daemon is
+    // supposed to own, delaying socket bind and making clients race into
+    // self-served state.
+    if let Commands::Daemon {
+        trace,
+        no_scrollparse,
+    } = &cli.command
+    {
+        let enable_scrollparse = !*no_scrollparse;
+        return if *trace {
+            babel::daemon::run_daemon_traced(enable_scrollparse).await
+        } else {
+            babel::daemon::run_daemon(enable_scrollparse).await
+        };
+    }
+
     if let Commands::MvLog { refs, limit } = &cli.command {
         return cli::mv::cmd_mv_log(refs.clone(), *limit, cli.json);
     }
