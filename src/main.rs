@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
                 | Commands::TmuxSetup
                 | Commands::TmuxStatus
                 | Commands::TmuxPane { .. }
+                | Commands::ZellijBridge
         );
     if show_mode && !cli.json {
         if core.is_connected() {
@@ -206,7 +207,8 @@ async fn main() -> Result<()> {
             recursive,
             context,
             tokens,
-        } => cli::prompts::cmd_prompts(args, recursive, context, tokens, cli.json).await,
+            filter,
+        } => cli::prompts::cmd_prompts(args, recursive, context, tokens, filter, cli.json).await,
 
         Commands::Target => cli::action::cmd_target(cli.json).await,
 
@@ -357,6 +359,9 @@ async fn main() -> Result<()> {
         }
         Commands::TmuxStatus => cli::tmux::cmd_tmux_status().await,
         Commands::TmuxPane { pane_id } => cli::tmux::cmd_tmux_pane(&pane_id).await,
+
+        // ─── Zellij Integration ────────────────────────────────────────────────
+        Commands::ZellijBridge => cli::zellij::cmd_zellij_bridge().await,
 
         // ─── Hook Handlers ──────────────────────────────────────────────────────
         // All 8 Claude Code lifecycle hooks wired here

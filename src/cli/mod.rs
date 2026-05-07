@@ -24,6 +24,7 @@ pub mod resume;
 pub mod table;
 pub mod tmux;
 pub mod wset;
+pub mod zellij;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Target System - Unified window targeting for all action commands
@@ -438,6 +439,7 @@ pub enum Commands {
     ///   babel prompts 50              # Last 50 prompts for cwd
     ///   babel prompts 2d              # Prompts from sessions active in 2d
     ///   babel prompts ./subdir 20     # Last 20 prompts for ./subdir
+    ///   babel prompts --filter tui    # Only prompts containing "tui"
     ///   babel prompts -r . 1w -c 2    # Include two prior transcript rows
     #[command()]
     Prompts {
@@ -456,6 +458,10 @@ pub enum Commands {
         /// Allocate this many approximate tokens of previous transcript context
         #[arg(short = 't', long)]
         tokens: Option<usize>,
+
+        /// Only include prompts containing this string
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// Point-and-click window selection via slop
@@ -1050,6 +1056,15 @@ pub enum Commands {
         /// Tmux pane ID (e.g., "%5" or "5")
         pane_id: String,
     },
+
+    // ─── Zellij Integration ─────────────────────────────────────────────────────
+    /// Start live zellij bridge — pipes state to babel-zellij plugin
+    ///
+    /// Subscribes to the daemon's paint stream and sends JSON state updates
+    /// to the babel-zellij WASM plugin via `zellij pipe --name babel`.
+    /// Run inside a zellij session alongside the plugin.
+    #[command(name = "zellij-bridge")]
+    ZellijBridge,
 
     /// Check system health and kitty patch status
     ///
