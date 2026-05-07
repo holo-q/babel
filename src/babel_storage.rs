@@ -16,7 +16,7 @@
 //! Claude's conversation files to keep the memories clean and independently preservable.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -282,6 +282,32 @@ impl BabelStorage {
                 [],
             )
             .context("Failed to create generated_titles table")?;
+
+        // Title history is Babel's local audit trail for names, separate from
+        // native harness storage. It lets Babel notice /rename drift, feed the
+        // last few names back into the titler for ambience, and remain easy to
+        // uninstall because native transcripts stay the source of truth.
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS title_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    recorded_at INTEGER NOT NULL,
+                    UNIQUE(session_key, title, source)
+                )",
+                [],
+            )
+            .context("Failed to create title_history table")?;
+
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_title_history_session
+                 ON title_history(session_key, recorded_at DESC)",
+                [],
+            )
+            .context("Failed to create title_history session index")?;
 
         // Cross-harness session index: every session that has ever fired a hook
         // or been discovered in native storage gets a row here. Backing store for
@@ -890,6 +916,7 @@ impl BabelStorage {
                 params![session_id, title, now],
             )
             .context("Failed to set generated title")?;
+        insert_title_history(&self.conn, session_id, title, "babel", now)?;
         Ok(())
     }
 
@@ -1249,6 +1276,68 @@ pub fn set_generated_title(conn: &Connection, session_id: &str, title: &str) -> 
         params![session_id, title, now],
     )
     .context("Failed to set generated title")?;
+    insert_title_history(conn, session_id, title, "babel", now)?;
+    Ok(())
+}
+
+/// Record a title observed outside Babel's generator, such as a native /rename.
+pub fn record_title_history(
+    conn: &Connection,
+    session_key: &str,
+    title: &str,
+    source: &str,
+) -> Result<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    insert_title_history(conn, session_key, title, source, now)
+}
+
+/// Most recent distinct title strings for a session, newest first.
+pub fn recent_title_history(
+    conn: &Connection,
+    session_key: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT title
+         FROM title_history
+         WHERE session_key = ?1
+         ORDER BY recorded_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![session_key, limit as i64], |row| row.get(0))?;
+    let mut titles = Vec::new();
+    for row in rows {
+        titles.push(row?);
+    }
+    Ok(titles)
+}
+
+fn insert_title_history(
+    conn: &Connection,
+    session_key: &str,
+    title: &str,
+    source: &str,
+    recorded_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO title_history (session_key, title, source, recorded_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_key, title, source)
+         DO UPDATE SET recorded_at = excluded.recorded_at",
+        params![session_key, title, source, recorded_at],
+    )
+    .context("Failed to record title history")?;
     Ok(())
 }
 
@@ -1459,10 +1548,11 @@ mod tests {
                 .unwrap(),
             Some(projects)
         );
-        assert!(db
-            .get_session_project_cache(session_key, source_path, 11)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_session_project_cache(session_key, source_path, 11)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1489,9 +1579,10 @@ mod tests {
                 .map(|state| state.parsed_bytes),
             Some(4096)
         );
-        assert!(db
-            .get_project_cache_state(session_key, stale_source_path)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_project_cache_state(session_key, stale_source_path)
+                .unwrap()
+                .is_none()
+        );
     }
 }

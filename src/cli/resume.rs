@@ -4,7 +4,7 @@
 //! - `babel resume 3 6 9` - Resume sessions by ls-sessions index
 //! - `babel continue` / `babel c` - Resume most recent non-running session
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use console::style;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
@@ -154,6 +154,18 @@ async fn build_resume_sessions(core: &BabelCore) -> Result<Vec<EnrichedSession>>
                         .ok()
                         .flatten()
                 });
+                if session.has_title {
+                    if let (Some(conn), Some(title)) =
+                        (conn.as_ref(), session.display_name.as_deref())
+                    {
+                        let _ = babel::babel_storage::record_title_history(
+                            conn,
+                            &session_key,
+                            title,
+                            "native",
+                        );
+                    }
+                }
                 EnrichedSession {
                     agent_kind: session.agent_kind,
                     native_id: session.native_id,

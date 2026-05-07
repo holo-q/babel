@@ -68,47 +68,69 @@ impl RollingPromptsPolicy {
     /// record. It deliberately skips debounce/session bookkeeping: explicit
     /// refresh is a direct command, not ambient daemon policy.
     pub async fn generate_from_prompts(&self, prompts: &[String]) -> Result<Option<String>> {
+        self.generate_from_prompts_with_titles(prompts, &[]).await
+    }
+
+    /// Generate from the same distilled prompt stream as `babel prompts`, plus
+    /// local/native title history for naming ambience.
+    pub async fn generate_from_prompts_with_titles(
+        &self,
+        prompts: &[String],
+        prior_titles: &[String],
+    ) -> Result<Option<String>> {
         let Some(api_key) = self.api_key.as_deref() else {
             return Ok(None);
         };
 
-        let prompts = prompts
-            .iter()
-            .rev()
-            .take(self.config.prompt_count)
-            .rev()
-            .cloned()
-            .collect::<Vec<_>>();
+        let prompts = prompt_title_window(
+            prompts,
+            self.config.first_prompt_count,
+            self.config.prompt_count,
+        );
         if prompts.is_empty() {
             return Ok(None);
         }
 
-        self.call_haiku(api_key, &prompts).await.map(Some)
+        self.call_haiku(api_key, &prompts, prior_titles)
+            .await
+            .map(Some)
     }
 
     /// Call Haiku API to generate title
-    async fn call_haiku(&self, api_key: &str, prompts: &[String]) -> Result<String> {
+    async fn call_haiku(
+        &self,
+        api_key: &str,
+        prompts: &[String],
+        prior_titles: &[String],
+    ) -> Result<String> {
         // Format prompts for template (numbered, newest last)
         let prompts_text = prompts
             .iter()
             .enumerate()
-            .map(|(i, p)| {
-                // Truncate long prompts to avoid excessive token usage
-                let truncated = if p.len() > 200 {
-                    format!("{}...", &p[..197])
-                } else {
-                    p.clone()
-                };
-                format!("{}. {}", i + 1, truncated)
-            })
+            .map(|(i, p)| format!("{}. {}", i + 1, p))
             .collect::<Vec<_>>()
             .join("\n");
+        let titles_text = if prior_titles.is_empty() {
+            "(none)".to_string()
+        } else {
+            prior_titles
+                .iter()
+                .enumerate()
+                .map(|(i, title)| format!("{}. {}", i + 1, title))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
         // Substitute into template
-        let prompt = self
+        let mut prompt = self
             .config
             .prompt_template
-            .replace("{prompts}", &prompts_text);
+            .replace("{prompts}", &prompts_text)
+            .replace("{titles}", &titles_text);
+        if !prior_titles.is_empty() && !self.config.prompt_template.contains("{titles}") {
+            prompt =
+                format!("Previous titles for ambience, newest first:\n{titles_text}\n\n{prompt}");
+        }
 
         tracing::debug!(
             prompt_count = prompts.len(),
@@ -243,7 +265,7 @@ impl TitlePolicy for RollingPromptsPolicy {
         );
 
         // Ask Haiku to help distill the essence into a name
-        let title = match self.call_haiku(api_key, &prompts).await {
+        let title = match self.call_haiku(api_key, &prompts, &[]).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
@@ -299,6 +321,21 @@ impl TitlePolicy for RollingPromptsPolicy {
     }
 }
 
+fn prompt_title_window(prompts: &[String], first_count: usize, recent_count: usize) -> Vec<String> {
+    if prompts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let recent_start = prompts.len().saturating_sub(recent_count);
+    for (idx, prompt) in prompts.iter().enumerate() {
+        if idx < first_count || idx >= recent_start {
+            out.push(prompt.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +344,8 @@ mod tests {
     fn make_test_config() -> RollingPromptsConfig {
         RollingPromptsConfig {
             prompt_count: 4,
+            first_prompt_count: 2,
+            title_history_count: 4,
             model: "claude-3-5-haiku-latest".to_string(),
             max_tokens: 32,
             debounce_secs: 5,

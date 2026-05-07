@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -22,11 +22,14 @@ use vtr::{boundary, trace_error};
 use crate::agent_kind::AgentKind;
 use crate::events::BabelEvent;
 use crate::ipc::{Request, Response};
+use crate::title_policy::session_title::{
+    SessionTitleTarget, SessionTitleUpdate, generate_session_title,
+};
 use crate::utility::ipc::socket_path;
 
 use super::demo::DemoMode;
 use super::preferences::{
-    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
+    ResumeDisplayOptions, load_resume_display_options, save_resume_display_options,
 };
 use super::project_metrics::ProjectTouchMetric;
 use super::session_list::{
@@ -79,6 +82,7 @@ pub enum ResumeAction {
         session_key: String,
         hidden: bool,
     },
+    GenerateTitle(SessionTitleTarget),
 }
 
 enum TranscriptLoadResult {
@@ -107,6 +111,11 @@ enum ProjectLoadResult {
 
 enum LaunchResult {
     Success(String),
+    Error(String),
+}
+
+enum TitleGenerationResult {
+    Success(SessionTitleUpdate),
     Error(String),
 }
 
@@ -373,6 +382,22 @@ impl ResumeApp {
                 self.mark_display_options_dirty();
                 ResumeAction::None
             }
+
+            // Generate a durable title for the selected native session.
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .sessions
+                .selected()
+                .cloned()
+                .map(|session| {
+                    ResumeAction::GenerateTitle(SessionTitleTarget {
+                        agent_kind: session.agent_kind,
+                        native_id: session.native_id,
+                        session_key: session.session_key,
+                        project_path: session.project_path,
+                        native_title: session.display_name,
+                    })
+                })
+                .unwrap_or(ResumeAction::None),
 
             // Toggle transcript preview
             KeyCode::Char('t') => {
@@ -779,6 +804,7 @@ where
     let mut last_auto_refresh = Instant::now() - Duration::from_secs(1);
 
     let (launch_tx, mut launch_rx) = mpsc::channel::<LaunchResult>(4);
+    let (title_tx, mut title_rx) = mpsc::channel::<TitleGenerationResult>(4);
     let refocus_ctx = detect_refocus_context();
 
     let mut needs_redraw = true;
@@ -873,6 +899,23 @@ where
                                     app.status_message = format!("hide failed: {e}");
                                 }
                             },
+                            ResumeAction::GenerateTitle(target) => {
+                                let short_id: String = target.native_id.chars().take(8).collect();
+                                app.status_message = format!(
+                                    "generating title {} {short_id}...",
+                                    target.agent_kind.slug()
+                                );
+                                let tx = title_tx.clone();
+                                tokio::spawn(async move {
+                                    let msg = match generate_session_title(target).await {
+                                        Ok(update) => TitleGenerationResult::Success(update),
+                                        Err(e) => TitleGenerationResult::Error(format!(
+                                            "title failed: {e}"
+                                        )),
+                                    };
+                                    let _ = tx.send(msg).await;
+                                });
+                            }
                         }
                         persist_display_options_if_dirty(&mut app);
                         sync_selected_transcript_target(
@@ -909,6 +952,18 @@ where
             match result {
                 LaunchResult::Success(msg) => app.status_message = msg,
                 LaunchResult::Error(msg) => app.status_message = msg,
+            }
+            needs_redraw = true;
+        }
+
+        while let Ok(result) = title_rx.try_recv() {
+            match result {
+                TitleGenerationResult::Success(update) => {
+                    app.sessions
+                        .set_generated_title_by_key(&update.session_key, update.title.clone());
+                    app.status_message = format!("title: {}", update.title);
+                }
+                TitleGenerationResult::Error(msg) => app.status_message = msg,
             }
             needs_redraw = true;
         }

@@ -19,13 +19,13 @@ use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
 use super::demo::DemoMode;
 use super::one_line;
-use super::project_metrics::{workgroup_style_for_path, WorkgroupStyle};
+use super::project_metrics::{WorkgroupStyle, workgroup_style_for_path};
 use super::session_list::{
     CwdDisplayMode, EnrichedSession, SortColumn, SortDirection, VisibleListRow,
 };
 use super::transcript::{
-    distill_prompt_thoughtstream, transcript_message_is_visible, transcript_message_row_count,
-    TranscriptBodyMode, TranscriptRoleFilter,
+    TranscriptBodyMode, TranscriptRoleFilter, distill_prompt_thoughtstream,
+    transcript_message_is_visible, transcript_message_row_count,
 };
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
@@ -761,6 +761,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
             "transcript",
             app.show_transcript,
         );
+        push_status_button(&mut left_spans, &mut left_width, "c-t", "title", false);
         push_status_button(
             &mut left_spans,
             &mut left_width,
@@ -800,7 +801,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let keybinds = if app.is_searching() {
         "enter confirm  esc cancel  c-w/c-bs word"
     } else {
-        "x hide  y yank  r refresh  c cwd  d group  h hidden  s snip  u roles  o focus  b turns  / search  enter launch  q quit"
+        "x hide  y yank  c-t title  r refresh  c cwd  d group  h hidden  s snip  u roles  o focus  b turns  / search  enter launch  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);
@@ -3029,10 +3030,11 @@ mod tests {
     fn group_header_day_splitter_is_dimmed() {
         let line = group_header_line("mt 2026-05-07", 24);
 
-        assert!(line
-            .spans
-            .iter()
-            .all(|span| span.style.add_modifier.contains(Modifier::DIM)));
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
+        );
     }
 
     #[test]
@@ -3259,10 +3261,12 @@ mod tests {
         assert_eq!(palette.assistant_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().bg, Some(Color::Rgb(0, 0, 0)));
-        assert!(!palette
-            .user_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            !palette
+                .user_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
@@ -3274,10 +3278,12 @@ mod tests {
             palette.user_style().bg,
             Some(inverted_rgb_color(normal_text_fg()))
         );
-        assert!(!palette
-            .user_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            !palette
+                .user_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]

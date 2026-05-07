@@ -62,11 +62,13 @@ Controls conversation title generation.
 
 Configuration for the rolling_prompts policy, which uses recent user prompts to generate coherent titles.
 
-- **`prompt_count`** (usize): Number of recent prompts to include. Default: `4`
+- **`prompt_count`** (usize): Number of recent prompts to include. Default: `5`
+- **`first_prompt_count`** (usize): Opening prompts to prepend for session ambience. Default: `2`
+- **`title_history_count`** (usize): Prior local/native titles to include for naming ambience. Default: `4`
 - **`model`** (string): Claude model for title generation. Default: `"claude-3-5-haiku-latest"`
 - **`max_tokens`** (u32): Maximum tokens in response. Default: `32`
 - **`debounce_secs`** (u64): Seconds to wait after last prompt before generating title. Default: `5`
-- **`prompt_template`** (string): Template with `{prompts}` placeholder. See example above.
+- **`prompt_template`** (string): Template with `{prompts}` and optional `{titles}` placeholders. See example above.
 
 ### `[title_policy.storage]`
 

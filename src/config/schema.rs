@@ -105,6 +105,14 @@ pub struct RollingPromptsConfig {
     #[serde(default = "default_prompt_count")]
     pub prompt_count: usize,
 
+    /// Number of opening prompts to prepend for ambience and direction.
+    #[serde(default = "default_first_prompt_count")]
+    pub first_prompt_count: usize,
+
+    /// Number of prior local/native titles to splice into the model prompt.
+    #[serde(default = "default_title_history_count")]
+    pub title_history_count: usize,
+
     /// Claude model to use for title generation
     #[serde(default = "default_model")]
     pub model: String,
@@ -132,6 +140,8 @@ impl Default for RollingPromptsConfig {
     fn default() -> Self {
         Self {
             prompt_count: default_prompt_count(),
+            first_prompt_count: default_first_prompt_count(),
+            title_history_count: default_title_history_count(),
             model: default_model(),
             max_tokens: default_max_tokens(),
             debounce_secs: default_debounce_secs(),
@@ -179,6 +189,14 @@ fn default_title_policy() -> String {
 }
 
 fn default_prompt_count() -> usize {
+    5
+}
+
+fn default_first_prompt_count() -> usize {
+    2
+}
+
+fn default_title_history_count() -> usize {
     4
 }
 
@@ -195,12 +213,15 @@ fn default_debounce_secs() -> u64 {
 }
 
 fn default_prompt_template() -> String {
-    r#"Generate a "project:task" title from these recent user prompts.
-Format: lowercase, colon separator, no quotes (e.g., "babel:title-policy").
+    r#"Generate a compact session title from these user prompts.
+Hard format: lowercase words, 2-5 words, no quotes, no punctuation unless a project slug is useful.
 
 The prompts may be:
 - Unrelated: Use only the latest prompt for the title
 - A stacking sequence: Combine into one coherent work item
+
+Previous titles for ambience, newest first:
+{titles}
 
 Prompts (newest last):
 {prompts}

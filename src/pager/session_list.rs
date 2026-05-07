@@ -3,10 +3,10 @@
 //! Manages the same cross-harness session surface that `ls-sessions` prints,
 //! with pager-only cursor/search state layered on top.
 
+use crate::ActivityState;
 use crate::agent_kind::AgentKind;
 use crate::babel_storage::HookState;
 use crate::session_row::{self, LiveSessionState, SessionRow, SessionRowInput};
-use crate::ActivityState;
 use chrono::{Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -561,6 +561,20 @@ impl SessionListState {
             .find(|session| session.session_key == session_key)
         {
             session.hidden = hidden;
+            self.invalidate_visible_indices();
+        }
+        self.clamp_cursor();
+    }
+
+    /// Update the selected/session-list title after a manual small-model rename.
+    pub fn set_generated_title_by_key(&mut self, session_key: &str, title: String) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.session_key == session_key)
+        {
+            session.generated_title = Some(session_row::sanitize_display(&title, 160));
+            session.has_title = true;
             self.invalidate_visible_indices();
         }
         self.clamp_cursor();
