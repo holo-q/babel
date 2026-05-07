@@ -18,16 +18,16 @@ use crate::session_row::{self, AgeTone, SessionRow, StateKind, TurnTone};
 
 use super::app::{PaneFocus, ResumeApp, SearchTarget, TouchedProjectsState};
 use super::one_line;
-use super::project_metrics::{workgroup_style_for_path, ProjectTouchMetric, WorkgroupStyle};
+use super::project_metrics::{ProjectTouchMetric, WorkgroupStyle, workgroup_style_for_path};
 use super::session_list::{CwdDisplayMode, EnrichedSession, VisibleListRow};
 use super::transcript::{
-    distill_prompt_thoughtstream, transcript_message_is_visible, transcript_message_row_count,
-    TranscriptBodyMode, TranscriptRoleFilter,
+    TranscriptBodyMode, TranscriptRoleFilter, distill_prompt_thoughtstream,
+    transcript_message_is_visible, transcript_message_row_count,
 };
 
 const SELECTION_BG: Color = Color::Rgb(36, 54, 72);
 const TOUCHED_PROJECTS_CWD_MAX_WIDTH: usize = 60;
-const TOKEN_BRAILLE_COLUMN_WIDTH: usize = 3;
+const TURN_BRAILLE_COLUMN_WIDTH: usize = 3;
 const BRAILLE_DOTS: [u8; 8] = [0x01, 0x02, 0x04, 0x40, 0x08, 0x10, 0x20, 0x80];
 
 /// Draw the pager UI
@@ -120,12 +120,6 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let list_height = inner.height as usize;
     let now = unix_now();
 
-    let visible_indices = app.sessions.visible_indices().to_vec();
-    let max_visible_turn_count = visible_indices
-        .iter()
-        .map(|idx| app.sessions.sessions[*idx].turn_count)
-        .max()
-        .unwrap_or(0);
     let visible_rows = app.sessions.visible_rows();
     let selected_display_row = selected_display_row(&visible_rows, app.sessions.cursor);
     let scroll_offset = scroll_offset_for_cursor(
@@ -161,7 +155,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         .collect();
     let measured_widths = RowWidths::measure(
         app.sessions.cwd_display_mode,
-        app.braille_tokens,
+        app.braille_turns,
         viewport_rows
             .iter()
             .map(|rendered| (rendered.idx, &rendered.row, rendered.cwd.measure_width())),
@@ -171,7 +165,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
         Paragraph::new(render_session_header(
             &widths,
             app.sessions.cwd_display_mode,
-            app.braille_tokens,
+            app.braille_turns,
             inner.width as usize,
         )),
         column_header,
@@ -195,8 +189,7 @@ fn draw_session_list(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
                     inner.width as usize,
                     *ordinal == app.sessions.cursor,
                     app.snip_columns,
-                    app.braille_tokens,
-                    max_visible_turn_count,
+                    app.braille_turns,
                 )
             }
         })
@@ -253,7 +246,7 @@ fn render_group_header(label: &str, row_width: usize) -> ListItem<'static> {
 fn render_session_header(
     widths: &RowWidths,
     cwd_display_mode: CwdDisplayMode,
-    braille_tokens: bool,
+    braille_turns: bool,
     row_width: usize,
 ) -> Line<'static> {
     let header_style = Style::default()
@@ -316,7 +309,7 @@ fn render_session_header(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        token_column_label(braille_tokens),
+        turn_column_label(braille_turns),
         widths.turns,
         header_style,
         pad_style,
@@ -357,8 +350,7 @@ fn render_session_item(
     row_width: usize,
     is_selected: bool,
     snip_columns: bool,
-    braille_tokens: bool,
-    max_turn_count: u32,
+    braille_turns: bool,
 ) -> ListItem<'static> {
     ListItem::new(render_session_line(
         rendered,
@@ -366,8 +358,7 @@ fn render_session_item(
         row_width,
         is_selected,
         snip_columns,
-        braille_tokens,
-        max_turn_count,
+        braille_turns,
     ))
 }
 
@@ -377,8 +368,7 @@ fn render_session_line(
     row_width: usize,
     is_selected: bool,
     snip_columns: bool,
-    braille_tokens: bool,
-    max_turn_count: u32,
+    braille_turns: bool,
 ) -> Line<'static> {
     let idx = rendered.idx;
     let row = &rendered.row;
@@ -417,7 +407,10 @@ fn render_session_line(
         selected_bg,
     );
     let turns_style = selected_style(
-        row_style(turn_style(row.turn_tone, row.bright), running),
+        row_style(
+            turn_style(row.turn_tone, row.bright, braille_turns),
+            running,
+        ),
         selected_bg,
     );
     let pad_style = selected_style(Style::default(), selected_bg);
@@ -500,7 +493,7 @@ fn render_session_line(
     push_left_cell(
         &mut spans,
         &mut line_width,
-        &token_cell_text(row.turn_count, max_turn_count, widths.turns, braille_tokens),
+        &turn_cell_text(row.turn_count, widths.turns, braille_turns),
         widths.turns,
         turns_style,
         pad_style,
@@ -654,8 +647,8 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
             &mut left_spans,
             &mut left_width,
             "b",
-            if app.braille_tokens { "braille" } else { "raw" },
-            app.braille_tokens,
+            if app.braille_turns { "braille" } else { "raw" },
+            app.braille_turns,
         );
         push_status_button(
             &mut left_spans,
@@ -717,7 +710,7 @@ fn draw_status_bar(frame: &mut Frame, app: &mut ResumeApp, area: Rect) {
     let keybinds = if app.is_searching() {
         "enter confirm  esc cancel  c-w/c-bs word"
     } else {
-        "x hide  y yank  r refresh  c cwd  d group  h hidden  s snip  u roles  o focus  b tokens  / search  enter launch  q quit"
+        "x hide  y yank  r refresh  c cwd  d group  h hidden  s snip  u roles  o focus  b turns  / search  enter launch  q quit"
     };
     let right = format!("{} ", keybinds);
     let right_width = display_width(&right);
@@ -1148,16 +1141,11 @@ impl RowWidths {
 
     fn measure<'a>(
         cwd_display_mode: CwdDisplayMode,
-        braille_tokens: bool,
+        braille_turns: bool,
         rows: impl Iterator<Item = (usize, &'a SessionRow, usize)>,
     ) -> Self {
-        let mut widths = Self::header_minimums(cwd_display_mode, braille_tokens);
+        let mut widths = Self::header_minimums(cwd_display_mode, braille_turns);
         let rows: Vec<_> = rows.collect();
-        let max_turn_count = rows
-            .iter()
-            .map(|(_, row, _)| row.turn_count)
-            .max()
-            .unwrap_or(0);
 
         for (idx, row, cwd_width) in rows {
             widths.state = widths.state.max(display_width(row.state_icon));
@@ -1167,11 +1155,10 @@ impl RowWidths {
             widths.cwd = widths.cwd.max(cwd_width);
             widths.created_time = widths.created_time.max(display_width(&row.created_time));
             widths.modified_time = widths.modified_time.max(display_width(&row.modified_time));
-            widths.turns = widths.turns.max(display_width(&token_cell_text(
+            widths.turns = widths.turns.max(display_width(&turn_cell_text(
                 row.turn_count,
-                max_turn_count,
-                TOKEN_BRAILLE_COLUMN_WIDTH,
-                braille_tokens,
+                TURN_BRAILLE_COLUMN_WIDTH,
+                braille_turns,
             )));
             widths.title = widths.title.max(display_width(&row.title));
             widths.prompt = widths.prompt.max(display_width(&row.last_prompt));
@@ -1182,7 +1169,7 @@ impl RowWidths {
         widths
     }
 
-    fn header_minimums(cwd_display_mode: CwdDisplayMode, braille_tokens: bool) -> Self {
+    fn header_minimums(cwd_display_mode: CwdDisplayMode, braille_turns: bool) -> Self {
         Self {
             state: 1,
             index: display_width("#"),
@@ -1191,7 +1178,7 @@ impl RowWidths {
             cwd: display_width(cwd_display_mode.column_label()),
             created_time: display_width("ct"),
             modified_time: display_width("mt"),
-            turns: display_width(token_column_label(braille_tokens)),
+            turns: display_width(turn_column_label(braille_turns)),
             title: display_width("thread"),
             prompt: display_width("prompt"),
         }
@@ -1615,38 +1602,31 @@ fn fit_cell_text(text: &str, width: usize, snip: bool) -> String {
     }
 }
 
-fn token_column_label(braille_tokens: bool) -> &'static str {
-    if braille_tokens {
-        "tok"
-    } else {
-        "turns"
-    }
+fn turn_column_label(_braille_turns: bool) -> &'static str {
+    "turns"
 }
 
-fn token_cell_text(
-    turn_count: u32,
-    max_turn_count: u32,
-    column_width: usize,
-    braille_tokens: bool,
-) -> String {
-    if !braille_tokens {
+fn turn_cell_text(turn_count: u32, column_width: usize, braille_turns: bool) -> String {
+    if !braille_turns {
         return if turn_count > 0 {
             turn_count.to_string()
         } else {
             String::new()
         };
     }
-    braille_token_bar(turn_count, max_turn_count, column_width.max(1))
+    braille_turn_bar(turn_count, column_width.max(1))
 }
 
-fn braille_token_bar(turn_count: u32, max_turn_count: u32, width: usize) -> String {
-    if turn_count == 0 || max_turn_count == 0 || width == 0 {
+fn braille_turn_bar(turn_count: u32, width: usize) -> String {
+    if turn_count == 0 || width == 0 {
         return String::new();
     }
 
     let max_dots = width.saturating_mul(8);
-    let filled = (((turn_count as u64) * (max_dots as u64) + (max_turn_count as u64 - 1))
-        / max_turn_count as u64)
+    let max_turns = TurnTone::MAX_GRADIENT_TURNS as u64;
+    let filled = (((turn_count.min(TurnTone::MAX_GRADIENT_TURNS) as u64) * (max_dots as u64)
+        + (max_turns - 1))
+        / max_turns)
         .clamp(1, max_dots as u64) as usize;
     let mut remaining = filled;
     let mut out = String::new();
@@ -2528,10 +2508,10 @@ fn age_style(tone: AgeTone, bright: bool) -> Style {
     }
 }
 
-fn turn_style(tone: TurnTone, bright: bool) -> Style {
+fn turn_style(tone: TurnTone, bright: bool, braille_turns: bool) -> Style {
     let (r, g, b) = tone.rgb();
     let style = Style::default().fg(Color::Rgb(r, g, b));
-    let style = if tone.is_bold() {
+    let style = if tone.is_bold() || braille_turns {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
@@ -2644,16 +2624,16 @@ mod tests {
     }
 
     #[test]
-    fn token_cell_raw_mode_uses_plain_number() {
-        assert_eq!(token_cell_text(54, 100, 3, false), "54");
-        assert_eq!(token_cell_text(0, 100, 3, false), "");
+    fn turn_cell_raw_mode_uses_plain_number() {
+        assert_eq!(turn_cell_text(54, 3, false), "54");
+        assert_eq!(turn_cell_text(0, 3, false), "");
     }
 
     #[test]
-    fn token_cell_braille_mode_uses_maximum_dot_resolution() {
-        assert_eq!(braille_token_bar(8, 8, 1), "⣿");
-        assert_eq!(braille_token_bar(24, 24, 3), "⣿⣿⣿");
-        assert_eq!(display_width(&token_cell_text(12, 24, 3, true)), 3);
+    fn turn_cell_braille_mode_uses_absolute_turn_gradient() {
+        assert_eq!(braille_turn_bar(TurnTone::MAX_GRADIENT_TURNS, 1), "⣿");
+        assert_eq!(braille_turn_bar(TurnTone::MAX_GRADIENT_TURNS, 3), "⣿⣿⣿");
+        assert_eq!(display_width(&turn_cell_text(12, 3, true)), 3);
     }
 
     #[test]
@@ -2801,7 +2781,7 @@ mod tests {
         }
         .fit(60);
 
-        let line = render_session_line(&rendered, &widths, 60, true, true, false, 999);
+        let line = render_session_line(&rendered, &widths, 60, true, true, false);
 
         assert!(line_display_width(&line) <= 60);
     }
@@ -2976,10 +2956,12 @@ mod tests {
         assert_eq!(palette.assistant_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().fg, Some(Color::Rgb(16, 163, 127)));
         assert_eq!(palette.user_style().bg, Some(Color::Rgb(0, 0, 0)));
-        assert!(!palette
-            .user_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            !palette
+                .user_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
@@ -2991,10 +2973,12 @@ mod tests {
             palette.user_style().bg,
             Some(inverted_rgb_color(normal_text_fg()))
         );
-        assert!(!palette
-            .user_style()
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            !palette
+                .user_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]

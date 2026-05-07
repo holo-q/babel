@@ -27,7 +27,8 @@ pub struct ResumeDisplayOptions {
     pub sort_direction: SortDirection,
     pub group_mode: GroupMode,
     pub snip_columns: bool,
-    pub braille_tokens: bool,
+    #[serde(alias = "braille_tokens")]
+    pub braille_turns: bool,
     pub show_transcript: bool,
     pub transcript_body_mode: TranscriptBodyMode,
     /// Legacy persisted field kept only to migrate older preference files.
@@ -46,7 +47,7 @@ impl Default for ResumeDisplayOptions {
             sort_direction: SortDirection::Descending,
             group_mode: GroupMode::None,
             snip_columns: true,
-            braille_tokens: false,
+            braille_turns: false,
             show_transcript: true,
             transcript_body_mode: TranscriptBodyMode::Snip,
             expand_messages: false,
@@ -114,7 +115,7 @@ mod tests {
             sort_direction: SortDirection::Ascending,
             group_mode: GroupMode::CreatedDay,
             snip_columns: false,
-            braille_tokens: true,
+            braille_turns: true,
             show_transcript: false,
             transcript_body_mode: TranscriptBodyMode::Thoughtstream,
             expand_messages: false,
@@ -134,6 +135,19 @@ mod tests {
         assert_eq!(
             load_resume_display_options_from(&path).unwrap(),
             ResumeDisplayOptions::default()
+        );
+    }
+
+    #[test]
+    fn display_options_migrates_legacy_braille_token_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resume-display.json");
+        fs::write(&path, r#"{"braille_tokens": true}"#).unwrap();
+
+        assert!(
+            load_resume_display_options_from(&path)
+                .unwrap()
+                .braille_turns
         );
     }
 }

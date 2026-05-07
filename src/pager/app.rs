@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -25,7 +25,7 @@ use crate::ipc::{Request, Response};
 use crate::utility::ipc::socket_path;
 
 use super::preferences::{
-    load_resume_display_options, save_resume_display_options, ResumeDisplayOptions,
+    ResumeDisplayOptions, load_resume_display_options, save_resume_display_options,
 };
 use super::project_metrics::ProjectTouchMetric;
 use super::session_list::{
@@ -157,8 +157,8 @@ pub struct ResumeApp {
     pub show_transcript: bool,
     /// Whether list text cells use middle snip markers instead of edge clipping.
     pub snip_columns: bool,
-    /// Whether the turn/token count column is rendered as compact braille.
-    pub braille_tokens: bool,
+    /// Whether the turn count column is rendered as compact braille.
+    pub braille_turns: bool,
     /// Last launcher/refresh status shown in the footer
     pub status_message: String,
     /// Cached/async per-session project-touch metric for cwd-column rendering.
@@ -179,7 +179,7 @@ impl ResumeApp {
             search_buffer: String::new(),
             show_transcript: true,
             snip_columns: true,
-            braille_tokens: false,
+            braille_turns: false,
             status_message: "Enter: launch  r: refresh".to_string(),
             touched_projects: HashMap::new(),
             display_options_dirty: false,
@@ -197,7 +197,7 @@ impl ResumeApp {
         self.sessions.invalidate_visible_indices();
         self.show_transcript = options.show_transcript;
         self.snip_columns = options.snip_columns;
-        self.braille_tokens = options.braille_tokens;
+        self.braille_turns = options.braille_turns;
         self.transcript.body_mode = if options.transcript_body_mode.expands_messages() {
             options.transcript_body_mode
         } else {
@@ -219,7 +219,7 @@ impl ResumeApp {
             group_mode: self.sessions.group_mode,
             show_transcript: self.show_transcript,
             snip_columns: self.snip_columns,
-            braille_tokens: self.braille_tokens,
+            braille_turns: self.braille_turns,
             transcript_body_mode: self.transcript.body_mode,
             expand_messages: self.transcript.body_mode.expands_messages(),
             transcript_role_filter: self.transcript.role_filter,
@@ -411,13 +411,13 @@ impl ResumeApp {
                 ResumeAction::None
             }
 
-            // Toggle compact braille turn/token density column.
+            // Toggle compact braille turn-density column.
             KeyCode::Char('b') => {
-                self.braille_tokens = !self.braille_tokens;
-                self.status_message = if self.braille_tokens {
-                    "tokens: braille".to_string()
+                self.braille_turns = !self.braille_turns;
+                self.status_message = if self.braille_turns {
+                    "turns: braille".to_string()
                 } else {
-                    "tokens: raw".to_string()
+                    "turns: raw".to_string()
                 };
                 self.mark_display_options_dirty();
                 ResumeAction::None
