@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin pre-tool --agent codex"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",
@@ -40,6 +51,17 @@
           {
             "type": "command",
             "command": "babel hook stdin stop --agent codex"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin notification --agent codex"
           }
         ]
       }

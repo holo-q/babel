@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "babel hook stdin pre-tool"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",
